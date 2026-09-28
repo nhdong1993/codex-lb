@@ -234,6 +234,7 @@ async def test_routine_rotation_preserves_subscription_and_daily_clock(async_cli
     for rotation in range(2):
         async with SessionLocal() as session:
             account = await session.get(Account, account_id)
+            assert account is not None
             attempted_at = account.subscription_attempted_at
             assert await AccountsRepository(session).rotate_tokens(
                 account_id,
@@ -266,6 +267,7 @@ async def test_snapshot_saved_between_rotation_read_and_write_survives(
     now = utcnow()
     async with SessionLocal() as session:
         source = await SubscriptionRepository(session).claim(account_id, attempted_at=now, cutoff=now)
+        assert source is not None
         if initial_snapshot == "unmatched":
             await session.execute(
                 update(Account)
@@ -303,6 +305,7 @@ async def test_snapshot_saved_between_rotation_read_and_write_survives(
         assert datetime.fromisoformat(data["subscription"]["lastCheckedAt"]).replace(tzinfo=None) == now
     async with SessionLocal() as session:
         account = await session.get(Account, account_id)
+        assert account is not None
         assert account.subscription_attempted_at == now
     await scheduler.SubscriptionRefreshScheduler().refresh_due()
     upstream[0].assert_not_awaited()
@@ -317,6 +320,7 @@ async def test_rotation_does_not_rebind_a_source_replaced_after_read(async_clien
     enc = TokenEncryptor()
     async with SessionLocal() as session:
         account = await session.get(Account, account_id)
+        assert account is not None
         expected = account.refresh_token_encrypted
         original_scalar = session.scalar
 
@@ -361,6 +365,7 @@ async def test_rotation_does_not_authorize_an_unmatched_snapshot(async_client, u
     enc = TokenEncryptor()
     async with SessionLocal() as session:
         account = await session.get(Account, account_id)
+        assert account is not None
         if change == "credential":
             account.access_token_encrypted = enc.encrypt("replacement")
             await session.commit()
@@ -392,6 +397,7 @@ async def test_route_failure_never_sends_direct_request(async_client, upstream):
     upstream[0].assert_not_awaited()
     async with SessionLocal() as session:
         account = await session.get(Account, account_id)
+        assert account is not None
         assert account.status == AccountStatus.ACTIVE
         assert account.subscription_attempted_at is not None
         assert account.subscription_checked_at is None
@@ -423,6 +429,7 @@ async def test_workers_bound_partial_failure_and_own_sessions(async_client, upst
         successful = 0
         for i in range(8):
             a = await session.get(Account, str(i))
+            assert a is not None
             successful += a.subscription_checked_at is not None
         assert successful == 7
 
