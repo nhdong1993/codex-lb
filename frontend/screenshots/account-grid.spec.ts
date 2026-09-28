@@ -344,8 +344,8 @@ for (const mode of ["detail", "list", "grid"] as const) {
               ? 1050
               : 1000,
       });
-      expect(
-        await page.evaluate(
+      await expect.poll(
+        () => page.evaluate(
           () => document.documentElement.scrollWidth <= window.innerWidth,
         ),
       ).toBe(true);
