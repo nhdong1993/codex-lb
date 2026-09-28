@@ -24,20 +24,20 @@ describe("AccountSubscription", () => {
         <AccountSubscription account={account} />
       </AccountClockProvider>,
     );
-    expect(screen.getByText("2m remaining")).toBeInTheDocument();
+    expect(screen.getByText("0d 0h remaining")).toBeInTheDocument();
     expect(screen.getByText("Recorded end date")).toBeInTheDocument();
     expect(screen.getByText("Last checked")).toBeInTheDocument();
     act(() => vi.advanceTimersByTime(60_000));
-    expect(screen.getByText("1m remaining")).toBeInTheDocument();
+    expect(screen.getByText("0d 0h remaining")).toBeInTheDocument();
     act(() => vi.advanceTimersByTime(60_000));
     expect(screen.getByText("Recorded period elapsed")).toBeInTheDocument();
     expect(account.status).toBe("active");
   });
 
   it.each([
-    ["2026-10-15T20:00:00Z", "18d 08h"],
-    ["2026-09-28T15:00:00Z", "01d 03h"],
-    ["2026-09-27T12:59:00Z", "00d 00h"],
+    ["2026-10-15T20:00:00Z", "18d 8h"],
+    ["2026-09-28T15:00:00Z", "1d 3h"],
+    ["2026-09-27T12:59:00Z", "0d 0h"],
     ["2026-09-27T12:00:00Z", "Elapsed"],
     [null, "No data"],
   ])(
@@ -85,9 +85,9 @@ describe("AccountSubscription", () => {
         <AccountSubscription compact account={account} />
       </AccountClockProvider>,
     );
-    expect(screen.getByText("00d 01h")).toBeInTheDocument();
+    expect(screen.getByText("0d 1h")).toBeInTheDocument();
     act(() => vi.advanceTimersByTime(60_000));
-    expect(screen.getByText("00d 00h")).toBeInTheDocument();
+    expect(screen.getByText("0d 0h")).toBeInTheDocument();
     act(() => vi.advanceTimersByTime(59 * 60_000));
     expect(screen.getByText("Elapsed")).toBeInTheDocument();
     expect(screen.getByTestId("account-plan-remaining")).toHaveAttribute(
@@ -108,5 +108,30 @@ describe("AccountSubscription", () => {
     );
     expect(screen.getByText("No data")).toBeInTheDocument();
     expect(screen.queryByText("Recorded end date")).not.toBeInTheDocument();
+  });
+
+  it.each([false, true])("shows the API source and unpadded duration (compact=%s)", (compact) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-28T20:36:34Z"));
+    render(<AccountSubscription compact={compact} account={createAccountSummary({
+      subscription: {
+        activeUntil: "2026-10-04T04:36:34Z",
+        lastCheckedAt: "2026-09-28T20:00:00Z",
+        source: "subscriptions_api",
+      },
+    })} />);
+    if (compact) {
+      expect(screen.getByText("5d 8h")).toHaveAttribute("title", expect.stringContaining("ChatGPT subscription check"));
+    } else {
+      expect(screen.getByText("5d 8h remaining")).toBeInTheDocument();
+      expect(screen.getByText("ChatGPT subscription check")).toBeInTheDocument();
+    }
+  });
+
+  it("labels historical token fallback separately", () => {
+    render(<AccountSubscription account={createAccountSummary({
+      subscription: { activeUntil: null, lastCheckedAt: null, source: "id_token" },
+    })} />);
+    expect(screen.getByText("Saved token (fallback)")).toBeInTheDocument();
   });
 });

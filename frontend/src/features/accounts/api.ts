@@ -46,6 +46,10 @@ export function getAccountSummary(accountId: string) {
   return get(`${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/summary`, AccountSummarySchema);
 }
 
+export function refreshAccountSubscription(accountId: string) {
+  return post(`${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/subscription/refresh`, AccountSummarySchema);
+}
+
 export function importAccount(file: File) {
   const formData = new FormData();
   formData.append("auth_json", file);

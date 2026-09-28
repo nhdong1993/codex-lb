@@ -56,6 +56,7 @@ import {
   formatElapsed,
   formatSlug,
 } from "@/utils/formatters";
+import { planBadgeClass } from "@/utils/plan-badge";
 
 const STATUS_CLASS_MAP: Record<string, string> = {
   ok: "bg-emerald-500/15 text-emerald-700 border-emerald-500/20 hover:bg-emerald-500/20 dark:text-emerald-400",
@@ -78,13 +79,6 @@ const TRANSPORT_CLASS_MAP: Record<string, string> = {
   websocket: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
   automation:
     "bg-indigo-500/15 text-indigo-700 border-indigo-500/20 hover:bg-indigo-500/20 dark:text-indigo-300",
-};
-
-const PLAN_CLASS_MAP: Record<string, string> = {
-  free: "bg-zinc-500/10 text-zinc-700 border-zinc-500/20 hover:bg-zinc-500/15 dark:text-zinc-300",
-  plus: "bg-emerald-500/15 text-emerald-700 border-emerald-500/20 hover:bg-emerald-500/20 dark:text-emerald-400",
-  team: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
-  pro: "bg-violet-500/15 text-violet-700 border-violet-500/20 hover:bg-violet-500/20 dark:text-violet-300",
 };
 
 const REQUEST_KIND_LABELS: Record<string, string> = {
@@ -444,7 +438,7 @@ export function RecentRequestsTable({
                     {planType ? (
                       <Badge
                         variant="outline"
-                        className={PLAN_CLASS_MAP[planType] ?? PLAN_CLASS_MAP.free}
+                        className={planBadgeClass(planType)}
                       >
                         {planLabel}
                       </Badge>

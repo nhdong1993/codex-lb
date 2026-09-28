@@ -124,3 +124,11 @@ and the `treat-usage-limit-as-quota-exhaustion` change for the precise scenarios
 A code-less upstream HTTP 429 indicates short-lived account saturation, not confirmed quota exhaustion. A separate local burst deadline steers fresh movable traffic away for 5–30 seconds (upstream Retry-After is bounded), without changing persisted account status, normal cooldown, or the overload-isolation window. For example, fresh traffic prefers B while A is bursting, but an established sticky/file/response owner on A is retained. A single eligible account remains usable.
 
 The burst signal is recorded immediately even for keyed streams; account-health penalties still use their existing settlement ordering, and deferred writes do not restart a completed burst cooldown. Restarting a replica clears the advisory signal; other replicas may have different evidence. No operator setting or schema change is introduced. Coded rate-limit and quota errors retain their existing handling. See [spec.md](spec.md).
+
+## Accounts plan filter and quick routing
+
+The Accounts plan filter is derived from stored plan values in the loaded summaries. It combines with search and status, resets overview pagination, and stays selected when switching Detail/List/Grid. It does not send upstream requests. For example, selecting Prolite and Active limits all three views to active Prolite accounts.
+
+List rows have independent native buttons for management, Burn First and subscription refresh. The flame button shows whether `burn_first` is saved; enabling it sets `burn_first`, and disabling it sets `normal`. Enabling it from `preserve` intentionally replaces that policy. Read-only viewers and requests already pending cannot activate the toggle; reauthentication-required and deactivated accounts remain disabled. A failed update preserves the displayed saved policy and reports the existing mutation error.
+
+Plan badges share the request-log palette: Plus emerald, Team sky, Pro violet, Prolite amber and Promax fuchsia. Unrecognized values keep their label with a neutral badge. These styles do not change plan capacity or routing eligibility.

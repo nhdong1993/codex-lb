@@ -27,6 +27,9 @@
   "accounts.subscription.remaining": "{{duration}} remaining",
   "accounts.subscription.until": "Recorded end date",
   "accounts.subscription.checked": "Last checked",
+  "accounts.subscription.source": "Source",
+  "accounts.subscription.apiSource": "ChatGPT subscription check",
+  "accounts.subscription.tokenSource": "Saved token (fallback)",
   "accounts.subscription.recordedHint": "Renewal may extend this recorded period.",
   "accounts.subscription.unknownHint": "No subscription end date is available. Token expiry is separate.",
   "accounts.grid.viewMode": "Account view",
@@ -1717,5 +1720,14 @@
   "accounts.toasts.resetCreditUnconfirmed": "Reset outcome is not confirmed. Check the account before trying again.",
   "accounts.toasts.resetCreditRefreshPending": "Reset sent; account data is still updating.",
   "accounts.actions.resetPending": "Reset pending…",
-  "accounts.toasts.resetCreditNoReset": "The credit was redeemed, but no quota window was reset."
+  "accounts.toasts.resetCreditNoReset": "The credit was redeemed, but no quota window was reset.",
+  "accounts.list.allPlans": "All plans",
+  "accounts.list.planFilterAria": "Filter accounts by plan",
+  "accounts.list.planPlaceholder": "Filter by plan",
+  "accounts.listOverview.toggleBurnFirst": "Toggle Burn First for {{account}}",
+  "accounts.subscription.refresh": "Refresh subscription",
+  "accounts.subscription.refreshFor": "Refresh subscription for {{account}}",
+  "accounts.toasts.subscriptionRefreshed": "Subscription refreshed",
+  "accounts.toasts.subscriptionRefreshFailed": "Subscription refresh failed; the previous result was preserved.",
+  "accounts.listOverview.detailsFor": "View details for {{account}}"
 }

@@ -134,6 +134,8 @@ describe("AccountsPage", () => {
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
+      subscriptionRefreshMutation: idleMutation(),
+      subscriptionRefreshingAccountIds: [],
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 
@@ -156,7 +158,7 @@ describe("AccountsPage", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "List view" }));
     expect(screen.queryByTestId("accounts-inline-detail")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /API First/ }));
+    await user.click(screen.getByRole("button", { name: "View details for API First" }));
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByRole("heading", { name: "API First" })).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Close" }));
@@ -188,6 +190,8 @@ describe("AccountsPage", () => {
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
+      subscriptionRefreshMutation: idleMutation(),
+      subscriptionRefreshingAccountIds: [],
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 
@@ -232,6 +236,8 @@ describe("AccountsPage", () => {
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
+      subscriptionRefreshMutation: idleMutation(),
+      subscriptionRefreshingAccountIds: [],
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 
@@ -289,6 +295,8 @@ describe("AccountsPage", () => {
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
+      subscriptionRefreshMutation: idleMutation(),
+      subscriptionRefreshingAccountIds: [],
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 
@@ -298,7 +306,7 @@ describe("AccountsPage", () => {
       </MemoryRouter>,
     );
 
-    await user.click(screen.getByRole("button", { name: /Resettable/ }));
+    await user.click(screen.getByRole("button", { name: /^Resettable/ }));
     await user.click(screen.getByRole("button", { name: "Reset usage" }));
 
     const dialog = await screen.findByRole("alertdialog", { name: "Reset usage" });
@@ -353,6 +361,8 @@ describe("AccountsPage", () => {
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
+      subscriptionRefreshMutation: idleMutation(),
+      subscriptionRefreshingAccountIds: [],
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 

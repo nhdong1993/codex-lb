@@ -25,6 +25,8 @@ import type {
 } from "@/features/settings/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
+import { Badge } from "@/components/ui/badge";
+import { planBadgeClass } from "@/utils/plan-badge";
 
 export type AccountDetailProps = {
   account: AccountSummary | null;
@@ -53,6 +55,8 @@ export type AccountDetailProps = {
   resetCredits?: AccountUsageResetCredits | null;
   resetCreditsLoading?: boolean;
   resetCreditsUnavailable?: boolean;
+  onSubscriptionRefresh?: (accountId: string) => void;
+  subscriptionRefreshing?: boolean;
 };
 
 export function AccountDetail({
@@ -79,6 +83,8 @@ export function AccountDetail({
   resetCredits = null,
   resetCreditsLoading = false,
   resetCreditsUnavailable = false,
+  onSubscriptionRefresh,
+  subscriptionRefreshing = false,
 }: AccountDetailProps) {
   const { t } = useTranslation();
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
@@ -149,7 +155,8 @@ export function AccountDetail({
           </p>
         ) : null}
         <p className="mt-0.5 text-xs text-muted-foreground">
-          {workspaceLabel} | {formatSlug(account.planType)}{seatLabel}
+          <Badge variant="outline" className={planBadgeClass(account.planType)}>{formatSlug(account.planType)}</Badge>
+          {" · "}{workspaceLabel}{seatLabel}
         </p>
       </div>
 
@@ -163,7 +170,7 @@ export function AccountDetail({
           onTestEndpoint={onProxyEndpointTest}
         />
       ) : null}
-      <AccountSubscription account={account} />
+      <AccountSubscription account={account} onRefresh={onSubscriptionRefresh} refreshing={subscriptionRefreshing} refreshDisabled={busy || readOnly} />
       <AccountUsagePanel
         account={account}
         trends={trends}

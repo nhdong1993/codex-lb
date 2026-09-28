@@ -73,7 +73,7 @@ describe("AccountListOverviewRow", () => {
       "Plus",
       "Active",
       "Reset (3)",
-      "05d 00h",
+      "5d 0h",
       "5h",
     ]) {
       expect(screen.getByText(label)).toBeInTheDocument();
@@ -124,6 +124,32 @@ describe("AccountListOverviewRow", () => {
     );
     expect(screen.getByText("Private account")).not.toHaveClass("privacy-blur");
     expect(screen.getByText("primary@example.com")).toHaveClass("privacy-blur");
+  });
+
+  it("toggles Burn First and refreshes subscription without opening details", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onRoutingPolicyChange = vi.fn();
+    const onSubscriptionRefresh = vi.fn();
+    const account = createAccountSummary({ displayName: "Runner", routingPolicy: "normal", planType: "prolite" });
+    const props = { selected: false, onSelect, onRoutingPolicyChange, onSubscriptionRefresh };
+    const view = render(<AccountListOverviewRow {...props} account={account} />);
+    const toggle = screen.getByRole("button", { name: "Toggle Burn First for Runner" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await user.click(toggle);
+    expect(onRoutingPolicyChange).toHaveBeenLastCalledWith(account.accountId, "burn_first");
+    expect(onSelect).not.toHaveBeenCalled();
+    view.rerender(<AccountListOverviewRow {...props} account={{ ...account, routingPolicy: "burn_first" }} />);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    toggle.focus();
+    await user.keyboard("{Enter}");
+    expect(onRoutingPolicyChange).toHaveBeenLastCalledWith(account.accountId, "normal");
+    await user.click(screen.getByRole("button", { name: "Refresh subscription for Runner" }));
+    expect(onSubscriptionRefresh).toHaveBeenCalledWith(account.accountId);
+    expect(onSelect).not.toHaveBeenCalled();
+    view.rerender(<AccountListOverviewRow {...props} account={account} readOnly />);
+    expect(toggle).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Refresh subscription for Runner" })).toBeDisabled();
   });
 
   it("masks an email title and shows it only once", () => {

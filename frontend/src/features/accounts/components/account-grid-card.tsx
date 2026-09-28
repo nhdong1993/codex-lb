@@ -22,7 +22,12 @@ export function AccountGridCard(props: AccountListItemProps) {
       className="flex min-w-0 flex-col gap-3 rounded-xl border bg-card p-3"
     >
       <AccountListItem {...props} showQuota={false} />
-      <AccountSubscription account={account} />
+      <AccountSubscription
+        account={account}
+        onRefresh={props.onSubscriptionRefresh}
+        refreshing={props.subscriptionRefreshing}
+        refreshDisabled={props.readOnly}
+      />
       <AccountUsagePanel
         account={account}
         resetCredits={{ availableCount: account.availableResetCredits ?? 0 }}

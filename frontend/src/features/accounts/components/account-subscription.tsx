@@ -1,3 +1,4 @@
+import { RefreshCw } from "lucide-react";
 import {
   createContext,
   useContext,
@@ -7,6 +8,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 
+import { Button } from "@/components/ui/button";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { cn } from "@/lib/utils";
@@ -26,9 +28,15 @@ export function AccountClockProvider({ children }: { children: ReactNode }) {
 export function AccountSubscription({
   account,
   compact = false,
+  onRefresh,
+  refreshing = false,
+  refreshDisabled = false,
 }: {
   account: AccountSummary;
   compact?: boolean;
+  onRefresh?: (accountId: string) => void;
+  refreshing?: boolean;
+  refreshDisabled?: boolean;
 }) {
   const { t } = useTranslation();
   const [mountedAt] = useState(Date.now);
@@ -39,30 +47,40 @@ export function AccountSubscription({
   const known = Number.isFinite(endMs);
   const remaining = endMs - now;
   const checked = account.subscription?.lastCheckedAt;
-  const duration =
-    remaining >= 86_400_000
-      ? t("formatters.duration.daysHours", {
-          days: Math.floor(remaining / 86_400_000),
-          hours: Math.floor(remaining / 3_600_000) % 24,
-        })
-      : remaining >= 3_600_000
-        ? t("formatters.duration.hoursMinutes", {
-            hours: Math.floor(remaining / 3_600_000),
-            minutes: Math.floor(remaining / 60_000) % 60,
-          })
-        : t("formatters.duration.minutes", {
-            count: Math.max(1, Math.ceil(remaining / 60_000)),
-          });
+  const duration = `${Math.floor(Math.max(0, remaining) / 86_400_000)}d ${Math.floor(Math.max(0, remaining) / 3_600_000) % 24}h`;
+  const source = account.subscription?.source;
+  const sourceLabel = source
+    ? t(source === "subscriptions_api"
+        ? "accounts.subscription.apiSource"
+        : "accounts.subscription.tokenSource")
+    : null;
+  const refreshButton = onRefresh ? (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-xs"
+      className="pointer-events-auto relative z-10 ml-1"
+      aria-label={t("accounts.subscription.refreshFor", { account: account.displayName || account.email })}
+      title={t("accounts.subscription.refresh")}
+      disabled={refreshDisabled || refreshing || ["free", "unknown"].includes(account.planType.toLowerCase()) || ["deactivated", "reauth_required"].includes(account.status)}
+      onClick={(event) => {
+        event.stopPropagation();
+        onRefresh(account.accountId);
+      }}
+    >
+      <RefreshCw className={cn("size-3", refreshing && "animate-spin")} aria-hidden="true" />
+    </Button>
+  ) : null;
 
   if (compact) {
-    const shortDuration = `${String(Math.floor(Math.max(0, remaining) / 86_400_000)).padStart(2, "0")}d ${String(Math.floor(Math.max(0, remaining) / 3_600_000) % 24).padStart(2, "0")}h`;
     const summary = !known
       ? t("accounts.subscription.unknown")
       : remaining <= 0
         ? t("accounts.subscription.elapsed")
-        : t("accounts.subscription.remaining", { duration: shortDuration });
+        : t("accounts.subscription.remaining", { duration });
     const description = [
       `${t("accounts.subscription.title")}: ${summary}`,
+      sourceLabel ? `${t("accounts.subscription.source")}: ${sourceLabel}` : null,
       known
         ? `${t("accounts.subscription.until")}: ${formatDateTimeInline(end, dateFormat)}`
         : null,
@@ -78,23 +96,26 @@ export function AccountSubscription({
       .filter(Boolean)
       .join("\n");
     return (
-      <span
-        data-testid="account-plan-remaining"
-        className={cn(
-          "whitespace-nowrap text-[11px] font-medium tabular-nums",
-          known &&
-            remaining <= 3 * 86_400_000 &&
-            "text-amber-600 dark:text-amber-400",
-        )}
-        title={description}
-        aria-label={description}
-      >
-        {!known
-          ? t("accounts.subscription.unknown")
-          : remaining <= 0
-            ? t("accounts.subscription.elapsedShort")
-            : shortDuration}
-      </span>
+      <>
+        <span
+          data-testid="account-plan-remaining"
+          className={cn(
+            "pointer-events-auto whitespace-nowrap text-[11px] font-medium tabular-nums",
+            known &&
+              remaining <= 3 * 86_400_000 &&
+              "text-amber-600 dark:text-amber-400",
+          )}
+          title={description}
+          aria-label={description}
+        >
+          {!known
+            ? t("accounts.subscription.unknown")
+            : remaining <= 0
+              ? t("accounts.subscription.elapsedShort")
+              : duration}
+        </span>
+        {refreshButton}
+      </>
     );
   }
 
@@ -107,22 +128,31 @@ export function AccountSubscription({
         <h3 className="text-xs font-semibold text-muted-foreground">
           {t("accounts.subscription.title")}
         </h3>
-        <span
-          className={cn(
-            "text-sm font-semibold tabular-nums",
-            known &&
-              remaining <= 3 * 86_400_000 &&
-              "text-amber-600 dark:text-amber-400",
-          )}
-        >
-          {!known
-            ? t("accounts.subscription.unknown")
-            : remaining <= 0
-              ? t("accounts.subscription.elapsed")
-              : t("accounts.subscription.remaining", { duration })}
-        </span>
+        <div className="flex items-center gap-1">
+          <span
+            className={cn(
+              "text-sm font-semibold tabular-nums",
+              known &&
+                remaining <= 3 * 86_400_000 &&
+                "text-amber-600 dark:text-amber-400",
+            )}
+          >
+            {!known
+              ? t("accounts.subscription.unknown")
+              : remaining <= 0
+                ? t("accounts.subscription.elapsed")
+                : t("accounts.subscription.remaining", { duration })}
+          </span>
+          {refreshButton}
+        </div>
       </div>
       <dl className="space-y-1 text-xs text-muted-foreground">
+        {sourceLabel ? (
+          <div className="flex flex-wrap justify-between gap-x-2">
+            <dt>{t("accounts.subscription.source")}</dt>
+            <dd>{sourceLabel}</dd>
+          </div>
+        ) : null}
         {known ? (
           <div className="flex flex-wrap justify-between gap-x-2">
             <dt>{t("accounts.subscription.until")}</dt>

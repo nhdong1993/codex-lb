@@ -93,6 +93,8 @@ function AccountsPageContent() {
     updateMutation,
     deleteMutation,
     routingPolicyMutation,
+    subscriptionRefreshMutation,
+    subscriptionRefreshingAccountIds,
     exportAuthMutation,
   } = useAccounts();
   const { settingsQuery } = useSettings();
@@ -180,7 +182,6 @@ function AccountsPageContent() {
     usageResetMutation.isPending ||
     limitWarmupMutation.isPending ||
     deleteMutation.isPending ||
-    routingPolicyMutation.isPending ||
     exportAuthMutation.isPending ||
     updateMutation.isPending ||
     accountBindingMutation.isPending ||
@@ -196,6 +197,7 @@ function AccountsPageContent() {
     getErrorMessageOrNull(limitWarmupMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(routingPolicyMutation.error) ||
+    getErrorMessageOrNull(subscriptionRefreshMutation.error) ||
     getErrorMessageOrNull(exportAuthMutation.error) ||
     getErrorMessageOrNull(updateMutation.error) ||
     getErrorMessageOrNull(settingsQuery.error) ||
@@ -207,7 +209,7 @@ function AccountsPageContent() {
     <AccountDetail
       account={selectedAccount}
       showAccountId={selectedAccount?.isEmailDuplicate === true}
-      busy={mutationBusy}
+      busy={mutationBusy || routingPolicyMutation.isPending}
       readOnly={!canWrite}
       onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
       onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
@@ -262,6 +264,8 @@ function AccountsPageContent() {
       resetCredits={resetCreditsQuery.data?.rateLimitResetCredits ?? null}
       resetCreditsLoading={resetCreditsQuery.isFetching}
       resetCreditsUnavailable={!!resetCreditsQuery.error}
+      onSubscriptionRefresh={(accountId) => void subscriptionRefreshMutation.mutateAsync(accountId).catch(() => null)}
+      subscriptionRefreshing={selectedAccount != null && subscriptionRefreshingAccountIds.includes(selectedAccount.accountId)}
     />
   );
 
@@ -349,6 +353,12 @@ function AccountsPageContent() {
                   oauthDialog.show();
                 }}
                 readOnly={!canWrite}
+                onRoutingPolicyChange={(accountId, routingPolicy) =>
+                  void routingPolicyMutation.mutateAsync({ accountId, routingPolicy }).catch(() => null)
+                }
+                routingPolicyBusy={routingPolicyMutation.isPending || mutationBusy}
+                onSubscriptionRefresh={(accountId) => void subscriptionRefreshMutation.mutateAsync(accountId).catch(() => null)}
+                subscriptionRefreshingAccountIds={subscriptionRefreshingAccountIds}
               />
             </div>
           </div>

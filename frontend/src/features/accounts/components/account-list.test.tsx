@@ -7,6 +7,31 @@ import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { createAccountSummary } from "@/test/mocks/factories";
 
 describe("AccountList", () => {
+  it("combines plan, status and search filters across all view modes", async () => {
+    const user = userEvent.setup();
+    const accounts = [
+      createAccountSummary({ accountId: "lite", displayName: "Lite runner", planType: "prolite" }),
+      createAccountSummary({ accountId: "max", displayName: "Max runner", planType: "promax" }),
+      createAccountSummary({ accountId: "paused", displayName: "Paused runner", planType: "prolite", status: "paused" }),
+    ];
+    const props = { accounts, selectedAccountId: null, onSelect: vi.fn(), onOpenImport: vi.fn(), onOpenOauth: vi.fn() };
+    const view = render(<AccountList {...props} viewMode="list" />);
+    await user.click(screen.getByRole("combobox", { name: "Filter accounts by plan" }));
+    await user.click(screen.getByRole("option", { name: "Prolite" }));
+    expect(screen.queryByText("Max runner")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("account-list-overview-row")).toHaveLength(2);
+    await user.click(screen.getByRole("combobox", { name: "Filter accounts by status" }));
+    await user.click(screen.getByRole("option", { name: "Active" }));
+    expect(screen.getAllByTestId("account-list-overview-row")).toHaveLength(1);
+    for (const viewMode of ["grid", "detail"] as const) {
+      view.rerender(<AccountList {...props} viewMode={viewMode} />);
+      expect(screen.getByText("Lite runner")).toBeInTheDocument();
+      expect(screen.queryByText("Paused runner")).not.toBeInTheDocument();
+      expect(screen.queryByText("Max runner")).not.toBeInTheDocument();
+    }
+    await user.type(screen.getByPlaceholderText("Search accounts..."), "absent");
+    expect(screen.getByText("No matching accounts")).toBeInTheDocument();
+  });
   it("bounds grid rendering, navigates pages, and resets pagination when filtering", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
@@ -41,7 +66,7 @@ describe("AccountList", () => {
     const account = createAccountSummary({ subscription: { activeUntil: "2026-01-19T20:00:00Z", lastCheckedAt: null } });
     const props = { accounts: [account], selectedAccountId: null, onSelect: () => {}, onOpenImport: () => {}, onOpenOauth: () => {} };
     const view = render(<AccountList {...props} viewMode="detail" />);
-    const remaining = screen.getByText("18d 08h");
+    const remaining = screen.getByText("18d 8h");
     expect(remaining.previousElementSibling).toHaveTextContent("Active");
     expect(screen.queryByText("18d 8h remaining")).not.toBeInTheDocument();
     view.rerender(<AccountList {...props} viewMode="grid" />);
@@ -103,7 +128,7 @@ describe("AccountList", () => {
     expect(screen.queryByText("primary@example.com")).not.toBeInTheDocument();
     expect(screen.getByText("secondary@example.com")).toBeInTheDocument();
 
-    await user.click(screen.getByText("secondary@example.com"));
+    await user.click(screen.getByRole("button", { name: "View details for Secondary" }));
     expect(onSelect).toHaveBeenCalledWith("acc-2");
   });
 

@@ -11,6 +11,7 @@ import {
   useAccountUsageResetCredits,
 } from "@/features/accounts/hooks/use-accounts";
 import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
+import type { AccountSummary } from "@/features/accounts/schemas";
 import { createAccountSummary, createDashboardOverview } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 
@@ -31,7 +32,158 @@ function createWrapper(queryClient: QueryClient) {
   };
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 describe("useAccounts", () => {
+  it.each<{ name: string; updates: Partial<AccountSummary> }>([
+    { name: "free plan", updates: { planType: "free", subscription: null } },
+    { name: "different paid plan", updates: { planType: "pro", subscription: null } },
+    { name: "ChatGPT identity", updates: { chatgptAccountId: "replacement", subscription: null } },
+    { name: "email", updates: { email: "replacement@example.com", subscription: null } },
+    { name: "workspace", updates: { workspaceId: "replacement", subscription: null } },
+    { name: "legacy workspace label", updates: { workspaceLabel: "replacement", subscription: null } },
+    { name: "credential refresh", updates: { lastRefreshAt: "2026-09-28T13:00:00Z", subscription: null } },
+    { name: "newer paid check", updates: { subscription: { activeUntil: "2026-11-04T00:00:00Z", lastCheckedAt: "2026-09-28T13:00:00Z", source: "subscriptions_api" } } },
+    { name: "newer inactive check", updates: { subscription: { activeUntil: null, lastCheckedAt: "2026-09-28T13:00:00Z", source: "subscriptions_api" } } },
+  ])("rejects a delayed subscription response after a newer $name", async ({ updates }) => {
+    const client = createTestQueryClient();
+    const original = createAccountSummary({ accountId: "same-row", workspaceId: null, lastRefreshAt: "2026-09-27T00:00:00Z" });
+    const response = createAccountSummary({ ...original, subscription: { activeUntil: "2026-10-04T00:00:00Z", lastCheckedAt: "2026-09-28T12:00:00Z", source: "subscriptions_api" } });
+    const newer = createAccountSummary({ ...original, ...updates });
+    let listed = original;
+    const finish = deferred();
+    let responseReady = false;
+    server.use(
+      http.get("/api/accounts", () => HttpResponse.json({ accounts: [listed] })),
+      http.post("/api/accounts/same-row/subscription/refresh", async () => {
+        responseReady = true;
+        await finish.promise;
+        return HttpResponse.json(response);
+      }),
+    );
+    const { result } = renderHook(() => useAccounts(), { wrapper: createWrapper(client) });
+    await waitFor(() => expect(result.current.accountsQuery.isSuccess).toBe(true));
+    const refreshing = result.current.subscriptionRefreshMutation.mutateAsync("same-row");
+    await waitFor(() => expect(responseReady).toBe(true));
+    listed = newer;
+    await act(async () => { await result.current.accountsQuery.refetch(); });
+    await waitFor(() => expect(result.current.accountsQuery.data?.[0]).toEqual(newer));
+    await act(async () => { finish.resolve(); await refreshing; });
+    await waitFor(() => expect(result.current.subscriptionRefreshMutation.isSuccess).toBe(true));
+    expect(result.current.accountsQuery.data?.[0]).toEqual(newer);
+  });
+
+  it("merges a matching fresh subscription while retaining concurrent unrelated changes", async () => {
+    const client = createTestQueryClient();
+    client.setQueryDefaults(["accounts", "list"], { gcTime: Infinity });
+    const source = createAccountSummary({ accountId: "same-row", workspaceId: "workspace", workspaceLabel: "Before", lastRefreshAt: "2026-09-27T00:00:00Z", subscription: { activeUntil: null, lastCheckedAt: "2026-09-28T11:00:00Z", source: "subscriptions_api" } });
+    const refreshed = createAccountSummary({ ...source, subscription: { activeUntil: "2026-10-04T00:00:00Z", lastCheckedAt: "2026-09-28T12:00:00Z", source: "subscriptions_api" } });
+    const finish = deferred();
+    server.use(http.post("/api/accounts/same-row/subscription/refresh", async () => {
+      await finish.promise;
+      return HttpResponse.json(refreshed);
+    }));
+    client.setQueryData(["accounts", "list"], { accounts: [source] });
+    const { result } = renderHook(() => useAccountMutations(), { wrapper: createWrapper(client) });
+    const refreshing = result.current.subscriptionRefreshMutation.mutateAsync("same-row");
+    await waitFor(() => expect(result.current.subscriptionRefreshMutation.isPending).toBe(true));
+    const changed = { ...source, alias: "Renamed", workspaceLabel: "After", status: "paused", routingPolicy: "preserve", usage: { primaryRemainingPercent: 20, secondaryRemainingPercent: 30 } };
+    client.setQueryData(["accounts", "list"], { accounts: [changed] });
+    await act(async () => { finish.resolve(); await refreshing; });
+    expect(client.getQueryData(["accounts", "list"])).toEqual({ accounts: [{ ...changed, subscription: refreshed.subscription }] });
+  });
+
+  it("keeps a successful subscription refresh when an older list read returns later", async () => {
+    const client = createTestQueryClient();
+    const target = createAccountSummary({ accountId: "target", subscription: { activeUntil: "2026-09-04T00:00:00Z", lastCheckedAt: null } });
+    const refreshed = { ...target, subscription: { activeUntil: "2026-10-04T00:00:00Z", lastCheckedAt: "2026-09-28T00:00:00Z", source: "subscriptions_api" } };
+    const finishRefresh = deferred();
+    const finishPoll = deferred();
+    let polling = false;
+    let pollStarted = false;
+    let current = target;
+    server.use(
+      http.get("/api/accounts", async () => {
+        const snapshot = current;
+        if (polling) {
+          pollStarted = true;
+          await finishPoll.promise;
+        }
+        return HttpResponse.json({ accounts: [snapshot] });
+      }),
+      http.post("/api/accounts/target/subscription/refresh", async () => {
+        await finishRefresh.promise;
+        return HttpResponse.json(refreshed);
+      }),
+    );
+    const { result } = renderHook(() => useAccounts(), { wrapper: createWrapper(client) });
+    await waitFor(() => expect(result.current.accountsQuery.isSuccess).toBe(true));
+    const refresh = result.current.subscriptionRefreshMutation.mutateAsync("target");
+    await waitFor(() => expect(result.current.subscriptionRefreshMutation.isPending).toBe(true));
+    polling = true;
+    const poll = result.current.accountsQuery.refetch();
+    await waitFor(() => expect(pollStarted).toBe(true));
+    await act(async () => { finishRefresh.resolve(); await refresh; });
+    await act(async () => { finishPoll.resolve(); await poll; });
+    expect(result.current.accountsQuery.data?.[0].subscription).toEqual(refreshed.subscription);
+    polling = false;
+    current = { ...target, status: "paused", planType: "free", subscription: null };
+    await act(async () => { await result.current.accountsQuery.refetch(); });
+    expect(result.current.accountsQuery.data?.[0]).toMatchObject(current);
+  });
+
+  it.each([false, true])("tracks each pending subscription independently when the second fails=%s", async (failSecond) => {
+    const client = createTestQueryClient();
+    const first = createAccountSummary({ accountId: "first" });
+    const second = createAccountSummary({ accountId: "second" });
+    const finishFirst = deferred();
+    const finishSecond = deferred();
+    server.use(
+      http.get("/api/accounts", () => HttpResponse.json({ accounts: [first, second] })),
+      http.post("/api/accounts/first/subscription/refresh", async () => {
+        await finishFirst.promise;
+        return HttpResponse.json(first);
+      }),
+      http.post("/api/accounts/second/subscription/refresh", async () => {
+        await finishSecond.promise;
+        return failSecond
+          ? HttpResponse.json({ error: { code: "subscription_refresh_failed", message: "Refresh failed" } }, { status: 502 })
+          : HttpResponse.json(second);
+      }),
+    );
+    const { result } = renderHook(() => useAccounts(), { wrapper: createWrapper(client) });
+    await waitFor(() => expect(result.current.accountsQuery.isSuccess).toBe(true));
+    const a = result.current.subscriptionRefreshMutation.mutateAsync("first");
+    const b = result.current.subscriptionRefreshMutation.mutateAsync("second").catch(() => null);
+    await waitFor(() => expect(result.current.subscriptionRefreshingAccountIds).toEqual(["first", "second"]));
+    await act(async () => { finishSecond.resolve(); await b; });
+    await waitFor(() => expect(result.current.subscriptionRefreshingAccountIds).toEqual(["first"]));
+    await act(async () => { finishFirst.resolve(); await a; });
+    await waitFor(() => expect(result.current.subscriptionRefreshingAccountIds).toEqual([]));
+  });
+
+  it("refreshes only the target subscription and preserves cached data on failure", async () => {
+    const queryClient = createTestQueryClient();
+    queryClient.setQueryDefaults(["accounts", "list"], { gcTime: Infinity });
+    const target = createAccountSummary({ accountId: "target", routingPolicy: "preserve" });
+    const other = createAccountSummary({ accountId: "other" });
+    const subscription = { activeUntil: "2026-10-04T04:36:34Z", lastCheckedAt: "2026-09-28T12:00:00Z", source: "subscriptions_api" };
+    queryClient.setQueryData(["accounts", "list"], { accounts: [target, other] });
+    server.use(http.post("/api/accounts/target/subscription/refresh", () => HttpResponse.json({ ...target, subscription })));
+    const { result } = renderHook(() => useAccountMutations(), { wrapper: createWrapper(queryClient) });
+    await result.current.subscriptionRefreshMutation.mutateAsync("target");
+    const saved = queryClient.getQueryData<{ accounts: typeof target[] }>(["accounts", "list"]);
+    expect(saved?.accounts[0].subscription).toEqual(subscription);
+    expect(saved?.accounts[0].routingPolicy).toBe("preserve");
+    expect(saved?.accounts[1]).toEqual(other);
+    server.use(http.post("/api/accounts/target/subscription/refresh", () => HttpResponse.json({ error: { code: "subscription_refresh_failed", message: "Refresh failed" } }, { status: 502 })));
+    await expect(result.current.subscriptionRefreshMutation.mutateAsync("target")).rejects.toThrow();
+    expect(queryClient.getQueryData(["accounts", "list"])).toEqual(saved);
+  });
   it("loads accounts and invalidates related queries after mutations", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
@@ -483,4 +635,71 @@ it("rejects poll responses that started before a newer targeted summary", async 
     expect(result.current.accounts.accountsQuery.data?.[0].availableResetCredits).toBe(2);
     expect(result.current.dashboard.data?.accounts[0].availableResetCredits).toBe(2);
   });
+});
+
+it("keeps a refreshed subscription when a delayed usage reset summary arrives", async () => {
+  const queryClient = createTestQueryClient();
+  const original = createAccountSummary({
+    accountId: "target",
+    subscription: {
+      activeUntil: "2026-09-04T00:00:00Z",
+      lastCheckedAt: "2026-08-28T00:00:00Z",
+      source: "id_token",
+    },
+  });
+  const refreshed = {
+    ...original,
+    subscription: {
+      activeUntil: "2026-10-04T00:00:00Z",
+      lastCheckedAt: "2026-09-28T00:00:00Z",
+      source: "subscriptions_api" as const,
+    },
+  };
+  const summaryGate = deferred();
+  let summaryStarted = false;
+  server.use(
+    http.get("/api/accounts", () => HttpResponse.json({ accounts: [original] })),
+    http.get("/api/dashboard/overview", () => HttpResponse.json(createDashboardOverview({ accounts: [original] }))),
+    http.post("/api/accounts/target/subscription/refresh", () => HttpResponse.json(refreshed)),
+    http.post("/api/accounts/target/usage-reset-credits/consume", () => HttpResponse.json({
+      status: "reset", accountId: "target", code: "reset", windowsReset: 2, usageWritten: true,
+      primaryUsedPercentBefore: 99, primaryUsedPercentAfter: 1,
+      secondaryUsedPercentBefore: 80, secondaryUsedPercentAfter: 1,
+      accountStatusBefore: "rate_limited", accountStatusAfter: "active",
+    })),
+    http.get("/api/accounts/target/summary", async () => {
+      summaryStarted = true;
+      await summaryGate.promise;
+      return HttpResponse.json({
+        ...original,
+        usage: { primaryRemainingPercent: 99, secondaryRemainingPercent: 99 },
+      });
+    }),
+  );
+  const { result } = renderHook(() => ({ accounts: useAccounts(), dashboard: useDashboard() }), {
+    wrapper: createWrapper(queryClient),
+  });
+  await waitFor(() => {
+    expect(result.current.accounts.accountsQuery.isSuccess).toBe(true);
+    expect(result.current.dashboard.isSuccess).toBe(true);
+  });
+  const reset = result.current.accounts.usageResetMutation.mutateAsync({ accountId: "target" });
+  await waitFor(() => expect(summaryStarted).toBe(true));
+  await act(async () => { await result.current.accounts.subscriptionRefreshMutation.mutateAsync("target"); });
+  await waitFor(() => expect(result.current.accounts.accountsQuery.data?.[0].subscription).toEqual(refreshed.subscription));
+  await act(async () => {
+    summaryGate.resolve();
+    await reset;
+  });
+  await waitFor(() => {
+    expect(result.current.accounts.accountsQuery.data?.[0].usage?.primaryRemainingPercent).toBe(99);
+    expect(result.current.dashboard.data?.accounts[0].usage?.primaryRemainingPercent).toBe(99);
+  });
+  expect(result.current.accounts.accountsQuery.data?.[0].subscription).toEqual(refreshed.subscription);
+  expect(result.current.dashboard.data?.accounts[0].subscription).toEqual(refreshed.subscription);
+  await act(async () => {
+    await Promise.all([result.current.accounts.accountsQuery.refetch(), result.current.dashboard.refetch()]);
+  });
+  expect(result.current.accounts.accountsQuery.data?.[0].subscription).toEqual(refreshed.subscription);
+  expect(result.current.dashboard.data?.accounts[0].subscription).toEqual(refreshed.subscription);
 });

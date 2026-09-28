@@ -23,6 +23,7 @@ from app.modules.accounts.schemas import (
     AccountUsageTrend,
     UsageTrendPoint,
 )
+from app.modules.accounts.subscription_repository import subscription_fingerprint
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsSnapshot,
     RateLimitResetCreditsStore,
@@ -473,7 +474,23 @@ def _build_credential_summary(
                 subscription = AccountSubscription(
                     active_until=claims.auth.chatgpt_subscription_active_until,
                     last_checked_at=claims.auth.chatgpt_subscription_last_checked,
+                    source="id_token",
                 )
+
+    if (
+        coerce_account_plan_type(account.plan_type, DEFAULT_PLAN) not in {"free", "unknown"}
+        and account.subscription_checked_at is not None
+        and account.subscription_fingerprint == subscription_fingerprint(account)
+    ):
+        subscription = AccountSubscription(
+            active_until=(
+                to_utc_naive(account.subscription_active_until).replace(tzinfo=timezone.utc)
+                if account.subscription_active_until is not None
+                else None
+            ),
+            last_checked_at=to_utc_naive(account.subscription_checked_at).replace(tzinfo=timezone.utc),
+            source="subscriptions_api",
+        )
 
     return AccountAuthStatus(
         access=AccountTokenStatus(expires_at=access_expires),

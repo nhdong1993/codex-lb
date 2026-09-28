@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List
+from typing import List, Literal
 
 from pydantic import Field, PrivateAttr, field_validator
 
@@ -55,6 +55,7 @@ class AccountAuthStatus(DashboardModel):
 class AccountSubscription(DashboardModel):
     active_until: datetime | None = None
     last_checked_at: datetime | None = None
+    source: Literal["subscriptions_api", "id_token"] | None = None
 
 
 class AccountLimitWarmupStatus(DashboardModel):

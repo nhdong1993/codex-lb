@@ -2,6 +2,7 @@ import type { QueryClient } from "@tanstack/react-query";
 
 import type { AccountSummary } from "@/features/accounts/schemas";
 import type { DashboardOverview } from "@/features/dashboard/schemas";
+import { mergeAccountSnapshot, mergeSubscriptionRefresh } from "@/features/accounts/subscription-refresh";
 
 type ResetState = {
   generation: number;
@@ -94,7 +95,10 @@ function reconcileAccount(client: QueryClient, account: AccountSummary, generati
   if (state.pending && fetchedAt && (!state.previousFetchedAt || Date.parse(fetchedAt) > Date.parse(state.previousFetchedAt))) {
     state.pending = false;
   }
-  const reconciled = { ...account, resetCreditRefreshPending: state.pending };
+  const reconciled = {
+    ...mergeAccountSnapshot(state.summary ?? account, account),
+    resetCreditRefreshPending: state.pending,
+  };
   if (latest && fetchedAt && Date.parse(fetchedAt) < Date.parse(latest) && state.summary) {
     reconciled.availableResetCredits = state.summary.availableResetCredits;
     reconciled.resetCreditFetchedAt = state.summary.resetCreditFetchedAt;
@@ -126,23 +130,51 @@ export function reconcileDashboardQuery(client: QueryClient, data: DashboardOver
 export function mergeResetAccount(client: QueryClient, accountId: string, summary: AccountSummary | null, pending: boolean) {
   const clientState = stateFor(client);
   const previous = clientState.accounts.get(accountId);
-  const cached = client.getQueriesData<{ accounts: AccountSummary[] }>({
+  const cachedAccounts = client.getQueriesData<{ accounts: AccountSummary[] }>({
     predicate: (query) => (query.queryKey[0] === "accounts" && query.queryKey[1] === "list")
       || (query.queryKey[0] === "dashboard" && query.queryKey[1] === "overview"),
-  }).flatMap(([, data]) => data?.accounts ?? []).find((account) => account.accountId === accountId);
+  }).flatMap(([, data]) => data?.accounts ?? []).filter((account) => account.accountId === accountId);
+  const cached = cachedAccounts[0];
+  const mergedSummary = summary
+    ? [previous?.summary, ...cachedAccounts].filter((account): account is AccountSummary => account != null)
+      .reduce((incoming, current) => mergeAccountSnapshot(current, incoming), summary)
+    : null;
   clientState.accounts.set(accountId, {
     generation: ++clientState.generation,
     pending,
     previousFetchedAt: pending ? cached?.resetCreditFetchedAt ?? null : previous?.previousFetchedAt ?? null,
-    summary: summary ?? cached ?? null,
+    summary: mergedSummary ?? cached ?? previous?.summary ?? null,
   });
   const updated = (account: AccountSummary) => account.accountId === accountId
-    ? { ...account, ...(summary ?? {}), resetCreditRefreshPending: pending } : account;
+    ? { ...(mergedSummary ?? account), resetCreditRefreshPending: pending } : account;
   client.setQueriesData<{ accounts: AccountSummary[] }>({ queryKey: ["accounts", "list"] }, (old) => old
     ? { ...old, accounts: old.accounts.map(updated) } : old);
   client.setQueriesData<DashboardOverview>({ queryKey: ["dashboard", "overview"] }, (old) => {
     if (!old) return old;
-    if (!summary) return { ...old, accounts: old.accounts.map(updated) };
-    return mergeOverview(old, { ...summary, resetCreditRefreshPending: pending });
+    if (!mergedSummary) return { ...old, accounts: old.accounts.map(updated) };
+    return mergeOverview(old, { ...mergedSummary, resetCreditRefreshPending: pending });
   });
+}
+
+/**
+ * Publish a successful subscription refresh to every account projection and
+ * retain it in reconciliation state so an older in-flight poll cannot undo it.
+ */
+export function mergeSubscriptionRefreshIntoReconciliation(client: QueryClient, summary: AccountSummary) {
+  const clientState = stateFor(client);
+  const state = clientState.accounts.get(summary.accountId);
+  if (state?.summary) {
+    const merged = mergeSubscriptionRefresh(state.summary, summary);
+    if (merged !== state.summary) {
+      state.summary = merged;
+      state.generation = ++clientState.generation;
+    }
+  }
+  client.setQueriesData<{ accounts: AccountSummary[] }>({
+    predicate: (query) => (query.queryKey[0] === "accounts" && query.queryKey[1] === "list")
+      || (query.queryKey[0] === "dashboard" && query.queryKey[1] === "overview"),
+  }, (old) => old && ({
+    ...old,
+    accounts: old.accounts.map((account) => mergeSubscriptionRefresh(account, summary)),
+  }));
 }

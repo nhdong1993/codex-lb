@@ -27,6 +27,9 @@
   "accounts.subscription.remaining": "{{duration}} 남음",
   "accounts.subscription.until": "기록된 종료일",
   "accounts.subscription.checked": "마지막 확인",
+  "accounts.subscription.source": "출처",
+  "accounts.subscription.apiSource": "ChatGPT 구독 확인",
+  "accounts.subscription.tokenSource": "저장된 토큰 (대체 데이터)",
   "accounts.subscription.recordedHint": "갱신하면 기록된 기간이 연장될 수 있습니다.",
   "accounts.subscription.unknownHint": "구독 종료일이 없습니다. 토큰 만료일과는 별개입니다.",
   "accounts.grid.viewMode": "계정 보기",
@@ -1717,5 +1720,14 @@
   "accounts.toasts.resetCreditUnconfirmed": "Reset 결과가 확인되지 않았습니다. 다시 시도하기 전에 계정을 확인하세요.",
   "accounts.toasts.resetCreditRefreshPending": "Reset 요청 후 계정 데이터를 업데이트하고 있습니다.",
   "accounts.actions.resetPending": "Reset 확인 중…",
-  "accounts.toasts.resetCreditNoReset": "크레딧이 사용되었지만 초기화된 할당량 구간은 없습니다."
+  "accounts.toasts.resetCreditNoReset": "크레딧이 사용되었지만 초기화된 할당량 구간은 없습니다.",
+  "accounts.list.allPlans": "모든 요금제",
+  "accounts.list.planFilterAria": "요금제로 계정 필터",
+  "accounts.list.planPlaceholder": "요금제로 필터",
+  "accounts.listOverview.toggleBurnFirst": "{{account}} Burn First 전환",
+  "accounts.subscription.refresh": "구독 새로 고침",
+  "accounts.subscription.refreshFor": "{{account}} 구독 새로 고침",
+  "accounts.toasts.subscriptionRefreshed": "구독을 새로 고쳤습니다",
+  "accounts.toasts.subscriptionRefreshFailed": "구독 새로 고침에 실패했습니다. 이전 결과를 유지합니다.",
+  "accounts.listOverview.detailsFor": "{{account}} 상세 보기"
 }

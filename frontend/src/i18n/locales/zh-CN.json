@@ -27,6 +27,9 @@
   "accounts.subscription.remaining": "剩余 {{duration}}",
   "accounts.subscription.until": "记录的结束日期",
   "accounts.subscription.checked": "上次检查",
+  "accounts.subscription.source": "来源",
+  "accounts.subscription.apiSource": "ChatGPT 订阅查询",
+  "accounts.subscription.tokenSource": "已保存令牌（备用数据）",
   "accounts.subscription.recordedHint": "续订后此记录周期可能延长。",
   "accounts.subscription.unknownHint": "暂无订阅结束日期。令牌到期时间与订阅期限不同。",
   "accounts.grid.viewMode": "账号视图",
@@ -1717,5 +1720,14 @@
   "accounts.toasts.resetCreditUnconfirmed": "尚未确认 reset 结果。请先检查账户再重试。",
   "accounts.toasts.resetCreditRefreshPending": "Reset 已发送，账户数据仍在更新。",
   "accounts.actions.resetPending": "Reset 确认中…",
-  "accounts.toasts.resetCreditNoReset": "额度券已兑换，但没有重置任何配额窗口。"
+  "accounts.toasts.resetCreditNoReset": "额度券已兑换，但没有重置任何配额窗口。",
+  "accounts.list.allPlans": "全部套餐",
+  "accounts.list.planFilterAria": "按套餐筛选账户",
+  "accounts.list.planPlaceholder": "按套餐筛选",
+  "accounts.listOverview.toggleBurnFirst": "切换 {{account}} 的优先消耗",
+  "accounts.subscription.refresh": "刷新订阅",
+  "accounts.subscription.refreshFor": "刷新 {{account}} 的订阅",
+  "accounts.toasts.subscriptionRefreshed": "订阅已刷新",
+  "accounts.toasts.subscriptionRefreshFailed": "订阅刷新失败，已保留之前的结果。",
+  "accounts.listOverview.detailsFor": "查看 {{account}} 的详情"
 }

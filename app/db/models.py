@@ -162,6 +162,11 @@ class Account(Base):
     refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     id_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
+    subscription_active_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    subscription_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    subscription_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    subscription_attempted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     last_refresh: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 

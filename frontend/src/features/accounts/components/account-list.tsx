@@ -26,6 +26,7 @@ import { cn } from "@/lib/utils";
 import { AddAccountDialog } from "@/features/accounts/components/add-account-dialog";
 import { WindowsOauthHelp } from "@/features/accounts/components/windows-oauth-help";
 import type { AccountSummary } from "@/features/accounts/schemas";
+import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
 import {
   ACCOUNT_SORT_OPTIONS,
   DEFAULT_ACCOUNT_SORT_MODE,
@@ -98,6 +99,10 @@ export type AccountListProps = {
   showResetCreditBadges?: boolean;
   readOnly?: boolean;
   viewMode?: AccountViewMode;
+  onRoutingPolicyChange?: (accountId: string, routingPolicy: AccountRoutingPolicy) => void;
+  routingPolicyBusy?: boolean;
+  onSubscriptionRefresh?: (accountId: string) => void;
+  subscriptionRefreshingAccountIds?: readonly string[];
 };
 
 export function AccountList({
@@ -111,10 +116,15 @@ export function AccountList({
   showResetCreditBadges = true,
   readOnly = false,
   viewMode = "list",
+  onRoutingPolicyChange,
+  routingPolicyBusy = false,
+  onSubscriptionRefresh,
+  subscriptionRefreshingAccountIds = [],
 }: AccountListProps) {
   const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [planFilter, setPlanFilter] = useState<string>("all");
   const [helpOpen, setHelpOpen] = useState(false);
   const [chooserOpen, setChooserOpen] = useState(false);
   const [page, setPage] = useState(0);
@@ -134,6 +144,18 @@ export function AccountList({
     />
   );
 
+  const planFilterOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          accounts
+            .map((account) => account.planType.trim().toLowerCase())
+            .filter(Boolean),
+        ),
+      ).sort((a, b) => a.localeCompare(b)),
+    [accounts],
+  );
+
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return sortAccountsForDisplay(
@@ -142,6 +164,9 @@ export function AccountList({
       activeSortMode,
     ).filter((account) => {
       if (statusFilter !== "all" && account.status !== statusFilter) {
+        return false;
+      }
+      if (planFilter !== "all" && account.planType.trim().toLowerCase() !== planFilter) {
         return false;
       }
       if (!needle) {
@@ -155,7 +180,7 @@ export function AccountList({
         account.planType.toLowerCase().includes(needle)
       );
     });
-  }, [accounts, quotaDisplay, search, statusFilter, activeSortMode]);
+  }, [accounts, quotaDisplay, search, statusFilter, planFilter, activeSortMode]);
   const grid = viewMode === "grid";
   const detail = viewMode === "detail";
   const currentPage = Math.min(
@@ -182,7 +207,7 @@ export function AccountList({
       <div
         className={cn(
           "grid grid-cols-1 gap-2 sm:grid-cols-2",
-          !detail && "lg:grid-cols-4",
+          !detail && "lg:grid-cols-5",
         )}
       >
         <div className="relative min-w-0 sm:col-span-2">
@@ -222,6 +247,29 @@ export function AccountList({
                   : t(`accounts.statusFilters.${option}`, {
                       defaultValue: formatSlug(option),
                     })}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={planFilter}
+          onValueChange={(value) => {
+            setPlanFilter(value);
+            setPage(0);
+          }}
+        >
+          <SelectTrigger
+            size="sm"
+            className="w-full min-w-0"
+            aria-label={t("accounts.list.planFilterAria")}
+          >
+            <SelectValue placeholder={t("accounts.list.planPlaceholder")} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{t("accounts.list.allPlans")}</SelectItem>
+            {planFilterOptions.map((option) => (
+              <SelectItem key={option} value={option}>
+                {formatSlug(option)}
               </SelectItem>
             ))}
           </SelectContent>
@@ -323,6 +371,13 @@ export function AccountList({
               selected={account.accountId === selectedAccountId}
               showAccountId={account.isEmailDuplicate === true}
               showResetCreditBadge={showResetCreditBadges}
+              onRoutingPolicyChange={
+                viewMode === "list" ? onRoutingPolicyChange : undefined
+              }
+              routingPolicyBusy={routingPolicyBusy}
+              readOnly={readOnly}
+              onSubscriptionRefresh={onSubscriptionRefresh}
+              subscriptionRefreshing={subscriptionRefreshingAccountIds.includes(account.accountId)}
               onSelect={onSelect}
             />
           ))

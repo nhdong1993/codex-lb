@@ -99,6 +99,7 @@ export const AccountSummarySchema = z.object({
   subscription: z.object({
     activeUntil: z.iso.datetime({ offset: true }).nullable(),
     lastCheckedAt: z.iso.datetime({ offset: true }).nullable(),
+    source: z.enum(["subscriptions_api", "id_token"]).nullable().optional(),
   }).nullable().optional(),
   lastRefreshAt: z.iso.datetime({ offset: true, local: true })
     // Older backends serialize this UTC value without an offset during a rolling deploy.

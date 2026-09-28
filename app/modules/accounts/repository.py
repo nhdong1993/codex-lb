@@ -37,6 +37,7 @@ from app.db.models import (
     UsageHistory,
 )
 from app.db.session import sqlite_writer_section
+from app.modules.accounts.subscription_repository import subscription_fingerprint
 from app.modules.accounts.usage_rollup import (
     AccountUsageRollupRepository,
     deduped_usage_aggregate_stmt,
@@ -1286,6 +1287,9 @@ class AccountsRepository:
                 values["workspace_label"] = workspace_label
             if seat_type is not None:
                 values["seat_type"] = seat_type
+            current = await self._session.scalar(
+                select(Account).where(Account.id == account_id).execution_options(populate_existing=True)
+            )
             stmt = (
                 update(Account)
                 .where(Account.id == account_id)
@@ -1294,8 +1298,35 @@ class AccountsRepository:
                 # clobbered by a slower writer.
                 .where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
                 .values(**values)
-                .returning(Account.id)
+                .returning(Account)
+                .execution_options(populate_existing=True)
             )
+            if (
+                current is not None
+                and (plan_type is None or plan_type == current.plan_type)
+                and (chatgpt_account_id is None or chatgpt_account_id == current.chatgpt_account_id)
+                and (chatgpt_user_id is None or chatgpt_user_id == current.chatgpt_user_id)
+                and (workspace_id is None or workspace_id == current.workspace_id)
+            ):
+                # Test snapshot validity at the write, not the earlier ORM read:
+                # the first successful snapshot may commit between them. Match
+                # the computed source fingerprint, never a stale stored value.
+                # Keep the term, check time and daily attempt clock untouched.
+                stmt = stmt.values(
+                    subscription_fingerprint=case(
+                        (
+                            Account.subscription_checked_at.is_not(None)
+                            & (Account.subscription_fingerprint == subscription_fingerprint(current))
+                            & (Account.access_token_encrypted == current.access_token_encrypted)
+                            & (Account.chatgpt_account_id == current.chatgpt_account_id)
+                            & (Account.plan_type == current.plan_type)
+                            & (Account.chatgpt_user_id == current.chatgpt_user_id)
+                            & (Account.workspace_id == current.workspace_id),
+                            subscription_fingerprint(current, access_token_encrypted=access_token_encrypted),
+                        ),
+                        else_=Account.subscription_fingerprint,
+                    )
+                )
             result = await self._session.execute(stmt)
             await self._session.commit()
             return result.scalar_one_or_none() is not None

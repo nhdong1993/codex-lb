@@ -1,5 +1,6 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Route } from "@playwright/test";
 import path from "node:path";
+import type { AccountSummary } from "../src/features/accounts/schemas";
 
 import {
   accounts,
@@ -37,7 +38,7 @@ const sampleAccounts = accounts.map((account, index) => ({
   ][index],
   workspaceLabel: index === 2 ? "Product Team" : "Personal workspace",
   seatType: index === 2 ? "owner" : null,
-  planType: index === 1 ? "pro" : index === 2 ? "team" : "plus",
+  planType: index === 1 ? "pro" : index === 2 ? "team" : index === 3 ? "prolite" : index === 5 ? "promax" : "plus",
   status: index === 4 ? "paused" : "active",
   routingPolicy:
     index === 0 ? "burn_first" : index === 4 ? "preserve" : "normal",
@@ -72,14 +73,103 @@ const sampleAccounts = accounts.map((account, index) => ({
             ? at(-2 * 24 * 60)
             : at((18 - index) * 24 * 60 + 8 * 60),
     lastCheckedAt: at(-180),
+    source: "subscriptions_api" as const,
   },
 }));
+
+test("A delayed subscription response does not restore a paid term after the plan changes", async ({ page }) => {
+  const liveAccounts = structuredClone(sampleAccounts).map((account) => ({
+    ...account, subscription: account.subscription as AccountSummary["subscription"],
+  }));
+  const paidResponse = structuredClone(liveAccounts[0]);
+  let pending: Route | undefined;
+  await page.addInitScript(() => localStorage.setItem("codex-lb-accounts-view-mode", "list"));
+  await page.clock.install({ time: new Date(sampleTime) });
+  await page.route("**/api/**", (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname.endsWith("/subscription/refresh")) {
+      pending = route;
+      return;
+    }
+    const data = pathname === "/api/dashboard-auth/session" ? authSession
+      : pathname === "/api/settings" ? settings
+      : pathname === "/api/settings/upstream-proxy" ? upstreamProxyAdmin
+      : pathname === "/api/accounts" ? { accounts: liveAccounts }
+      : {};
+    return route.fulfill({ json: data });
+  });
+  await page.goto(`http://localhost:${process.env.SCREENSHOT_PORT ?? "4173"}/accounts`);
+  const row = page.getByTestId("account-list-overview-row").filter({ hasText: "Personal Plus" });
+  const refresh = row.getByRole("button", { name: "Refresh subscription for Personal Plus", exact: true });
+  await refresh.click();
+  await expect.poll(() => pending != null).toBe(true);
+  liveAccounts[0].planType = "free";
+  liveAccounts[0].subscription = null;
+  await page.clock.fastForward(31_000);
+  await expect(row.getByText("Free", { exact: true })).toBeVisible();
+  await expect(row.getByTestId("account-plan-remaining")).toHaveText("No data");
+  await pending!.fulfill({ json: paidResponse });
+  await expect(refresh.locator("svg")).not.toHaveClass(/animate-spin/);
+  if (directory) await page.screenshot({ path: path.join(directory, "list-delayed-paid-response.png"), animations: "disabled" });
+  await expect(row.getByTestId("account-plan-remaining")).toHaveText("No data");
+});
+
+test("Subscription refresh keeps each account pending until its own request settles", async ({ page }) => {
+  const pending = new Map<string, Route>();
+  const first = sampleAccounts[0];
+  const second = sampleAccounts[1];
+  await page.addInitScript(() => localStorage.setItem("codex-lb-accounts-view-mode", "list"));
+  await page.clock.setFixedTime(new Date(sampleTime));
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.route("**/api/**", (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname.endsWith("/subscription/refresh")) {
+      pending.set(pathname.split("/")[3], route);
+      return;
+    }
+    const data = pathname === "/api/dashboard-auth/session" ? authSession
+      : pathname === "/api/settings" ? settings
+      : pathname === "/api/settings/upstream-proxy" ? upstreamProxyAdmin
+      : pathname === "/api/accounts" ? { accounts: sampleAccounts }
+      : pathname.endsWith("/trends") ? accountTrends
+      : pathname.endsWith("/usage-reset-credits") ? { rateLimitResetCredits: { availableCount: 3 } }
+      : {};
+    return route.fulfill({ json: data });
+  });
+  await page.goto(`http://localhost:${process.env.SCREENSHOT_PORT ?? "4173"}/accounts`);
+  const a = page.getByRole("button", { name: "Refresh subscription for Personal Plus", exact: true });
+  const b = page.getByRole("button", { name: "Refresh subscription for Research Pro", exact: true });
+  await a.click();
+  await b.click();
+  await expect.poll(() => pending.size).toBe(2);
+  if (directory) await page.screenshot({ path: path.join(directory, "list-two-refreshes-pending.png"), animations: "disabled" });
+  await expect(a).toBeDisabled();
+  await expect(b).toBeDisabled();
+  await pending.get(second.accountId)!.fulfill({
+    status: 502,
+    json: { error: { code: "subscription_refresh_failed", message: "Refresh failed" } },
+  });
+  await expect(b).toBeEnabled();
+  await expect(a).toBeDisabled();
+  if (directory) await page.screenshot({ path: path.join(directory, "list-first-refresh-still-pending.png"), animations: "disabled" });
+  await page.getByRole("button", { name: "View details for Personal Plus", exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Refresh subscription for Personal Plus", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Grid view", exact: true }).click();
+  await expect(a).toBeDisabled();
+  await page.getByRole("button", { name: "Detail view", exact: true }).click();
+  await expect(a).toBeDisabled();
+  await pending.get(first.accountId)!.fulfill({ json: first });
+  await expect(a).toBeEnabled();
+});
 
 for (const mode of ["detail", "list", "grid"] as const) {
   test(`Accounts ${mode} overview fits desktop and mobile and opens account management`, async ({
     page,
   }) => {
     const managementRequests: string[] = [];
+    const liveAccounts = structuredClone(sampleAccounts);
+    const writes: string[] = [];
     if (mode !== "detail") {
       await page.addInitScript(
         (storedMode) =>
@@ -96,6 +186,17 @@ for (const mode of ["detail", "list", "grid"] as const) {
         pathname.endsWith("/usage-reset-credits")
       )
         managementRequests.push(pathname);
+      if (pathname.endsWith("/routing-policy")) {
+        const account = liveAccounts.find((item) => item.accountId === pathname.split("/")[3])!;
+        account.routingPolicy = route.request().postDataJSON().routingPolicy;
+        writes.push(pathname);
+        return route.fulfill({ json: { accountId: account.accountId, routingPolicy: account.routingPolicy } });
+      }
+      if (pathname.endsWith("/subscription/refresh")) {
+        const account = liveAccounts.find((item) => item.accountId === pathname.split("/")[3])!;
+        writes.push(pathname);
+        return route.fulfill({ json: account });
+      }
       const data =
         pathname === "/api/dashboard-auth/session"
           ? authSession
@@ -106,7 +207,7 @@ for (const mode of ["detail", "list", "grid"] as const) {
               : pathname === "/api/dashboard/overview"
                 ? overview
                 : pathname === "/api/accounts"
-                  ? { accounts: sampleAccounts }
+                  ? { accounts: liveAccounts }
                   : pathname.endsWith("/trends")
                     ? accountTrends[pathname.split("/")[3]]
                     : pathname.endsWith("/usage-reset-credits")
@@ -146,7 +247,7 @@ for (const mode of ["detail", "list", "grid"] as const) {
     if (mode === "detail") {
       await expect(
         items.first().getByTestId("account-plan-remaining"),
-      ).toHaveText("18d 08h");
+      ).toHaveText("18d 8h");
       const status = await items
         .first()
         .getByText("Active", { exact: true })
@@ -162,7 +263,7 @@ for (const mode of ["detail", "list", "grid"] as const) {
     if (mode === "list") {
       await expect(
         items.first().getByTestId("account-plan-remaining"),
-      ).toHaveText("18d 08h");
+      ).toHaveText("18d 8h");
       await expect(
         items
           .first()
@@ -211,6 +312,25 @@ for (const mode of ["detail", "list", "grid"] as const) {
       await expect(
         page.getByRole("combobox", { name: "Sort accounts" }),
       ).toHaveText("5h quota (highest remaining)");
+    }
+    await page.getByRole("combobox", { name: "Filter accounts by plan" }).click();
+    await page.getByRole("option", { name: "Prolite", exact: true }).click();
+    await expect(items).toHaveCount(1);
+    await expect(items.first()).toContainText("Build runner");
+    await page.getByRole("combobox", { name: "Filter accounts by plan" }).click();
+    await page.getByRole("option", { name: "All plans", exact: true }).click();
+    await expect(items).toHaveCount(sampleAccounts.length);
+    if (mode === "list") {
+      const toggle = page.getByRole("button", { name: "Toggle Burn First for Personal Plus", exact: true });
+      await expect(toggle).toHaveAttribute("aria-pressed", "true");
+      await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-pressed", "true");
+      await page.getByRole("button", { name: "Refresh subscription for Personal Plus", exact: true }).click();
+      await expect.poll(() => writes.length).toBe(3);
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 10000 });
     }
     for (const width of [1440, 1024, 768, 390]) {
       await page.setViewportSize({
@@ -272,6 +392,13 @@ for (const mode of ["detail", "list", "grid"] as const) {
         });
       }
     }
+    if (mode === "list" && directory) {
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.evaluate(() => document.documentElement.classList.add("dark"));
+      await page.screenshot({ path: path.join(directory, "list-desktop-dark.png"), animations: "disabled" });
+      await page.evaluate(() => document.documentElement.classList.remove("dark"));
+      await page.setViewportSize({ width: 390, height: 1050 });
+    }
     if (mode === "list") {
       await page.getByRole("combobox", { name: "Sort accounts" }).click();
       await expect(
@@ -327,7 +454,7 @@ for (const mode of ["detail", "list", "grid"] as const) {
         .first()
         .click();
     else {
-      await items.first().focus();
+      await items.first().getByRole("button", { name: /^View details for/ }).focus();
       await page.keyboard.press("Enter");
     }
     const dialog = page.getByRole("dialog");

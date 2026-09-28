@@ -206,6 +206,13 @@ def _disable_account_usage_rollup_scheduler_startup(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _disable_subscription_scheduler_startup(monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "SubscriptionRefreshScheduler", lambda: _NoopScheduler())
+
+
+@pytest.fixture(autouse=True)
 def _disable_data_retention_scheduler_startup(monkeypatch):
     import app.main as main_module
 

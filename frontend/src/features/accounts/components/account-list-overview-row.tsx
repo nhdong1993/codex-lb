@@ -1,16 +1,18 @@
-import { ArrowUpRight, ShieldCheck } from "lucide-react";
+import { ArrowUpRight, Flame, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { isEmailLabel } from "@/components/blur-email";
 import { MiniQuotaBar } from "@/components/mini-quota-bar";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { AccountSubscription } from "@/features/accounts/components/account-subscription";
-import type { AccountSummary } from "@/features/accounts/schemas";
+import type { AccountRoutingPolicy, AccountSummary } from "@/features/accounts/schemas";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { useSmoothPercent } from "@/hooks/use-smooth-percent";
 import { cn } from "@/lib/utils";
+import { planBadgeClass } from "@/utils/plan-badge";
 import { normalizeStatus } from "@/utils/account-status";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import {
@@ -24,6 +26,11 @@ type AccountListOverviewRowProps = {
   selected: boolean;
   showAccountId?: boolean;
   showResetCreditBadge?: boolean;
+  onRoutingPolicyChange?: (accountId: string, routingPolicy: AccountRoutingPolicy) => void;
+  routingPolicyBusy?: boolean;
+  readOnly?: boolean;
+  onSubscriptionRefresh?: (accountId: string) => void;
+  subscriptionRefreshing?: boolean;
   onSelect: (accountId: string) => void;
 };
 
@@ -33,6 +40,11 @@ export function AccountListOverviewRow({
   selected,
   showAccountId = false,
   showResetCreditBadge = true,
+  onRoutingPolicyChange,
+  routingPolicyBusy = false,
+  readOnly = false,
+  onSubscriptionRefresh,
+  subscriptionRefreshing = false,
   onSelect,
 }: AccountListOverviewRowProps) {
   const { t } = useTranslation();
@@ -73,18 +85,23 @@ export function AccountListOverviewRow({
     t("accounts.detail.unknownWorkspace");
 
   return (
-    <button
-      type="button"
+    <div
+      role="group"
       data-testid="account-list-overview-row"
-      aria-haspopup="dialog"
-      onClick={() => onSelect(account.accountId)}
       className={cn(
-        "group grid w-full min-w-0 grid-cols-2 items-center gap-x-4 gap-y-2 rounded-lg border bg-card px-4 py-2.5 text-left transition-colors hover:border-primary/30 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "group relative grid w-full min-w-0 grid-cols-2 items-center gap-x-4 gap-y-2 rounded-lg border bg-card px-4 py-2.5 text-left transition-colors hover:border-primary/30 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         "lg:grid-cols-[minmax(0,1.5fr)_minmax(0,.9fr)_minmax(0,.6fr)_minmax(0,1.5fr)] lg:gap-5",
         selected && "border-primary/30 bg-primary/[0.03]",
       )}
     >
-      <div className="col-span-2 min-w-0 lg:col-span-1">
+      <button
+        type="button"
+        className="absolute inset-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-haspopup="dialog"
+        aria-label={t("accounts.listOverview.detailsFor", { account: label })}
+        onClick={() => onSelect(account.accountId)}
+      />
+      <div className="pointer-events-none relative col-span-2 min-w-0 lg:col-span-1">
         <div className="flex min-w-0 items-center gap-2">
           <div className="min-w-0 flex-1">
             <p
@@ -104,6 +121,31 @@ export function AccountListOverviewRow({
               className="size-4 shrink-0 text-emerald-600"
               aria-label={t("accounts.actions.trustedAccess")}
             />
+          ) : null}
+          {onRoutingPolicyChange ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className={cn(
+                "pointer-events-auto relative z-10 size-7 shrink-0 p-0",
+                account.routingPolicy === "burn_first" &&
+                  "border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300 dark:hover:bg-amber-500/20",
+              )}
+              title={t("common.routingPolicies.burnFirst")}
+              aria-pressed={account.routingPolicy === "burn_first"}
+              aria-label={t("accounts.listOverview.toggleBurnFirst", { account: label })}
+              disabled={readOnly || routingPolicyBusy || status === "reauth" || status === "deactivated"}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRoutingPolicyChange(
+                  account.accountId,
+                  account.routingPolicy === "burn_first" ? "normal" : "burn_first",
+                );
+              }}
+            >
+              <Flame className="size-3" aria-hidden="true" />
+            </Button>
           ) : null}
           <ArrowUpRight
             className="size-3.5 shrink-0 text-muted-foreground group-hover:text-primary"
@@ -138,9 +180,9 @@ export function AccountListOverviewRow({
         </p>
       </div>
 
-      <div className="min-w-0">
+      <div className="pointer-events-none relative min-w-0">
         <div className="flex flex-wrap items-center gap-1.5">
-          <Badge variant="secondary" className="text-[10px]">
+          <Badge variant="outline" className={cn("text-[10px]", planBadgeClass(account.planType))}>
             {formatSlug(account.planType)}
           </Badge>
           <StatusBadge
@@ -165,19 +207,20 @@ export function AccountListOverviewRow({
               })}
             </Badge>
           ) : null}
+
         </div>
       </div>
 
-      <div className="min-w-0 text-right lg:text-left">
+      <div className="pointer-events-none relative min-w-0 text-right lg:text-left">
         <span className="mr-1 text-[10px] text-muted-foreground lg:hidden">
           {t("accounts.listOverview.subscription")}
         </span>
-        <AccountSubscription account={account} compact />
+        <AccountSubscription account={account} compact onRefresh={onSubscriptionRefresh} refreshing={subscriptionRefreshing} refreshDisabled={readOnly} />
       </div>
 
       <div
         className={cn(
-          "col-span-2 grid min-w-0 gap-4 lg:col-span-1",
+          "pointer-events-none relative col-span-2 grid min-w-0 gap-4 lg:col-span-1",
           showPrimary && showSecondary ? "grid-cols-2" : "grid-cols-1",
         )}
       >
@@ -206,7 +249,7 @@ export function AccountListOverviewRow({
           <p className="text-xs text-muted-foreground">—</p>
         ) : null}
       </div>
-    </button>
+    </div>
   );
 }
 

@@ -57,7 +57,11 @@ async def test_import_and_list_recorded_subscription(
     account = next(item for item in response.json()["accounts"] if item["accountId"] == imported.json()["accountId"])
     assert account["email"] == "subscription@example.com"
     assert account["planType"] == "plus"
-    assert account["subscription"] == {"activeUntil": expected_deadline, "lastCheckedAt": expected_checked}
+    assert account["subscription"] == {
+        "activeUntil": expected_deadline,
+        "lastCheckedAt": expected_checked,
+        "source": "id_token",
+    }
     assert account["auth"]["access"]["expiresAt"] == "2033-05-18T03:33:20Z"
     assert account["auth"]["idToken"]["state"] == "parsed"
     assert account["status"] == "active"
@@ -93,4 +97,4 @@ async def test_changed_plan_does_not_report_previous_subscription(async_client, 
     listed = await async_client.get("/api/accounts")
     assert listed.status_code == 200
     account = next(item for item in listed.json()["accounts"] if item["accountId"] == account_id)
-    assert account["subscription"] == {"activeUntil": None, "lastCheckedAt": None}
+    assert account["subscription"] == {"activeUntil": None, "lastCheckedAt": None, "source": None}

@@ -205,7 +205,7 @@ describe("AccountListItem", () => {
 
     expect(screen.getByText("Work seat")).toBeInTheDocument();
     expect(
-      screen.getByText((_, element) => element?.textContent === "work@example.com | Team | Design Workspace | Member"),
+      screen.getByText((_, element) => element?.textContent === "Team | work@example.com | Design Workspace | Member"),
     ).toBeInTheDocument();
   });
 
@@ -219,7 +219,7 @@ describe("AccountListItem", () => {
 
     render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
 
-    expect(screen.getByText("Team | chatgpt-workspace-123")).toBeInTheDocument();
+    expect(screen.getByText((_, element) => element?.tagName === "P" && element.textContent === "Team | chatgpt-workspace-123")).toBeInTheDocument();
     expect(screen.queryByText(/Legacy Workspace/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Personal \/ unknown workspace/)).not.toBeInTheDocument();
   });

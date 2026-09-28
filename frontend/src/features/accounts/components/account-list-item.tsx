@@ -16,6 +16,7 @@ import type {
   AccountSummary,
 } from "@/features/accounts/schemas";
 import { normalizeStatus } from "@/utils/account-status";
+import { planBadgeClass } from "@/utils/plan-badge";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import {
   formatDateTimeInline,
@@ -31,6 +32,11 @@ export type AccountListItemProps = {
   showResetCreditBadge?: boolean;
   showQuota?: boolean;
   showPlanRemaining?: boolean;
+  onRoutingPolicyChange?: (accountId: string, routingPolicy: AccountRoutingPolicy) => void;
+  routingPolicyBusy?: boolean;
+  readOnly?: boolean;
+  onSubscriptionRefresh?: (accountId: string) => void;
+  subscriptionRefreshing?: boolean;
   onSelect: (accountId: string) => void;
 };
 
@@ -64,7 +70,7 @@ export function AccountListItem({
   const seatLabel = account.seatType
     ? ` | ${formatSlug(account.seatType)}`
     : "";
-  const slotSubtitle = `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
+  const slotSubtitle = `${workspaceLabel}${seatLabel}`;
   const idSuffix = showAccountId
     ? ` | ID ${formatCompactAccountId(account.accountId)}`
     : "";
@@ -158,6 +164,10 @@ export function AccountListItem({
                 : undefined
             }
           >
+            <Badge variant="outline" className={cn("mr-1 text-[10px]", planBadgeClass(account.planType))}>
+              {formatSlug(account.planType)}
+            </Badge>
+            {" | "}
             {emailSubtitle ? (
               <>
                 <span className={blurred ? "privacy-blur" : undefined}>

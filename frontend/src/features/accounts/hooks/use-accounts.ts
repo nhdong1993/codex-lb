@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -14,6 +14,7 @@ import {
   getRateLimitResetCredits,
   importAccount,
   listAccounts,
+  refreshAccountSubscription,
   pauseAccount,
   probeAccount,
   reactivateAccount,
@@ -31,10 +32,13 @@ import {
   forgetResetReconciliation,
   finishResetRedeemRequest,
   mergeResetAccount,
+  mergeSubscriptionRefreshIntoReconciliation,
   reconcileAccountsQuery,
   resetReconciliationGeneration,
   resetRedeemRequestId,
 } from "@/features/accounts/reset-reconciliation";
+
+const SUBSCRIPTION_REFRESH_KEY = ["accounts", "subscription-refresh"] as const;
 
 async function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>, accountId?: string) {
   const invalidations = [
@@ -213,14 +217,38 @@ export function useAccountMutations() {
       accountId: string;
       routingPolicy: AccountRoutingPolicy;
     }) => updateAccountRoutingPolicy(accountId, routingPolicy),
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       const label =
         data.routingPolicy === "normal" ? "normal" : data.routingPolicy.replace("_", "-");
       toast.success(t("accounts.toasts.routingPolicySet", { label }));
-      void invalidateAccountRelatedQueries(queryClient);
+      await invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || t("accounts.toasts.routingPolicyUpdateFailed"));
+    },
+  });
+
+  const subscriptionRefreshMutation = useMutation({
+    mutationKey: SUBSCRIPTION_REFRESH_KEY,
+    mutationFn: refreshAccountSubscription,
+    onMutate: async () => {
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: ["accounts", "list"] }),
+        queryClient.cancelQueries({ queryKey: ["dashboard", "overview"] }),
+      ]);
+    },
+    onSuccess: async (summary) => {
+      // Polling can restart while the upstream refresh is in flight. Cancel
+      // those older reads before publishing the new term; later polls stay authoritative.
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: ["accounts", "list"] }),
+        queryClient.cancelQueries({ queryKey: ["dashboard", "overview"] }),
+      ]);
+      mergeSubscriptionRefreshIntoReconciliation(queryClient, summary);
+      toast.success(t("accounts.toasts.subscriptionRefreshed"));
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("accounts.toasts.subscriptionRefreshFailed"));
     },
   });
 
@@ -303,6 +331,7 @@ export function useAccountMutations() {
     exportAuthMutation,
     limitWarmupMutation,
     routingPolicyMutation,
+    subscriptionRefreshMutation,
     updateMutation,
     resetCreditConsumeMutation,
   };
@@ -355,6 +384,10 @@ export function useAccounts() {
   const accountsQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
   const mutations = useAccountMutations();
+  const subscriptionRefreshingAccountIds = useMutationState<string>({
+    filters: { mutationKey: SUBSCRIPTION_REFRESH_KEY, status: "pending" },
+    select: (mutation) => mutation.state.variables as string,
+  });
 
-  return { accountsQuery, ...mutations };
+  return { accountsQuery, ...mutations, subscriptionRefreshingAccountIds };
 }

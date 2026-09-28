@@ -11,6 +11,7 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.auth.refresh import RefreshError
+from app.core.clients.subscriptions import SubscriptionFetchError
 from app.core.clients.usage import UsageFetchError
 from app.core.exceptions import (
     DashboardBadRequestError,
@@ -54,6 +55,7 @@ from app.modules.accounts.service import (
     AccountUsageResetCreditsUnavailableError,
     InvalidAuthJsonError,
 )
+from app.modules.accounts.subscription_service import refresh_subscription
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +119,31 @@ async def get_account_summary(
     summaries = await context.service.list_accounts(account_ids=[account_id])
     if not summaries:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return summaries[0]
+
+
+@router.post("/{account_id}/subscription/refresh/", response_model=AccountSummary, include_in_schema=False)
+@router.post("/{account_id}/subscription/refresh", response_model=AccountSummary)
+async def refresh_account_subscription(
+    account_id: str,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountSummary:
+    try:
+        refreshed = await refresh_subscription(account_id, manual=True)
+    except (SubscriptionFetchError, UpstreamProxyRouteError):
+        raise DashboardUpstreamError(
+            "Unable to refresh subscription. The previous result has been preserved.",
+            code="subscription_refresh_failed",
+        ) from None
+    summaries = await context.service.list_accounts(account_ids=[account_id])
+    if not summaries:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    if not refreshed:
+        raise DashboardConflictError(
+            "Subscription refresh is unavailable or was attempted in the last 30 seconds. Try again shortly.",
+            code="subscription_refresh_unavailable",
+        )
     return summaries[0]
 
 
