@@ -24,7 +24,14 @@ def _toml_string(value: str) -> str:
     )
 
 
-def build_install_script(*, platform: InstallPlatform, api_key: str, base_url: str, model: str | None) -> str:
+def build_install_script(
+    *,
+    platform: InstallPlatform,
+    api_key: str,
+    base_url: str,
+    model: str | None,
+    supports_websockets: bool = True,
+) -> str:
     """Render credentials as inert file contents, never as interpolated shell code."""
     config = (
         f"openai_base_url = {_toml_string(base_url)}\n"
@@ -35,6 +42,7 @@ def build_install_script(*, platform: InstallPlatform, api_key: str, base_url: s
         f"base_url = {_toml_string(base_url)}\n"
         'wire_api = "responses"\n'
         "requires_openai_auth = true\n"
+        f"supports_websockets = {str(supports_websockets).lower()}\n"
     )
     auth = json.dumps({"OPENAI_API_KEY": api_key}, indent=2) + "\n"
     catalog_url = base_url.removesuffix("/backend-api/codex") + "/api/key-dashboard/models"

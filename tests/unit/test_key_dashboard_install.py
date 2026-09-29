@@ -109,7 +109,7 @@ def test_installer_writes_safe_private_files_and_recoverable_backups(
         "name": "openai",
         "base_url": endpoint,
         "wire_api": "responses",
-        "supports_websockets": False,
+        "supports_websockets": True,
         "requires_openai_auth": True,
     }
     assert json.loads((codex_dir / "auth.json").read_text()) == {"OPENAI_API_KEY": key}
@@ -178,20 +178,35 @@ def test_powershell_script_has_literal_data_utf8_output_and_private_acl() -> Non
     assert "codex-lb-models.json" in script
 
 
-def test_installer_refreshes_catalog_and_transport(tmp_path: Path, catalog_server: _CatalogServer) -> None:
-    script = build_install_script(platform="linux", api_key="own-key", base_url=catalog_server.base_url, model=None)
-    env = {**os.environ, "CODEX_HOME": str(tmp_path)}
+@pytest.mark.parametrize(
+    "platform",
+    [
+        "macos",
+        "linux",
+        pytest.param(
+            "windows", marks=pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell unavailable")
+        ),
+    ],
+)
+@pytest.mark.parametrize("supports_websockets", [False, True])
+def test_installer_refreshes_catalog_without_overriding_assignment_transport(
+    tmp_path: Path, catalog_server: _CatalogServer, platform: InstallPlatform, supports_websockets: bool
+) -> None:
+    script = build_install_script(
+        platform=platform,
+        api_key="own-key",
+        base_url=catalog_server.base_url,
+        model=None,
+        supports_websockets=supports_websockets,
+    )
     native = _entry("native", websockets=True)
-    catalog_server.payload = {"models": [native]}
-    subprocess.run(["bash"], input=script, text=True, capture_output=True, env=env, check=True)
-    config = tomllib.loads((tmp_path / "config.toml").read_text())
-    assert config["model_providers"]["codex-lb"]["supports_websockets"] is True
-
-    catalog_server.payload = {"models": [native, _entry()]}
-    subprocess.run(["bash"], input=script, text=True, capture_output=True, env=env, check=True)
-    config = tomllib.loads((tmp_path / "config.toml").read_text())
-    assert config["model_providers"]["codex-lb"]["supports_websockets"] is False
-    assert json.loads((tmp_path / "codex-lb-models.json").read_text()) == catalog_server.payload
+    for models in ([native], [native, _entry()], [_entry()]):
+        catalog_server.payload = {"models": models}
+        result = _run_lifecycle(script, tmp_path, platform)
+        assert result.returncode == 0, result.stdout + result.stderr
+        config = tomllib.loads((tmp_path / "config.toml").read_text())
+        assert config["model_providers"]["codex-lb"]["supports_websockets"] is supports_websockets
+        assert json.loads((tmp_path / "codex-lb-models.json").read_text()) == catalog_server.payload
 
 
 @pytest.mark.parametrize(
@@ -315,7 +330,7 @@ def test_powershell_catalog_program(tmp_path: Path, catalog_server: _CatalogServ
     config = tomllib.loads(output["config"])
     assert config["model"] == model
     assert config["model_catalog_json"] == str(tmp_path / "Codex 'quoted' 😀/codex-lb-models.json")
-    assert config["model_providers"]["codex-lb"]["supports_websockets"] is False
+    assert config["model_providers"]["codex-lb"]["supports_websockets"] is True
     assert json.loads(output["catalog"]) == {"models": [native, custom]}
 
 

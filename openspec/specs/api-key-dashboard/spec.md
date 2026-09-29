@@ -325,11 +325,11 @@ Every execution of an exported installer MUST fetch `/api/key-dashboard/models` 
 
 The catalog endpoint MUST require an active unexpired Bearer API key regardless of global proxy authentication settings, reuse native catalog serialization and key/source scoping, and return private no-store responses without consuming inference limits.
 
-The provider MUST enable WebSockets only when all installed models advertise `prefer_websockets=true`; otherwise it MUST use HTTP Responses. The installer MUST back up and protect the catalog alongside configuration and authentication. Failed downloads, redirects, invalid or empty catalogs, unavailable selected models, unsafe target paths, and backup failures MUST stop setup before replacement and MUST NOT print the credential or response body.
+At script export, the provider MUST set `supports_websockets=false` if and only if the authenticated key has at least one assigned model source and no assigned accounts. Mixed account/source assignments, account-only assignments, and keys without explicit assignments MUST retain `supports_websockets=true`, regardless of catalog model preferences. The exported flag MUST remain unchanged during catalog refresh, and per-model `prefer_websockets` metadata MUST be preserved. The installer MUST back up and protect the catalog alongside configuration and authentication. Failed downloads, redirects, invalid or empty catalogs, unavailable selected models, unsafe target paths, and backup failures MUST stop setup before replacement and MUST NOT print the credential or response body.
 
 #### Scenario: Install custom aliases with agent metadata
 
-- **GIVEN** a key can access a streaming Responses source with public alias `cd/gpt-6-astra`
+- **GIVEN** a key is assigned only a streaming Responses source with public alias `cd/gpt-6-astra`
 - **WHEN** its installer runs successfully
 - **THEN** the local catalog contains the public alias and its native instructions, tool capabilities, and agent metadata
 - **AND** inaccessible, disabled, non-streaming, and hidden models are not installed
@@ -342,10 +342,30 @@ The provider MUST enable WebSockets only when all installed models advertise `pr
 - **THEN** the newly fetched catalog replaces the previous one and includes the alias
 - **AND** the previous catalog remains in the private backup directory
 
-#### Scenario: Preserve WebSockets for a native-only catalog
+#### Scenario: Disable WebSockets for source-only assignments
 
-- **WHEN** every installed model advertises WebSocket preference
-- **THEN** the provider retains WebSocket support
+- **GIVEN** a key has assigned model sources and no assigned accounts
+- **WHEN** its installer is exported and run on any supported platform
+- **THEN** the provider disables WebSockets even if the catalog includes native models or a source uses a native model slug
+
+#### Scenario: Preserve WebSockets for mixed assignments
+
+- **GIVEN** a key has both assigned accounts and assigned model sources
+- **WHEN** its installer is exported and run
+- **THEN** the provider enables WebSockets even if its model allowlist contains only source models preferring HTTP
+- **AND** installed per-model transport preferences remain unchanged
+
+#### Scenario: Preserve WebSockets for account-only and unassigned keys
+
+- **WHEN** a key with only assigned accounts or no explicit assignments exports and runs its installer
+- **THEN** the provider enables WebSockets regardless of catalog preferences
+
+#### Scenario: Refresh catalog without overriding exported assignment policy
+
+- **GIVEN** an installer exported with a provider WebSocket flag
+- **WHEN** catalog preferences change and the same script is rerun
+- **THEN** the catalog refreshes while the exported provider flag remains unchanged
+- **AND** exporting a new script uses the key's current assignments
 
 #### Scenario: Failed refresh preserves the client setup
 

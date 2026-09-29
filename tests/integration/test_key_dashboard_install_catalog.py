@@ -11,7 +11,8 @@ import pytest
 from aiohttp import web
 from sqlalchemy import func, select, update
 
-from app.db.models import ApiKeyLimit, ApiKeyUsageReservation
+from app.core.utils.time import utcnow
+from app.db.models import Account, ApiKeyLimit, ApiKeyUsageReservation
 from app.db.session import SessionLocal
 from tests.integration.model_source_helpers import _create_model_source, _enable_api_key_auth, stub_source_upstreams
 
@@ -158,6 +159,90 @@ async def test_exported_installer_downloads_scoped_aliases_and_preserves_agent_m
     for private in (source, "ch/linxaq", "upstream_model", "token-installer-alias", "upstream.invalid", key):
         assert private not in catalog_text
     assert json.loads((tmp_path / "auth.json").read_text()) == {"OPENAI_API_KEY": key}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("assign_account", "assign_source", "source_model", "allowed_models", "expected_websockets"),
+    [
+        (False, True, "custom/install", None, False),
+        (False, True, "custom/install", ["custom/install"], False),
+        (False, True, "gpt-5.4", ["gpt-5.4"], False),
+        (True, True, "custom/install", None, True),
+        (True, True, "custom/install", ["custom/install"], True),
+        (True, False, "custom/install", None, True),
+        (False, False, "custom/install", ["custom/install"], True),
+        (False, False, "custom/install", None, True),
+    ],
+)
+async def test_exported_installer_websockets_follow_key_assignments(
+    async_client, tmp_path: Path, assign_account, assign_source, source_model, allowed_models, expected_websockets
+):
+    # An available global account must not enable transport for a source-only assignment.
+    account_id = "installer-account"
+    async with SessionLocal() as session:
+        session.add(
+            Account(
+                id=account_id,
+                email="installer@example.com",
+                plan_type="plus",
+                access_token_encrypted=b"test-access",
+                refresh_token_encrypted=b"test-refresh",
+                id_token_encrypted=b"test-id",
+                last_refresh=utcnow(),
+            )
+        )
+        await session.commit()
+    source_id = await _create_model_source(
+        async_client,
+        name="installer-transport",
+        model=source_model,
+        base_url="https://upstream.invalid/v1",
+        supports_responses=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "installer-transport",
+            "assignedAccountIds": [account_id] if assign_account else [],
+            "assignedSourceIds": [source_id] if assign_source else [],
+            "allowedModels": allowed_models,
+            "applyToCodexModel": True,
+            "limits": [],
+        },
+    )
+    assert created.status_code == 200, created.text
+    headers = {"Authorization": f"Bearer {created.json()['key']}"}
+    catalog = await async_client.get("/api/key-dashboard/models", headers=headers)
+    assert catalog.status_code == 200
+    expected_models = [
+        model for model in catalog.json()["models"] if model["visibility"] == "list" and model["supported_in_api"]
+    ]
+
+    async def bridge(request: web.Request) -> web.Response:
+        assert request.headers["Authorization"] == headers["Authorization"]
+        response = await async_client.get(request.path, headers=headers)
+        return web.Response(status=response.status_code, body=response.content, content_type="application/json")
+
+    async with stub_source_upstreams() as start:
+        origin = (await start(bridge)).removesuffix("/v1")
+        exported = await async_client.get(origin + "/api/key-dashboard/install-script?platform=linux", headers=headers)
+        assert exported.status_code == 200
+        assert account_id not in exported.text
+        assert source_id not in exported.text
+        process = await asyncio.create_subprocess_exec(
+            "bash",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "CODEX_HOME": str(tmp_path)},
+        )
+        _, stderr = await asyncio.wait_for(process.communicate(exported.content), timeout=15)
+        assert process.returncode == 0, stderr.decode()
+
+    config = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert config["model_providers"]["codex-lb"]["supports_websockets"] is expected_websockets
+    assert json.loads((tmp_path / "codex-lb-models.json").read_text())["models"] == expected_models
 
 
 @pytest.mark.asyncio

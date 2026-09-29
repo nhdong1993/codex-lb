@@ -69,7 +69,6 @@ config = (
     "model = " + toml_string(model) + "\n"
     + "model_catalog_json = " + toml_string(str(catalog_path)) + "\n"
     + config_path.read_text(encoding="utf-8")
-    + "supports_websockets = " + str(all(entry["prefer_websockets"] for entry in models)).lower() + "\n"
 )
 config_path.write_text(config, encoding="utf-8")
 (backup_dir / "setup.json").unlink()
@@ -114,9 +113,8 @@ if ($model -cnotin @($models | ForEach-Object { $_.slug })) {
 }
 $catalogPath = Join-Path $codexDir 'codex-lb-models.json'
 $catalogJson = ConvertTo-Json -InputObject @{ models = @($models) } -Depth 100
-$websockets = (@($models | Where-Object { -not $_.prefer_websockets }).Count -eq 0).ToString().ToLowerInvariant()
 # ConvertTo-Json safely quotes TOML basic strings, including Windows path separators.
 $modelJson = ConvertTo-Json -InputObject $model -Compress
 $pathJson = ConvertTo-Json -InputObject $catalogPath -Compress
-$config = "model = $modelJson`nmodel_catalog_json = $pathJson`n" + $config + "`nsupports_websockets = $websockets`n"
+$config = "model = $modelJson`nmodel_catalog_json = $pathJson`n" + $config
 """
