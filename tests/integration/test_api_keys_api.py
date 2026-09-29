@@ -3319,6 +3319,14 @@ async def test_chat_completions_stream_finalizes_cost_limit(async_client, monkey
         ("gpt-6-sol-2026-09-23", "flex", 200_000, 100_000, 0.61),
         ("GPT-6-LUNA", "default", 200_000, 100_000, 0.061),
         ("gpt-6-astra-2026-09-23", "fast", 300_000, 50_000, 25.20),
+        ("gpt-6.1-sol", "default", 200_000, 100_000, 1.21),
+        ("gpt-6.1-sol-2026-09-29", "fast", 200_000, 100_000, 2.42),
+        ("GPT-6.1-SOL", "priority", 200_000, 100_000, 2.42),
+        ("gpt-6.1-sol", "flex", 200_000, 100_000, 0.605),
+        ("GPT-6.1-SOL", "default", 300_000, 50_000, 2.51),
+        ("gpt-6.1-sol", "fast", 300_000, 50_000, 5.02),
+        ("gpt-6.1-sol-2026-09-29", "priority", 300_000, 50_000, 5.02),
+        ("gpt-6.1-sol", "flex", 300_000, 50_000, 1.255),
     ],
 )
 async def test_gpt_6_chat_completion_settles_cost_and_persists_log(
@@ -3384,6 +3392,129 @@ async def test_gpt_6_chat_completion_settles_cost_and_persists_log(
         assert log.cached_input_tokens == cached_tokens
         assert log.output_tokens == 100_000
         assert log.cost_usd == pytest.approx(expected_cost)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/v1/responses",
+        "/v1/responses/",
+        "/backend-api/codex/responses",
+        "/backend-api/codex/responses/",
+        "/v1/chat/completions",
+    ],
+)
+async def test_gpt_6_1_sol_cost_reservations_reject_exhausted_budget_before_upstream(
+    async_client, monkeypatch, endpoint
+):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "gpt-6.1-sol-reservation",
+            "limits": [{"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": 50_000}],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    headers = {"Authorization": f"Bearer {created.json()['key']}"}
+    await _import_account(async_client, "acc_gpt_6_1_reservation", "gpt-6.1-reservation@example.com")
+
+    started: asyncio.Queue[int] = asyncio.Queue()
+    release = asyncio.Event()
+    upstream_calls = 0
+
+    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        nonlocal upstream_calls
+        upstream_calls += 1
+        call_number = upstream_calls
+        started.put_nowait(call_number)
+        await release.wait()
+        event = {
+            "type": "response.completed",
+            "response": {
+                "id": f"resp_gpt_6_1_reservation_{call_number}",
+                "model": "gpt-6.1-sol",
+                "usage": {
+                    "input_tokens": 200_000,
+                    "output_tokens": 100_000,
+                    "total_tokens": 300_000,
+                    "input_tokens_details": {"cached_tokens": 100_000},
+                },
+            },
+        }
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    request_payload = (
+        {
+            "model": "gpt-6.1-sol",
+            "messages": [{"role": "user", "content": "x" * 8_192}],
+            "stream": True,
+        }
+        if "/chat/completions" in endpoint
+        else {"model": "gpt-6.1-sol", "instructions": "x" * 8_192, "input": [], "stream": True}
+    )
+    pending = [asyncio.create_task(async_client.post(endpoint, headers=headers, json=request_payload))]
+    try:
+        async with asyncio.timeout(10):
+            assert await started.get() == 1
+        async with SessionLocal() as session:
+            limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+            # 8,192 input + 2,048 output tokens, allowing integer microdollar truncation.
+            assert limits[0].current_value == pytest.approx(36_864, abs=1)
+
+        pending.append(asyncio.create_task(async_client.post(endpoint, headers=headers, json=request_payload)))
+        async with asyncio.timeout(10):
+            assert await started.get() == 2
+        async with SessionLocal() as session:
+            repo = ApiKeysRepository(session)
+            limits = await repo.get_limits_by_key(key_id)
+            assert limits[0].current_value == 50_000
+            reservations = (
+                await session.scalars(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id))
+            ).all()
+            reserved_deltas = []
+            for row in reservations:
+                reservation = await repo.get_usage_reservation(row.id)
+                assert reservation is not None
+                assert reservation.status == "reserved"
+                reserved_deltas.append(reservation.items[0].reserved_delta)
+            assert sorted(reserved_deltas) == pytest.approx([13_136, 36_864], abs=1)
+            assert sum(reserved_deltas) == 50_000
+
+        async with asyncio.timeout(10):
+            blocked = await async_client.post(endpoint, headers=headers, json=request_payload)
+        assert blocked.status_code == 429
+        assert blocked.json()["error"]["code"] == "rate_limit_exceeded"
+        assert upstream_calls == 2
+    finally:
+        release.set()
+        async with asyncio.timeout(10):
+            responses = await asyncio.gather(*pending, return_exceptions=True)
+
+    for response in responses:
+        assert not isinstance(response, BaseException)
+        assert response.status_code == 200
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert limits[0].current_value == 2_420_000
+        for row in reservations:
+            reservation = await repo.get_usage_reservation(row.id)
+            assert reservation is not None
+            assert reservation.status == "finalized"
+            assert reservation.items[0].actual_delta == 1_210_000
 
 
 @pytest.mark.asyncio

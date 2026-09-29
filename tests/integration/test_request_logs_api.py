@@ -463,6 +463,14 @@ async def test_request_logs_api_prices_gpt_6_families_and_aggregates(async_clien
         ("gpt-6-sol-2026-09-23", "flex", 200_000, 100_000, 0.1, 0.01, 0.5, 0.61),
         ("GPT-6-LUNA", "default", 200_000, 100_000, 0.01, 0.001, 0.05, 0.061),
         ("gpt-6-astra-2026-09-23", "fast", 300_000, 50_000, 10.0, 0.2, 15.0, 25.20),
+        ("gpt-6.1-sol", "default", 200_000, 100_000, 0.2, 0.01, 1.0, 1.21),
+        ("gpt-6.1-sol-2026-09-29", "fast", 200_000, 100_000, 0.4, 0.02, 2.0, 2.42),
+        ("GPT-6.1-SOL", "priority", 200_000, 100_000, 0.4, 0.02, 2.0, 2.42),
+        ("gpt-6.1-sol", "flex", 200_000, 100_000, 0.1, 0.005, 0.5, 0.605),
+        ("GPT-6.1-SOL", "default", 300_000, 50_000, 1.0, 0.01, 1.5, 2.51),
+        ("gpt-6.1-sol", "fast", 300_000, 50_000, 2.0, 0.02, 3.0, 5.02),
+        ("gpt-6.1-sol-2026-09-29", "priority", 300_000, 50_000, 2.0, 0.02, 3.0, 5.02),
+        ("gpt-6.1-sol", "flex", 300_000, 50_000, 0.5, 0.005, 0.75, 1.255),
     ]
     async with SessionLocal() as session:
         repo = RequestLogsRepository(session)
@@ -490,11 +498,13 @@ async def test_request_logs_api_prices_gpt_6_families_and_aggregates(async_clien
     assert body["total"] == len(cases)
     assert body["conversation"] == {
         "requestCount": len(cases),
-        "aggregatedCostUsd": pytest.approx(31.971),
+        "aggregatedCostUsd": pytest.approx(52.431),
     }
-    by_model = {row["model"]: row for row in body["requests"]}
-    for model, tier, input_tokens, cached_tokens, input_usd, cached_usd, output_usd, total_usd in cases:
-        row = by_model[model]
+    by_request_id = {row["requestId"]: row for row in body["requests"]}
+    for index, case in enumerate(cases):
+        model, tier, input_tokens, cached_tokens, input_usd, cached_usd, output_usd, total_usd = case
+        row = by_request_id[f"req_gpt_6_cost_{index}"]
+        assert row["model"] == model
         assert row["serviceTier"] == tier
         assert row["inputTokens"] == input_tokens
         assert row["cachedInputTokens"] == cached_tokens

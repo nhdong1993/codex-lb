@@ -82,7 +82,7 @@ def test_get_pricing_for_model_gpt_5_6_aliases(requested_model: str, canonical_m
     assert result == (canonical_model, DEFAULT_PRICING_MODELS[canonical_model])
 
 
-@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"])
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"])
 @pytest.mark.parametrize("suffix", ["", "-2026-09-22"])
 @pytest.mark.parametrize("uppercase", [False, True])
 def test_get_pricing_for_model_gpt_6_aliases(model: str, suffix: str, uppercase: bool) -> None:
@@ -96,7 +96,9 @@ def test_get_pricing_for_model_gpt_6_aliases(model: str, suffix: str, uppercase:
     assert result[0] == model
 
 
-@pytest.mark.parametrize("model", ["gpt-6", "gpt-6-unknown", "gpt-6-terra"])
+@pytest.mark.parametrize(
+    "model", ["gpt-6", "gpt-6-unknown", "gpt-6-terra", "gpt-6.1", "gpt-6.1-astra", "gpt-6.1-unknown"]
+)
 def test_get_pricing_for_model_does_not_guess_unknown_gpt_6_family(model: str) -> None:
     assert get_pricing_for_model(model) is None
 
@@ -107,6 +109,7 @@ def test_get_pricing_for_model_does_not_guess_unknown_gpt_6_family(model: str) -
         ("gpt-6-astra", 10.0, 1.0, 50.0),
         ("gpt-6-sol", 2.0, 0.2, 10.0),
         ("gpt-6-luna", 0.1, 0.01, 0.5),
+        ("gpt-6.1-sol", 2.0, 0.1, 10.0),
     ],
 )
 @pytest.mark.parametrize(
@@ -156,13 +159,15 @@ def test_calculate_costs_includes_gpt_6_families_and_aliases() -> None:
             CostItem(model="gpt-6-astra", usage=usage),
             CostItem(model="gpt-6-sol-2026-09-22", usage=usage, service_tier="fast"),
             CostItem(model="GPT-6-LUNA", usage=usage, service_tier="flex"),
+            CostItem(model="gpt-6.1-sol", usage=usage),
+            CostItem(model="GPT-6.1-SOL-2026-09-29", usage=usage, service_tier="flex"),
             CostItem(model="gpt-6-unknown", usage=usage),
         ]
     )
 
-    assert costs.total_usd_7d == pytest.approx(8.5705)
+    assert costs.total_usd_7d == pytest.approx(10.3855)
     assert {item.model: item.usd for item in costs.by_model} == pytest.approx(
-        {"gpt-6-astra": 6.1, "gpt-6-sol": 2.44, "gpt-6-luna": 0.0305}
+        {"gpt-6-astra": 6.1, "gpt-6-sol": 2.44, "gpt-6-luna": 0.0305, "gpt-6.1-sol": 1.815}
     )
 
 
