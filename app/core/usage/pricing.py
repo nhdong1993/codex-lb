@@ -352,6 +352,20 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
     # publishes per-model deltas. Without these entries cost-based API
     # key quotas would resolve every /v1/images/* call to $0 and the
     # quota would never bite.
+    # Explicit 2.5 entries preserve the same aggregate-token estimate while
+    # isolating these variants from future changes to the gpt-image-2* alias.
+    # This is not modality-exact billing: text/image input and cached rates
+    # differ. See openspec/specs/images-api-compat/context.md.
+    "gpt-image-2.5-sunburst": ModelPrice(
+        input_per_1m=5.0,
+        cached_input_per_1m=2.0,
+        output_per_1m=30.0,
+    ),
+    "gpt-image-2.5-flare": ModelPrice(
+        input_per_1m=5.0,
+        cached_input_per_1m=2.0,
+        output_per_1m=30.0,
+    ),
     "gpt-image-2": ModelPrice(
         input_per_1m=5.0,
         cached_input_per_1m=2.0,

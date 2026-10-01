@@ -19,6 +19,16 @@ from app.core.usage.pricing import (
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize("model", ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"])
+def test_image_25_canonical_price_and_cached_cost(model):
+    resolved = get_pricing_for_model(model)
+    assert resolved is not None
+    canonical, price = resolved
+    assert canonical == model
+    usage = UsageTokens(input_tokens=1000, cached_input_tokens=200, output_tokens=100)
+    assert calculate_cost_from_usage(usage, price) == pytest.approx(0.0074)
+
+
 def test_resolve_model_alias_longest_match():
     aliases = {
         "gpt-5*": "gpt-5",

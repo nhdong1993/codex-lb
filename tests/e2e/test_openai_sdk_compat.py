@@ -601,6 +601,7 @@ def _patch_images_upstream(
     revised_prompt: str = "neat",
     resp_id: str = "resp_img",
     size: str = "1024x1024",
+    quality: str = "low",
     output_format: str = "png",
     input_tokens: int = 11,
     output_tokens: int = 17,
@@ -633,7 +634,7 @@ def _patch_images_upstream(
                     "result": result_b64,
                     "revised_prompt": revised_prompt,
                     "size": size,
-                    "quality": "low",
+                    "quality": quality,
                     "background": "auto",
                     "output_format": output_format,
                 },
@@ -710,8 +711,6 @@ class TestImages:
         form-data to ``/v1/images/edits``. The proxy must accept the
         single ``image`` field, forward the bytes upstream, and return
         the translated b64 image."""
-        # gpt-image-2 does not accept image edits; switch model for this
-        # case to one that does.
         _patch_images_upstream(
             monkeypatch,
             result_b64="EDITED_B64",
@@ -728,6 +727,45 @@ class TestImages:
 
         assert result.data
         assert result.data[0].b64_json == "EDITED_B64"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model", "quality"),
+        [("gpt-image-2.5-sunburst", "xhigh"), ("gpt-image-2.5-flare", "max")],
+    )
+    @pytest.mark.parametrize("edit", [False, True])
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_image25_runtime_compatibility(self, sdk_client, monkeypatch, model, quality, edit, stream):
+        captured: dict[str, Any] = {}
+        _patch_images_upstream(monkeypatch, quality=quality, captured=captured)
+        # The locked SDK's quality Literal predates 2.5; extra_body preserves
+        # the server-supported value without changing the SDK dependency.
+        options = {
+            "model": model,
+            "prompt": "a red circle",
+            "stream": stream,
+            "extra_body": {"quality": quality},
+        }
+        if edit:
+            result = await sdk_client.images.edit(image=("input.png", _PNG_1X1_BYTES, "image/png"), **options)
+        else:
+            result = await sdk_client.images.generate(**options)
+        if stream:
+            events = [event async for event in result]
+            assert len(events) == 1
+            assert events[0].type == ("image_edit.completed" if edit else "image_generation.completed")
+            assert events[0].b64_json == "FAKE_IMAGE_B64"
+            assert events[0].quality == quality
+            assert events[0].usage.input_tokens == 11
+        else:
+            assert result.data[0].b64_json == "FAKE_IMAGE_B64"
+            assert result.usage.input_tokens == 11
+        tool = captured["tools"][0]
+        assert tool["model"] == model
+        assert tool["quality"] == quality
+        if edit:
+            assert tool["action"] == "edit"
+        assert captured["model"] == "gpt-5.5"
 
     @pytest.mark.asyncio
     async def test_variation_is_clean_4xx(self, sdk_client):

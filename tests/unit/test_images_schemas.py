@@ -311,6 +311,78 @@ class TestValidateImageRequestParameters:
         assert excinfo.value.param == "moderation"
 
 
+@pytest.mark.parametrize("model", ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"])
+class TestImage25Parameters:
+    @pytest.mark.parametrize("schema", [V1ImagesGenerationsRequest, V1ImagesEditsForm])
+    def test_schema_admission(self, model, schema):
+        assert schema.model_validate({"model": model, "prompt": "circle"}).model == model
+
+    @pytest.mark.parametrize("quality", ["auto", "low", "medium", "high", "xhigh", "max"])
+    @pytest.mark.parametrize("is_edit", [False, True])
+    def test_quality(self, model, quality, is_edit):
+        _validate_default(model=model, quality=quality, is_edit=is_edit)
+
+    @pytest.mark.parametrize(
+        "size",
+        ["auto", "1024x640", "3840x2160", "2160x3840", "3840x1280", "1536x512", "512x1536", "1536x864"],
+    )
+    def test_size_boundaries(self, model, size):
+        _validate_default(model=model, size=size)
+
+    @pytest.mark.parametrize(
+        "size",
+        ["1008x640", "3840x2176", "3856x1712", "1552x512", "512x1552", "1025x1024", "0x1024", "-16x1024", "bad"],
+    )
+    def test_invalid_size(self, model, size):
+        with pytest.raises(ClientPayloadError) as exc:
+            _validate_default(model=model, size=size)
+        assert exc.value.param == "size"
+        assert model in str(exc.value) or size in str(exc.value) or size == "0x1024"
+
+    @pytest.mark.parametrize("output_format", ["png", "webp"])
+    @pytest.mark.parametrize("is_edit", [False, True])
+    def test_transparency(self, model, output_format, is_edit):
+        _validate_default(model=model, background="transparent", output_format=output_format, is_edit=is_edit)
+
+    @pytest.mark.parametrize(
+        ("overrides", "param"),
+        [
+            ({"background": "transparent", "output_format": "jpeg"}, "output_format"),
+            ({"quality": "hd"}, "quality"),
+            ({"quality": "invalid"}, "quality"),
+            ({"input_fidelity": "low"}, "input_fidelity"),
+            ({"input_fidelity": "high"}, "input_fidelity"),
+            ({"n": 2}, "n"),
+            ({"partial_images": -1}, "partial_images"),
+            ({"partial_images": 4}, "partial_images"),
+            ({"output_compression": 101}, "output_compression"),
+        ],
+    )
+    @pytest.mark.parametrize("is_edit", [False, True])
+    def test_invalid_parameters(self, model, overrides, param, is_edit):
+        with pytest.raises(ClientPayloadError) as exc:
+            _validate_default(model=model, is_edit=is_edit, **overrides)
+        assert exc.value.param == param
+
+    @pytest.mark.parametrize("partial_images", [0, 3])
+    def test_partial_bounds(self, model, partial_images):
+        _validate_default(model=model, partial_images=partial_images)
+
+    @pytest.mark.parametrize("suffix", ["-2026-09-08", "-unknown"])
+    def test_unlisted_ids(self, model, suffix):
+        assert not is_supported_image_model(model + suffix)
+        with pytest.raises(ValidationError):
+            V1ImagesGenerationsRequest.model_validate({"model": model + suffix, "prompt": "circle"})
+
+
+@pytest.mark.parametrize("model", ["gpt-image-2", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini"])
+@pytest.mark.parametrize("quality", ["xhigh", "max"])
+def test_legacy_models_reject_extended_quality(model, quality):
+    with pytest.raises(ClientPayloadError) as exc:
+        _validate_default(model=model, quality=quality)
+    assert exc.value.param == "quality"
+
+
 class TestImagePricingPresent:
     """Cost-based API key quotas would resolve to $0 if pricing entries
     are missing for ``gpt-image-*`` models. These tests pin the pricing

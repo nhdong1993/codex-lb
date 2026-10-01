@@ -135,6 +135,7 @@ describe("automations page integration", () => {
 						{ id: "gpt-5.4", name: "GPT 5.4", sourceOnly: false },
 						{ id: "openai-compatible/source-model", name: "Source model", sourceOnly: true },
 						{ id: "gpt-image-2", name: "gpt-image-2", sourceOnly: false, imageOnly: true },
+						...["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"].map((id) => ({ id, name: id, sourceOnly: false, imageOnly: true })),
 					],
 				}),
 			),
@@ -151,5 +152,7 @@ describe("automations page integration", () => {
 		expect(within(listbox).getByText("gpt-5.4")).toBeInTheDocument();
 		expect(within(listbox).queryByText("openai-compatible/source-model")).not.toBeInTheDocument();
 		expect(within(listbox).queryByText("gpt-image-2")).not.toBeInTheDocument();
+		expect(within(listbox).queryByText("gpt-image-2.5-sunburst")).not.toBeInTheDocument();
+		expect(within(listbox).queryByText("gpt-image-2.5-flare")).not.toBeInTheDocument();
 	});
 });

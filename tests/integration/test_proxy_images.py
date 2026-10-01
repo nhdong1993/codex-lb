@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
-from httpx import AsyncByteStream
+from httpx import ASGITransport, AsyncByteStream, AsyncClient
 from sqlalchemy import select
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
@@ -26,13 +26,16 @@ from starlette.responses import JSONResponse
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.config.settings import Settings
+from app.core.errors import OpenAIErrorEnvelope
 from app.core.exceptions import ProxyModelNotAllowed, ProxyRateLimitError
 from app.core.multipart import MultipartPolicy
-from app.db.models import ApiKeyUsageReservation, DashboardSettings
+from app.db.models import ApiKeyUsageReservation, DashboardSettings, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 
 pytestmark = pytest.mark.integration
+
+IMAGE_25_MODELS = ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"]
 
 
 class _NeverReadStream(AsyncByteStream):
@@ -134,15 +137,25 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_images_generations_unsupported_model_returns_400(async_client, caplog):
+@pytest.mark.parametrize(
+    "model",
+    ["dall-e-3", "gpt-image-2.5-unknown", "gpt-image-2.5-sunburst-2026-09-08", "gpt-image-2.5-flare-2026-09-08"],
+)
+async def test_images_generations_unsupported_model_returns_400(async_client, caplog, model, monkeypatch):
+    async def unexpected_upstream(*args, **kwargs):
+        raise AssertionError("An unsupported model must not open an upstream request")
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", unexpected_upstream)
     with caplog.at_level(logging.INFO, logger="app.modules.proxy.api"):
         response = await async_client.post(
             "/v1/images/generations",
-            json={"model": "dall-e-3", "prompt": "a red circle"},
+            json={"model": model, "prompt": "a red circle"},
         )
     assert response.status_code == 400
     body = response.json()
     assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "model"
     assert (
         "images_route_complete route=generations model=invalid stream=false status=400 outcome=invalid_request"
         in caplog.text
@@ -241,12 +254,13 @@ async def test_backend_codex_images_generations_alias_auth_rejection_records_rou
 
 
 @pytest.mark.asyncio
-async def test_images_generations_trailing_slash_parity_between_v1_and_codex_alias(async_client):
+@pytest.mark.parametrize("model", ["gpt-image-2", *IMAGE_25_MODELS])
+async def test_images_generations_trailing_slash_parity_between_v1_and_codex_alias(async_client, model):
     # Codex joins `base_url` + "images/generations" without a trailing slash,
     # so only the exact paths are handled. The trailing-slash variants fall
     # through to the SPA catch-all route and must fail identically (405 with
     # the OpenAI error envelope) on the canonical and alias surfaces.
-    payload = {"model": "dall-e-3", "prompt": "a red circle"}
+    payload = {"model": model, "prompt": "a red circle"}
     v1_response = await async_client.post("/v1/images/generations/", json=payload)
     alias_response = await async_client.post("/backend-api/codex/images/generations/", json=payload)
     assert v1_response.status_code == 405
@@ -309,7 +323,8 @@ async def test_images_generations_no_accounts_returns_5xx(async_client):
 
 
 @pytest.mark.asyncio
-async def test_images_generations_returns_envelope_on_success(async_client, monkeypatch, caplog):
+@pytest.mark.parametrize("model", ["gpt-image-2", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"])
+async def test_images_generations_returns_envelope_on_success(async_client, monkeypatch, caplog, model):
     await _import_account(async_client, "acc_images_basic", "img-basic@example.com")
 
     captured: dict[str, object] = {}
@@ -361,7 +376,7 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
         response = await async_client.post(
             "/v1/images/generations",
             json={
-                "model": "gpt-image-2",
+                "model": model,
                 "prompt": "tiny red circle on white",
                 "n": 1,
                 "size": "1024x1024",
@@ -380,12 +395,11 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
     tools = cast(list[Any], captured["tools"])
     image_tool = cast(dict[str, Any], tools[0])
     assert image_tool["type"] == "image_generation"
-    assert image_tool["model"] == "gpt-image-2"
+    assert image_tool["model"] == model
     assert image_tool["size"] == "1024x1024"
     assert image_tool["quality"] == "low"
     assert (
-        "images_route_complete route=generations model=gpt-image-2 stream=false status=200 outcome=success"
-        in caplog.text
+        f"images_route_complete route=generations model={model} stream=false status=200 outcome=success" in caplog.text
     )
 
 
@@ -995,12 +1009,13 @@ async def test_backend_codex_images_edits_alias_auth_rejection_records_route_obs
 
 
 @pytest.mark.asyncio
-async def test_images_edits_trailing_slash_parity_between_v1_and_codex_alias(async_client):
+@pytest.mark.parametrize("model", ["gpt-image-2", *IMAGE_25_MODELS])
+async def test_images_edits_trailing_slash_parity_between_v1_and_codex_alias(async_client, model):
     # Codex joins `base_url` + "images/edits" without a trailing slash, so
     # only the exact paths are handled. The trailing-slash variants fall
     # through to the SPA catch-all route and must fail identically (405 with
     # the OpenAI error envelope) on the canonical and alias surfaces.
-    payload = {"model": "gpt-image-2", "prompt": "make it green", "images": []}
+    payload = {"model": model, "prompt": "make it green", "images": []}
     v1_response = await async_client.post("/v1/images/edits/", json=payload)
     alias_response = await async_client.post("/backend-api/codex/images/edits/", json=payload)
     assert v1_response.status_code == 405
@@ -1028,7 +1043,8 @@ async def test_backend_codex_images_edits_invalid_utf8_returns_400(async_client,
 
 
 @pytest.mark.asyncio
-async def test_images_edits_basic_round_trip(async_client, monkeypatch):
+@pytest.mark.parametrize("model", ["gpt-image-1", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"])
+async def test_images_edits_basic_round_trip(async_client, monkeypatch, model):
     await _import_account(async_client, "acc_images_edit", "img-edit@example.com")
 
     captured: dict[str, object] = {}
@@ -1067,7 +1083,7 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
     response = await async_client.post(
         "/v1/images/edits",
         data={
-            "model": "gpt-image-1",
+            "model": model,
             "prompt": "make it green",
             "size": "1024x1024",
             "quality": "low",
@@ -1096,6 +1112,10 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
     assert len(image_parts) == 1
     image_url_value = cast(str, image_parts[0]["image_url"])
     assert image_url_value.startswith("data:image/png;base64,")
+
+    tools = cast(list[dict[str, object]], captured["tools"])
+    assert tools[0]["model"] == model
+    assert tools[0]["action"] == "edit"
 
 
 @pytest.mark.asyncio
@@ -1406,8 +1426,10 @@ async def test_images_generations_propagates_upstream_error_before_first_chunk(a
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["generations", "edits"])
+@pytest.mark.parametrize("model", ["gpt-image-2", *IMAGE_25_MODELS])
 async def test_image_routes_cancel_before_first_upstream_frame_release_reservation(
     async_client,
+    model,
     monkeypatch,
     route,
 ):
@@ -1486,7 +1508,7 @@ async def test_image_routes_cancel_before_first_upstream_frame_release_reservati
             "/v1/images/generations",
             headers=headers,
             json={
-                "model": "gpt-image-2",
+                "model": model,
                 "prompt": "cancel before first frame",
                 "size": "1024x1024",
                 "quality": "low",
@@ -1497,7 +1519,7 @@ async def test_image_routes_cancel_before_first_upstream_frame_release_reservati
             "/v1/images/edits",
             headers=headers,
             data={
-                "model": "gpt-image-2",
+                "model": model,
                 "prompt": "cancel before first frame",
                 "size": "1024x1024",
                 "quality": "low",
@@ -1934,8 +1956,10 @@ async def test_images_generations_finalize_failure_tracks_release_recovery(
         ("edits", True),
     ],
 )
+@pytest.mark.parametrize("model", ["gpt-image-2", *IMAGE_25_MODELS])
 async def test_image_routes_handoff_captured_usage_exactly_once(
     async_client,
+    model,
     monkeypatch,
     route,
     stream,
@@ -2050,7 +2074,7 @@ async def test_image_routes_handoff_captured_usage_exactly_once(
             "/v1/images/generations",
             headers=headers,
             json={
-                "model": "gpt-image-2",
+                "model": model,
                 "prompt": "handoff",
                 "stream": stream,
                 "size": "1024x1024",
@@ -2062,7 +2086,7 @@ async def test_image_routes_handoff_captured_usage_exactly_once(
             "/v1/images/edits",
             headers=headers,
             data={
-                "model": "gpt-image-2",
+                "model": model,
                 "prompt": "handoff",
                 "stream": str(stream).lower(),
                 "size": "1024x1024",
@@ -2079,11 +2103,351 @@ async def test_image_routes_handoff_captured_usage_exactly_once(
 
     assert response.status_code == 200, response.text
     assert internal_reservations == [None]
+    if stream:
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
+        assert events
+        assert all(not {"quality", "size", "background", "output_format"}.intersection(event) for event in events)
     assert len(handoffs) == 1
     handoff = handoffs[0]
     assert handoff["api_key"] is not None
     assert handoff["reservation"] is not None
-    assert handoff["model"] == "gpt-image-2"
+    assert handoff["model"] == model
     assert handoff["input_tokens"] == 3
     assert handoff["output_tokens"] == 4
     assert handoff["cached_input_tokens"] is None
+
+
+@pytest.fixture
+def image25_upstream(monkeypatch):
+    state: dict[str, Any] = {"payloads": [], "failure": None, "usage": True}
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        from app.core.clients.proxy import ProxyResponseError
+
+        state["payloads"].append(payload)
+        error: OpenAIErrorEnvelope = {
+            "error": {
+                "code": "invalid_request_error",
+                "type": "invalid_request_error",
+                "param": "model" if "sunburst" in payload.tools[0]["model"] else "quality",
+                "message": "image option rejected upstream",
+            }
+        }
+        if state["failure"] == "before":
+            raise ProxyResponseError(400, error)
+        yield _sse({"type": "response.created", "response": {"id": "resp_image25"}})
+        if state["failure"] == "after":
+            yield _sse({"type": "response.failed", "response": {"id": "resp_image25", **error}})
+            return
+        tool = payload.tools[0]
+        metadata = {key: tool[key] for key in ("quality", "size", "background", "output_format")}
+        yield _sse(
+            {
+                "type": "response.image_generation_call.partial_image",
+                "partial_image_b64": "PARTIAL_25",
+                "partial_image_index": 0,
+                **metadata,
+            }
+        )
+        yield _sse(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "image_generation_call",
+                    "id": "ig_image25",
+                    "status": "completed",
+                    "result": "IMAGE_25",
+                    **metadata,
+                },
+            }
+        )
+        response = {
+            "id": "resp_image25",
+            "status": "completed",
+            "usage": {"input_tokens": 9000, "output_tokens": 8000, "total_tokens": 17000},
+        }
+        if state["usage"]:
+            response["tool_usage"] = {
+                "image_gen": {
+                    "input_tokens": 1000,
+                    "output_tokens": 100,
+                    "input_tokens_details": {"cached_tokens": 200},
+                }
+            }
+        yield _sse({"type": "response.completed", "response": response})
+
+    async def fresh(self, account, **kwargs):
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fresh)
+    return state
+
+
+async def _post_image25(client, route, model, *, stream=False, headers=None, quality="max", **options):
+    fields = {
+        "prompt": "private test prompt",
+        "quality": quality,
+        "size": "1536x864",
+        "background": "transparent",
+        "stream": stream,
+        **options,
+    }
+    if model is not None:
+        fields["model"] = model
+    if route.endswith("edits") and "/backend-api/" not in route:
+        data = {key: str(value).lower() if isinstance(value, bool) else str(value) for key, value in fields.items()}
+        return await client.post(
+            route,
+            data=data,
+            headers=headers,
+            files={
+                "image": ("input.png", b"source-image", "image/png"),
+                "mask": ("mask.png", b"mask-image", "image/png"),
+            },
+        )
+    if route.endswith("edits"):
+        fields["images"] = [{"image_url": "data:image/png;base64,c291cmNlLWltYWdl"}]
+    return await client.post(route, json=fields, headers=headers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", IMAGE_25_MODELS)
+@pytest.mark.parametrize(
+    "route",
+    [
+        "/v1/images/generations",
+        "/v1/images/edits",
+        "/backend-api/codex/images/generations",
+        "/backend-api/codex/images/edits",
+    ],
+)
+@pytest.mark.parametrize("stream", [False, True])
+async def test_image25_routes_preserve_options(
+    async_client, image25_upstream, model, route, stream, caplog, monkeypatch
+):
+    from app.modules.proxy import images_observability
+
+    observations = []
+
+    class Metric:
+        def labels(self, **labels):
+            observations.append(labels)
+            return self
+
+        def inc(self):
+            pass
+
+        def observe(self, value):
+            assert value >= 0
+
+    monkeypatch.setattr(images_observability, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(images_observability, "image_requests_total", Metric())
+    monkeypatch.setattr(images_observability, "image_request_duration_seconds", Metric())
+    await _import_account(async_client, "acc_image25", "image25@example.com")
+    quality = "xhigh" if "sunburst" in model else "max"
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.api"):
+        response = await _post_image25(async_client, route, model, stream=stream, quality=quality, partial_images=1)
+    assert response.status_code == 200, response.text
+    assert len(image25_upstream["payloads"]) == 1
+    payload = image25_upstream["payloads"][0]
+    assert payload.model == "gpt-5.5"
+    tool = payload.tools[0]
+    assert tool["model"] == model
+    assert tool["quality"] == quality
+    assert tool["size"] == "1536x864"
+    assert tool["background"] == "transparent"
+    assert tool["output_format"] == "png"
+    assert payload.tool_choice == {"type": "image_generation"}
+    assert ("partial_images" in tool) is stream
+    assert "n" not in tool
+    if route.endswith("edits"):
+        assert tool["action"] == "edit"
+        parts = payload.input[0]["content"]
+        assert parts[1]["image_url"] == "data:image/png;base64,c291cmNlLWltYWdl"
+        if route.startswith("/v1"):
+            assert parts[2]["image_url"] == "data:image/png;base64,bWFzay1pbWFnZQ=="
+    if stream:
+        events = [
+            json.loads(line[6:])
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        prefix = "image_edit" if route.endswith("edits") else "image_generation"
+        assert [event["type"] for event in events] == [f"{prefix}.partial_image", f"{prefix}.completed"]
+        assert all(event["quality"] == quality and event["size"] == "1536x864" for event in events)
+        assert all(event["background"] == "transparent" and event["output_format"] == "png" for event in events)
+        assert events[-1]["usage"]["output_tokens"] == 100
+    else:
+        assert set(response.json()) == {"created", "data", "usage"}
+        assert response.json()["data"] == [{"b64_json": "IMAGE_25"}]
+    assert observations and all(obs["model"] == model for obs in observations)
+    assert f"model={model}" in caplog.text
+    assert "private test prompt" not in caplog.text
+    assert "IMAGE_25" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", IMAGE_25_MODELS)
+@pytest.mark.parametrize("route", ["generations", "edits"])
+@pytest.mark.parametrize(
+    ("options", "param"),
+    [
+        ({"output_format": "jpeg"}, "output_format"),
+        ({"size": "3840x2176"}, "size"),
+        ({"input_fidelity": "high"}, "input_fidelity"),
+    ],
+)
+async def test_image25_route_parameter_rejections(async_client, image25_upstream, model, route, options, param):
+    response = await _post_image25(async_client, f"/v1/images/{route}", model, **options)
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == param
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert not image25_upstream["payloads"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", IMAGE_25_MODELS)
+@pytest.mark.parametrize("route", ["generations", "edits"])
+@pytest.mark.parametrize(
+    ("enforced", "requested", "quality", "status", "param"),
+    [
+        (None, None, "max", 200, None),
+        (None, "variant", "max", 200, None),
+        (None, "other_variant", "max", 403, None),
+        (None, "gpt-image-1", "low", 403, None),
+        ("gpt-image-2", "variant", "max", 400, "quality"),
+        ("variant", "gpt-image-2", "max", 200, None),
+        ("variant", "other_variant", "max", 200, None),
+        ("variant", None, "max", 200, None),
+        ("gpt-5.5", "variant", "low", 400, "model"),
+    ],
+)
+async def test_image25_effective_policy(
+    async_client, image25_upstream, monkeypatch, model, route, enforced, requested, quality, status, param
+):
+    from app.modules.proxy import images_service
+
+    enforced = model if enforced == "variant" else enforced
+    requested = model if requested == "variant" else requested
+    if requested == "other_variant":
+        requested = next(variant for variant in IMAGE_25_MODELS if variant != model)
+    monkeypatch.setenv("CODEX_LB_IMAGES_DEFAULT_MODEL", model)
+    settings = Settings()
+    monkeypatch.setattr(proxy_api_module.proxy_service_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(images_service, "get_settings", lambda: settings)
+    await _enable_api_key_auth(async_client)
+    key = await async_client.post(
+        "/api/api-keys/", json={"name": "policy", "allowedModels": [enforced or model], "enforcedModel": enforced}
+    )
+    assert key.status_code == 200, key.text
+    await _import_account(async_client, "acc_policy25", "policy25@example.com")
+    response = await _post_image25(
+        async_client,
+        f"/v1/images/{route}",
+        requested,
+        quality=quality,
+        background="auto",
+        size="1024x1024",
+        headers={"Authorization": f"Bearer {key.json()['key']}"},
+    )
+    assert response.status_code == status, response.text
+    if status == 200:
+        assert image25_upstream["payloads"][0].tools[0]["model"] == model
+        assert image25_upstream["payloads"][0].model == "gpt-5.5"
+    else:
+        assert not image25_upstream["payloads"]
+        if param:
+            assert response.json()["error"]["param"] == param
+        else:
+            assert response.json()["error"]["code"] == "model_not_allowed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", IMAGE_25_MODELS)
+@pytest.mark.parametrize("route", ["generations", "edits"])
+@pytest.mark.parametrize("outcome", ["success", "missing_usage", "before", "after", "exhausted"])
+async def test_image25_scoped_settlement(async_client, image25_upstream, model, route, outcome):
+    await _enable_api_key_auth(async_client)
+    max_value = 1 if outcome == "exhausted" else 100_000_000
+    key = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "limited image25",
+            "allowedModels": [model],
+            "enforcedModel": model,
+            "limits": [{"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": max_value, "modelFilter": model}],
+        },
+    )
+    assert key.status_code == 200, key.text
+    key_id = key.json()["id"]
+    if outcome == "exhausted":
+        async with SessionLocal() as session:
+            limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+            limits[0].current_value = max_value
+            await session.commit()
+    await _import_account(async_client, "acc_settle25", "settle25@example.com")
+    image25_upstream["failure"] = outcome if outcome in {"before", "after"} else None
+    image25_upstream["usage"] = outcome != "missing_usage"
+    response = await _post_image25(
+        async_client,
+        f"/v1/images/{route}",
+        next(variant for variant in IMAGE_25_MODELS if variant != model),
+        stream=outcome == "after",
+        headers={"Authorization": f"Bearer {key.json()['key']}"},
+    )
+    expected = 429 if outcome == "exhausted" else 400 if outcome == "before" else 200
+    assert response.status_code == expected, response.text
+    if outcome == "before":
+        assert response.json()["error"] == {
+            "code": "invalid_request_error",
+            "type": "invalid_request_error",
+            "param": "model" if "sunburst" in model else "quality",
+            "message": "image option rejected upstream",
+        }
+    if outcome == "after":
+        assert '"type":"error"' in response.text.replace(" ", "")
+    if outcome == "exhausted":
+        assert not image25_upstream["payloads"]
+    else:
+        assert image25_upstream["payloads"]
+        assert all(
+            p.tools[0]["model"] == model and p.tools[0]["quality"] == "max" for p in image25_upstream["payloads"]
+        )
+    async with SessionLocal() as session:
+        reservations = (
+            await session.scalars(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id))
+        ).all()
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert limits[0].current_value == (7400 if outcome == "success" else 1 if outcome == "exhausted" else 0)
+        if outcome == "exhausted":
+            assert not reservations
+        else:
+            assert len(reservations) == 1
+            reservation = reservations[0]
+            assert reservation.model == model
+            assert reservation.status == ("finalized" if outcome == "success" else "released")
+            if outcome == "success":
+                assert (reservation.input_tokens, reservation.cached_input_tokens, reservation.output_tokens) == (
+                    1000,
+                    200,
+                    100,
+                )
+                assert reservation.cost_microdollars == 7400
+                logs = (await session.scalars(select(RequestLog).where(RequestLog.api_key_id == key_id))).all()
+                assert logs and all(log.model == model for log in logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", IMAGE_25_MODELS)
+@pytest.mark.parametrize("route", ["/v1/images/generations", "/backend-api/codex/images/edits"])
+async def test_image25_routes_under_root_path(app_instance, image25_upstream, model, route):
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, root_path="/gateway")
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            await _import_account(client, "acc_mount25", "mount25@example.com")
+            response = await _post_image25(client, route, model)
+            assert response.status_code == 200, response.text
+            assert response.json()["data"][0]["b64_json"] == "IMAGE_25"
+            assert image25_upstream["payloads"][0].tools[0]["model"] == model
+            await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)

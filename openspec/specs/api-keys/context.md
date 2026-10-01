@@ -89,6 +89,26 @@ rows can gain calculated request-detail breakdowns, while historical aggregates
 remain based on persisted costs. No database migration or production data
 rewrite is included.
 
+## GPT Image 2.5 key restrictions
+
+The shared Images allowlist now contributes Sunburst and Flare to the existing
+API-key picker, alongside the four earlier image IDs. Saving and reopening a
+key preserves each exact ID. Adapter-only entries are excluded from Automations
+and are not injected into public `/v1/models` simply because the dashboard can
+select them. See the [picker requirement](spec.md#requirement-api-key-model-picker-includes-supported-image-models).
+
+For example, `allowedModels: ["gpt-image-2.5-sunburst"]` without an enforced
+model permits Sunburst and denies Flare. If a key enforces Flare and allows it,
+requests use Flare's parameter profile and Flare-scoped limit even when the
+client supplies Sunburst. A request cannot evade an exhausted Flare limit by
+naming another variant. Image usage is settled once under the effective public
+ID; aggregate pricing and upstream-availability limits are explained in the
+[Images context](../images-api-compat/context.md#gpt-image-25-variants).
+
+The addition needs no migration or new configuration. After deployment,
+reloading the dashboard refreshes the shared model catalog. Rollout is separate
+from local implementation and verification.
+
 ## GPT-6.1 Sol cost recognition
 
 See the [GPT-6.1 Sol requirement](spec.md#requirement-gpt-61-sol-request-cost-pricing-is-recognized).

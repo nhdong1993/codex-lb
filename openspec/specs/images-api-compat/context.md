@@ -93,3 +93,68 @@ keeps `requires_openai_auth = true` does not activate the actor-authorized path.
    `/backend-api/codex/images/generations` or
    `/backend-api/codex/images/edits`; codex-lb handles the request through the
    existing Images compatibility pipeline.
+
+## GPT Image 2.5 variants
+
+The adapter accepts the exact names `gpt-image-2.5-sunburst` and
+`gpt-image-2.5-flare`. Their parameter and policy contracts are in
+[spec.md](./spec.md#requirement-gpt-image-25-variants-are-accepted-by-the-images-adapter).
+The separate 2.5 profile adds `xhigh`/`max` quality and transparent PNG/WebP
+output while reusing Image 2 geometry validation. It avoids changing legacy
+model behavior or admitting arbitrary future names. The built-in default stays
+`gpt-image-2`; the existing `CODEX_LB_IMAGES_DEFAULT_MODEL` setting can select
+either variant without a new setting or migration.
+
+API-key `enforced_model` takes precedence over a valid requested model or the
+configured default. Validation, authorization, quota, the image tool, and
+accounting use that effective public ID. The Responses host remains independent.
+For example, a key pinned to Image 2 rejects a Sunburst request with `quality=max`
+because the effective Image 2 profile does not accept that quality. A key that
+only allows Sunburst, without an enforced model, rejects Flare.
+
+A generation request using an allowed Sunburst key can send:
+
+```json
+{
+  "model": "gpt-image-2.5-sunburst",
+  "prompt": "Create a simple red circle on a transparent background",
+  "quality": "xhigh",
+  "size": "1024x1024",
+  "background": "transparent",
+  "output_format": "png"
+}
+```
+
+The same options work with Flare and with the existing edit upload/data-URL
+inputs. Explicit transparency with JPEG fails locally. Explicit non-null
+`input_fidelity` remains unsupported for these variants in this adapter; the
+general OpenAI edit reference does not establish its Codex subscription-tool
+behavior. Editing retains existing image/mask attachment translation: the mask
+is an additional image plus a prompt hint, without a new native inpainting
+contract.
+
+Non-streaming responses keep `created`, `data`, and optional `usage`. Existing
+SSE events preserve supplied quality, size, background, and format; missing
+metadata is not synthesized. The locked Python SDK accepts both model strings
+and decodes JSON/SSE at runtime, but its quality annotations predate `xhigh` and
+`max`. Callers can send extended qualities through `extra_body={"quality":
+"max"}`. This does not promise strict enum compatibility in older clients.
+
+The canonical 2.5 pricing entries retain the project's aggregate-token estimate
+of USD 5/2/30 per million input/cached-input/output tokens. Official
+[pricing](https://developers.openai.com/api/docs/pricing), checked 2026-09-25,
+separates image input/cached input/output (8/2/30) and text input/cached input
+(5/1.25). The existing accounting model cannot express this split. For 1000
+image-tool input tokens including 200 cached, plus 100 output tokens, the
+estimate is `(800*5 + 200*2 + 100*30)/1e6 = $0.0074`. Host Responses counters
+are not charged as image usage; missing image-tool usage remains uncharged.
+
+Local tests use controlled upstream events and disposable databases. They prove
+adapter admission, forwarding, policy, response translation, and accounting.
+They do not prove account entitlement or which variant upstream actually runs.
+No live upstream generation was performed for this change. Upstream model or
+quality errors are surfaced without silently replacing the effective request.
+OpenAI's [image guide](https://developers.openai.com/api/docs/guides/image-generation)
+and [tool guide](https://developers.openai.com/api/docs/guides/tools-image-generation)
+provide the public feature references; subscription availability remains an
+upstream property.
