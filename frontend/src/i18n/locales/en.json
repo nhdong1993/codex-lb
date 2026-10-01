@@ -1,4 +1,5 @@
 {
+  "accounts.listOverview.resetExpiringSoon": "Reset credit expires within 3 days",
   "accounts.list.sortQuota": "Sort quota",
   "accounts.sort.status_asc": "Status (active first)",
   "accounts.sort.status_desc": "Status (inactive first)",

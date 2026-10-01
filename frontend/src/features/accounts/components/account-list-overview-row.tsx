@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AccountSubscription } from "@/features/accounts/components/account-subscription";
 import { ACCOUNT_LIST_COLUMNS, ACCOUNT_LIST_COLUMNS_WITHOUT_RESET } from "@/features/accounts/components/account-list-layout";
+import { useAccountClock } from "@/features/accounts/hooks/use-account-clock";
 import type { AccountRoutingPolicy, AccountSummary } from "@/features/accounts/schemas";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
@@ -49,6 +50,12 @@ export function AccountListOverviewRow({
   onSelect,
 }: AccountListOverviewRowProps) {
   const { t } = useTranslation();
+  const now = useAccountClock();
+  const resetCreditRemaining = Date.parse(account.resetCreditNearestExpiresAt ?? "") - now;
+  const resetCreditExpiresSoon =
+    (account.availableResetCredits ?? 0) > 0 &&
+    resetCreditRemaining > 0 &&
+    resetCreditRemaining <= 3 * 86_400_000;
   const blurred = usePrivacyStore((s) => s.blurred);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const status = normalizeStatus(account.status);
@@ -203,17 +210,27 @@ export function AccountListOverviewRow({
         {showResetCreditBadge ? (
           <div className="pointer-events-none relative min-w-0 shrink-0" data-testid="account-list-reset-cell">
             {account.availableResetCredits != null ? (
-              <Badge
-                variant="outline"
-                className="border-primary/20 bg-primary/5 text-[10px] tabular-nums text-primary"
-                title={t("accounts.resetCreditDialog.availableCount", {
-                  count: account.availableResetCredits ?? 0,
-                })}
-              >
-                {t("accounts.actions.resetWithCount", {
-                  count: account.availableResetCredits ?? 0,
-                })}
-              </Badge>
+              <span className="relative inline-flex">
+                <Badge
+                  variant="outline"
+                  className="border-primary/20 bg-primary/5 text-[10px] tabular-nums text-primary"
+                  title={t("accounts.resetCreditDialog.availableCount", {
+                    count: account.availableResetCredits ?? 0,
+                  })}
+                >
+                  {t("accounts.actions.resetWithCount", {
+                    count: account.availableResetCredits ?? 0,
+                  })}
+                </Badge>
+                {resetCreditExpiresSoon ? (
+                  <span
+                    role="img"
+                    aria-label={t("accounts.listOverview.resetExpiringSoon")}
+                    className="absolute -top-1.5 left-1/2 size-2 -translate-x-1/2 rounded-full bg-red-500 ring-2 ring-card"
+                    data-testid="account-list-reset-expiry-dot"
+                  />
+                ) : null}
+              </span>
             ) : <span className="text-xs text-muted-foreground">—</span>}
           </div>
         ) : null}

@@ -1,7 +1,5 @@
 import { RefreshCw } from "lucide-react";
 import {
-  createContext,
-  useContext,
   useEffect,
   useState,
   type ReactNode,
@@ -9,12 +7,11 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { AccountClock, useAccountClock } from "@/features/accounts/hooks/use-account-clock";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { cn } from "@/lib/utils";
 import { formatDateTimeInline } from "@/utils/formatters";
-
-const AccountClock = createContext<number | null>(null);
 
 export function AccountClockProvider({ children }: { children: ReactNode }) {
   const [now, setNow] = useState(Date.now);
@@ -39,8 +36,7 @@ export function AccountSubscription({
   refreshDisabled?: boolean;
 }) {
   const { t } = useTranslation();
-  const [mountedAt] = useState(Date.now);
-  const now = useContext(AccountClock) ?? mountedAt;
+  const now = useAccountClock();
   const dateFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
   const end = account.subscription?.activeUntil;
   const endMs = end ? Date.parse(end) : NaN;

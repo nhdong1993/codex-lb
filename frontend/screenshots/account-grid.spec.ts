@@ -77,6 +77,52 @@ const sampleAccounts = accounts.map((account, index) => ({
   },
 }));
 
+test("List marks expiring reset credits above the count without affecting row actions", async ({ page }) => {
+  let expiresAt = at(4 * 24 * 60);
+  const fleet = [sampleAccounts[0], { ...sampleAccounts[1], resetCreditNearestExpiresAt: at(5 * 24 * 60) }];
+  await page.clock.setFixedTime(new Date(sampleTime));
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.addInitScript(() => localStorage.setItem("codex-lb-accounts-view-mode", "list"));
+  await page.route("**/api/**", (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    return route.fulfill({ json: pathname === "/api/dashboard-auth/session" ? authSession
+      : pathname === "/api/accounts" ? { accounts: [{ ...fleet[0], resetCreditNearestExpiresAt: expiresAt }, fleet[1]] }
+      : pathname === "/api/settings" ? settings
+      : pathname === "/api/settings/upstream-proxy" ? upstreamProxyAdmin : {} });
+  });
+  await page.goto(`http://localhost:${process.env.SCREENSHOT_PORT ?? "4173"}/accounts`);
+  const row = page.getByTestId("account-list-overview-row").filter({ hasText: "Personal Plus" });
+  for (const width of [1440, 320]) {
+    await page.setViewportSize({ width, height: 1000 });
+    expiresAt = at(4 * 24 * 60);
+    await page.reload();
+    await expect(row).toBeVisible();
+    await expect(page.getByTestId("account-list-reset-expiry-dot")).toHaveCount(0);
+    const before = await row.boundingBox();
+    if (directory) await page.screenshot({ path: path.join(directory, `reset-expiry-before-${width}.png`), animations: "disabled" });
+    expiresAt = at(2 * 24 * 60);
+    await page.reload();
+    const dot = row.getByRole("img", { name: "Reset credit expires within 3 days" });
+    await expect(dot).toBeVisible();
+    await expect(page.getByTestId("account-list-reset-expiry-dot")).toHaveCount(1);
+    const bounds = (await dot.boundingBox())!;
+    const badge = (await row.getByTestId("account-list-reset-cell").locator("[data-slot=badge]").boundingBox())!;
+    const after = (await row.boundingBox())!;
+    expect(after.height).toBe(before!.height);
+    expect(Math.abs(bounds.x + bounds.width / 2 - badge.x - badge.width / 2)).toBeLessThan(1);
+    expect(bounds.y).toBeLessThan(badge.y);
+    expect(bounds.y).toBeGreaterThan(after.y);
+    expect(bounds.width).toBe(8);
+    expect(bounds.height).toBe(bounds.width);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    if (directory) await page.screenshot({ path: path.join(directory, `reset-expiry-after-${width}.png`), animations: "disabled" });
+    await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  }
+});
+
 for (const language of ["en", "ko", "zh-CN"]) {
   test(`List badges wrap on narrow phones (${language})`, async ({ page }) => {
     await page.clock.setFixedTime(new Date(sampleTime));

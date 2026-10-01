@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountListOverviewRow } from "./account-list-overview-row";
+import { AccountClockProvider } from "./account-subscription";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { createAccountSummary } from "@/test/mocks/factories";
@@ -17,6 +18,7 @@ describe("AccountListOverviewRow", () => {
   });
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     act(() => usePrivacyStore.setState({ blurred: false }));
   });
 
@@ -212,6 +214,57 @@ describe("AccountListOverviewRow", () => {
       "Session requires re-authentication",
     );
     expect(screen.queryByText("Burn first")).not.toBeInTheDocument();
+    expect(screen.getByText("Reset (3)")).toBeInTheDocument();
+  });
+
+  it.each([
+    [3, "2026-09-30T12:00:00Z", true],
+    [3, "2026-09-30T12:00:00.001Z", false],
+    [3, "2026-09-30T19:00:00+07:00", true],
+    [3, "2026-09-27T12:00:00.001Z", true],
+    [3, "2026-09-27T12:00:00Z", false],
+    [3, "2026-09-26T12:00:00Z", false],
+    [3, null, false],
+    [3, undefined, false],
+    [3, "invalid", false],
+    [0, "2026-09-28T12:00:00Z", false],
+    [null, "2026-09-28T12:00:00Z", false],
+    [undefined, "2026-09-28T12:00:00Z", false],
+  ] as const)("marks expiring reset counts (%s, %s)", (count, expiry, expected) => {
+    render(<AccountListOverviewRow selected={false} onSelect={() => {}} account={{
+      ...createAccountSummary({ availableResetCredits: count }),
+      resetCreditNearestExpiresAt: expiry,
+    }} />);
+    expect(screen.queryByRole("img", { name: "Reset credit expires within 3 days" }) !== null).toBe(expected);
+  });
+
+  it("hides the expiry dot when counts are hidden or no longer available", () => {
+    const account = createAccountSummary({ availableResetCredits: 3, resetCreditNearestExpiresAt: "2026-09-28T12:00:00Z" });
+    const props = { selected: false, onSelect: vi.fn(), account };
+    const view = render(<AccountListOverviewRow {...props} />);
+    expect(screen.getByRole("img", { name: "Reset credit expires within 3 days" })).toBeInTheDocument();
+    view.rerender(<AccountListOverviewRow {...props} showResetCreditBadge={false} />);
+    expect(screen.queryByTestId("account-list-reset-expiry-dot")).not.toBeInTheDocument();
+    view.rerender(<AccountListOverviewRow {...props} account={{ ...account, availableResetCredits: 0 }} />);
+    expect(screen.queryByTestId("account-list-reset-expiry-dot")).not.toBeInTheDocument();
+    expect(screen.getByText("Reset (0)")).toBeInTheDocument();
+  });
+
+  it("updates the warning on the shared minute clock without new account data", () => {
+    vi.restoreAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(now));
+    render(<AccountClockProvider>
+      <AccountListOverviewRow selected={false} onSelect={() => {}} account={createAccountSummary({
+        availableResetCredits: 3, resetCreditNearestExpiresAt: "2026-09-30T12:01:00Z",
+      })} />
+    </AccountClockProvider>);
+    expect(screen.queryByTestId("account-list-reset-expiry-dot")).not.toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.getByTestId("account-list-reset-expiry-dot")).toBeInTheDocument();
+    vi.setSystemTime(new Date("2026-09-30T12:00:00Z"));
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.queryByTestId("account-list-reset-expiry-dot")).not.toBeInTheDocument();
     expect(screen.getByText("Reset (3)")).toBeInTheDocument();
   });
 
