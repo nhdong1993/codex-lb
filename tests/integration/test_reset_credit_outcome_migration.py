@@ -15,7 +15,7 @@ from app.db.models import Account, AccountStatus
 pytestmark = pytest.mark.integration
 
 PARENT = "20260910_010000_merge_beta6_and_key_groups"
-HEAD = "20260928_000000_add_account_subscription_snapshot"
+HEAD = "20260929_000000_add_source_websocket"
 
 
 def test_reset_credit_migration_preserves_legacy_pins(tmp_path: Path) -> None:

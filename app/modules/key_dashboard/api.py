@@ -14,6 +14,7 @@ from app.modules.key_dashboard.schemas import (
     KeyDashboardProfile,
     KeyDashboardRequestLogsResponse,
 )
+from app.modules.model_sources.websocket_capability import source_only_key_supports_websockets
 
 router = APIRouter(
     prefix="/api/key-dashboard",
@@ -51,7 +52,7 @@ async def get_key_dashboard_install_script(
         api_key=credential,
         base_url=f"{str(base_url).rstrip('/')}/backend-api/codex",
         model=model,
-        supports_websockets=not (api_key.assigned_source_ids and not api_key.assigned_account_ids),
+        supports_websockets=await source_only_key_supports_websockets(api_key),
     )
     extension = "ps1" if platform == "windows" else "sh"
     return PlainTextResponse(

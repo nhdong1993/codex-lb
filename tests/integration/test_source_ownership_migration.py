@@ -13,7 +13,7 @@ from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrad
 pytestmark = pytest.mark.integration
 PARENT = "20260923_000000_add_new_account_warmup_setting"
 REVISION = "20260926_000000_add_source_ownership"
-HEAD = "20260928_000000_add_account_subscription_snapshot"
+HEAD = "20260929_000000_add_source_websocket"
 
 
 def test_source_ownership_migration_preserves_historical_logs(tmp_path: Path):

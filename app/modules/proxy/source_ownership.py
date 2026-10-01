@@ -150,6 +150,10 @@ class SourceOwnershipRecorder:
         event = parse_sse_data_json(frame)
         if not isinstance(event, dict):
             return
+        await self.record_event(event)
+
+    async def record_event(self, event: Mapping[str, JsonValue]) -> None:
+        """Publish references before either an SSE frame or a WS message is delivered."""
         keys: set[str] = set()
         legacy_response_ids: set[str] = set()
         # Deltas (including ones synthesized by the public normalizer) may

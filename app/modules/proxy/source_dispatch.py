@@ -59,6 +59,7 @@ from typing import Any, Literal, Protocol, TypeVar
 
 from fastapi import Request
 from fastapi.responses import StreamingResponse
+from starlette.requests import HTTPConnection
 from starlette.types import Receive, Scope, Send
 
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
@@ -378,7 +379,7 @@ def _inc(counter: Any, **labels: str) -> None:
 class SourceDispatch:
     """Owner of one dispatched attempt; ``finish()``/``abandon()`` is the single latch."""
 
-    request: Request
+    request: HTTPConnection
     source: ModelSource
     model: str
     api_key: ApiKeyData | None
@@ -395,6 +396,10 @@ class SourceDispatch:
     scheduler: Scheduler = REAL_SCHEDULER
     clock: Clock = REAL_CLOCK
     stream: SourceResponsesStream | None = None
+    event_usage: SourceUsageHolder | None = None
+    transport: Literal["http", "websocket"] = "http"
+    upstream_transport: str = "openai_compatible_http"
+    warmup: bool = False
     sent_at: float = 0.0
     first_frame_at: float | None = None
     first_output_item_seen: bool = False
@@ -440,7 +445,7 @@ class SourceDispatch:
 
     @property
     def usage_holder(self) -> SourceUsageHolder | None:
-        return self.stream.usage_holder if self.stream is not None else None
+        return self.stream.usage_holder if self.stream is not None else self.event_usage
 
     def observe_stream(self) -> SourceUsageHolder | None:
         """Mirror the parser's observations (first frame, first output item, delta chars).
@@ -518,7 +523,12 @@ class SourceDispatch:
         if reservation is None:
             return
         self.observe_stream()
-        if status == "error":
+        if status == "error" or (
+            status == "cancelled" and self.transport == "websocket" and not self.content_delivered
+        ):
+            # Native parsing observes usage before durable publication and
+            # client handoff. A cancelled turn with no delivered content must
+            # release even when that withheld terminal carried real usage.
             await self._release_reservation_step(reservation)
             return
         if usage is not None:
@@ -540,6 +550,11 @@ class SourceDispatch:
         await self._release_reservation_step(reservation)
 
     def _estimate(self) -> SourceUsage:
+        if self.warmup:
+            input_tokens = API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS
+            if self.admission_budget is not None and self.admission_budget.input_tokens is not None:
+                input_tokens = self.admission_budget.input_tokens
+            return SourceUsage(input_tokens=input_tokens, output_tokens=0)
         return estimate_settlement_usage(admission_budget=self.admission_budget, delta_chars=self.delta_chars)
 
     async def _settle_reservation_step(
@@ -682,8 +697,8 @@ class SourceDispatch:
                     error_code=error_code,
                     error_message=error_message,
                     upstream_status_code=upstream_status_code,
-                    transport="http",
-                    upstream_transport="openai_compatible_http",
+                    transport=self.transport,
+                    upstream_transport=self.upstream_transport,
                     source=self.request_log_source,
                     requested_service_tier=self.requested_service_tier,
                     service_tier=None,

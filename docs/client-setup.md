@@ -43,6 +43,8 @@ bash "${CODEX_HOME:-$HOME/.codex}/codex-lb-uninstall.sh"
 
 On Windows, run the displayed PowerShell command for `codex-lb-uninstall.ps1`. Close clients first. Uninstall restores the configuration, credentials and catalog from before the first installation with uninstall support, retains a backup of current files, and preserves chats. Installing again with another key keeps the original restore point. Older untracked backups require manual recovery. See the [client setup contract and context](../openspec/specs/api-key-dashboard/).
 
+Custom model sources can opt into [native Responses WebSocket](model-source-websocket.md). Export a new installer after changing their transport capability.
+
 ### Opting into the 872k context window
 
 GPT-5.6 ships a 272,000-token default input budget with an 872,000-token
