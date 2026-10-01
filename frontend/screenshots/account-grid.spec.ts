@@ -77,6 +77,177 @@ const sampleAccounts = accounts.map((account, index) => ({
   },
 }));
 
+for (const language of ["en", "ko", "zh-CN"]) {
+  test(`List badges wrap on narrow phones (${language})`, async ({ page }) => {
+    await page.clock.setFixedTime(new Date(sampleTime));
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const fleet = ["enterprise", "plus", "free"].map((planType, index) => ({
+      ...sampleAccounts[index], planType, status: "reauth_required", availableResetCredits: 12,
+    }));
+    let showResetCreditBadges = true;
+    await page.addInitScript(() => localStorage.setItem("codex-lb-accounts-view-mode", "list"));
+    await page.route("**/api/**", (route) => {
+      const pathname = new URL(route.request().url()).pathname;
+      return route.fulfill({ json: pathname === "/api/dashboard-auth/session" ? authSession
+        : pathname === "/api/accounts" ? { accounts: fleet }
+        : pathname === "/api/settings" ? { ...settings, showResetCreditBadges }
+        : pathname === "/api/settings/upstream-proxy" ? upstreamProxyAdmin : {} });
+    });
+    await page.goto(`http://localhost:${process.env.SCREENSHOT_PORT ?? "4173"}/accounts?lang=${language}`);
+    const rows = page.getByTestId("account-list-overview-row");
+    await expect(rows).toHaveCount(3);
+    for (const width of [320, 375, 390, 1024]) {
+      await page.setViewportSize({ width, height: 1000 });
+      const collisions = await rows.evaluateAll((items) => items.flatMap((row) => {
+        const badges = ["plan", "status", "reset"].map((name) => row.querySelector(`[data-testid="account-list-${name}-cell"] [data-slot="badge"]`)!.getBoundingClientRect());
+        return badges.flatMap((left, i) => badges.slice(i + 1).filter((right) =>
+          Math.min(left.right, right.right) > Math.max(left.left, right.left) &&
+          Math.min(left.bottom, right.bottom) > Math.max(left.top, right.top),
+        ).map(() => row.textContent));
+      }));
+      expect(collisions).toEqual([]);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      if (directory && width === 320) await page.screenshot({ path: path.join(directory, `list-narrow-${language}.png`), animations: "disabled" });
+    }
+    await page.setViewportSize({ width: 320, height: 1000 });
+    const badge = await rows.first().getByTestId("account-list-plan-cell").boundingBox();
+    expect(badge).not.toBeNull();
+    await page.mouse.click(badge!.x + badge!.width / 2, badge!.y + badge!.height / 2);
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    showResetCreditBadges = false;
+    await page.setViewportSize({ width: 320, height: 1000 });
+    await page.reload();
+    await expect(rows).toHaveCount(3);
+    await expect(page.getByTestId("account-list-reset-cell")).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
+}
+
+test("List quota sorting is separate from mixed-plan quota data", async ({ page }) => {
+  await page.clock.setFixedTime(new Date(sampleTime));
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const fleet = [sampleAccounts[0], {
+    ...sampleAccounts[1], planType: "free", subscription: null,
+    usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, monthlyRemainingPercent: 25 },
+    windowMinutesPrimary: null, windowMinutesSecondary: null, windowMinutesMonthly: 43200,
+    resetAtPrimary: null, resetAtSecondary: null, resetAtMonthly: at(20 * 24 * 60),
+  }];
+  await page.addInitScript(() => localStorage.setItem("codex-lb-accounts-view-mode", "list"));
+  await page.route("**/api/**", (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    return route.fulfill({ json: pathname === "/api/dashboard-auth/session" ? authSession
+      : pathname === "/api/accounts" ? { accounts: fleet }
+      : pathname === "/api/settings" ? settings
+      : pathname === "/api/settings/upstream-proxy" ? upstreamProxyAdmin : {} });
+  });
+  await page.goto(`http://localhost:${process.env.SCREENSHOT_PORT ?? "4173"}/accounts`);
+  const rows = page.getByTestId("account-list-overview-row");
+  for (const preference of ["both", "5h", "weekly"]) {
+    await page.evaluate((value) => localStorage.setItem("codex-lb-account-quota-display", value), preference);
+    await page.reload();
+    await expect(rows).toHaveCount(2);
+    for (const width of [1440, 1024]) {
+      await page.setViewportSize({ width, height: 1000 });
+      const sorts = page.getByRole("group", { name: "Sort quota", exact: true });
+      const headers = page.getByTestId("account-list-column-headers");
+      await expect(sorts).toBeVisible();
+      await expect(headers.getByText("Quota remaining", { exact: true })).toBeVisible();
+      await expect(headers.getByRole("button", { name: /^(Quota 5h|Quota 7d|Monthly):/ })).toHaveCount(0);
+      const bounds = await sorts.boundingBox();
+      const headerBounds = await headers.boundingBox();
+      expect(bounds && headerBounds && bounds.y + bounds.height <= headerBounds.y).toBeTruthy();
+      for (const label of ["Quota 5h", "Quota 7d", "Monthly"]) {
+        await sorts.getByRole("button", { name: `${label}: Not sorted`, exact: true }).click();
+        await expect(sorts.getByRole("button", { name: `${label}: Ascending`, exact: true })).toHaveAttribute("aria-pressed", "true");
+      }
+      // Each viewport starts its next pass on a non-quota sort.
+      await headers.getByRole("button", { name: /^Status:/ }).click();
+      const free = rows.filter({ hasText: "Research Pro" });
+      await expect(free.getByTestId("list-overview-quota-Monthly")).toBeVisible();
+      await expect(free.getByTestId("list-overview-quota-5h")).toHaveCount(0);
+      if (directory && width === 1440) await page.screenshot({ path: path.join(directory, `list-quota-${preference}.png`), animations: "disabled" });
+    }
+  }
+});
+
+test("List separates sortable Status and Reset and sorts monthly Free quota", async ({ page }) => {
+  const fleet = sampleAccounts.map((account, index) => index < 4 ? {
+    ...account,
+    planType: "free",
+    subscription: null,
+    status: ["active", "paused", "reauth_required", "rate_limited"][index],
+    usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, monthlyRemainingPercent: [0, 90, null, 25][index] },
+    windowMinutesPrimary: null, windowMinutesSecondary: null, windowMinutesMonthly: 43200,
+    resetAtPrimary: null, resetAtSecondary: null, resetAtMonthly: at(20 * 24 * 60),
+    availableResetCredits: [0, 12, null, 3][index],
+  } : account);
+  let showResetCreditBadges = true;
+  await page.addInitScript(() => localStorage.setItem("codex-lb-accounts-view-mode", "list"));
+  await page.clock.setFixedTime(new Date(sampleTime));
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.route("**/api/**", (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const data = pathname === "/api/dashboard-auth/session" ? authSession
+      : pathname === "/api/settings" ? { ...settings, showResetCreditBadges }
+      : pathname === "/api/settings/upstream-proxy" ? upstreamProxyAdmin
+      : pathname === "/api/accounts" ? { accounts: fleet }
+      : {};
+    return route.fulfill({ json: data });
+  });
+  await page.goto(`http://localhost:${process.env.SCREENSHOT_PORT ?? "4173"}/accounts`);
+  const rows = page.getByTestId("account-list-overview-row");
+  await expect(rows).toHaveCount(fleet.length);
+  await page.getByRole("button", { name: "Status: Not sorted", exact: true }).click();
+  await expect(rows.first().getByTestId("account-list-status-cell")).toHaveText("Active");
+  await page.getByRole("button", { name: "Status: Ascending", exact: true }).click();
+  await expect(rows.first().getByTestId("account-list-status-cell")).toHaveText("Re-auth required");
+  for (const width of [1440, 1024, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const heights = await rows.evaluateAll((items) => items.map((item) => item.getBoundingClientRect().height));
+    expect(Math.max(...heights)).toBeLessThanOrEqual(width >= 1024 ? 80 : 180);
+    if (width >= 1024) {
+      for (const [label, cellId] of [["Status", "account-list-status-cell"], ["Reset", "account-list-reset-cell"]]) {
+        const header = await page.getByRole("button", { name: new RegExp(`^${label}:`) }).boundingBox();
+        const cell = await rows.first().getByTestId(cellId).boundingBox();
+        expect(header && cell && Math.abs(header.x - cell.x) < 2).toBeTruthy();
+      }
+      const plan = await rows.first().getByTestId("account-list-plan-cell").boundingBox();
+      const status = await rows.first().getByTestId("account-list-status-cell").locator("[data-slot=badge]").boundingBox();
+      const reset = await rows.first().getByTestId("account-list-reset-cell").boundingBox();
+      expect(plan && status && reset && plan.x + plan.width <= status.x && status.x + status.width <= reset.x).toBeTruthy();
+    }
+    if (directory) await page.screenshot({ path: path.join(directory, `list-mixed-${width}.png`), animations: "disabled" });
+  }
+  await page.getByRole("combobox", { name: "Sort accounts" }).click();
+  await page.getByRole("option", { name: "Reset credits (fewest first)", exact: true }).click();
+  await expect(rows.first().getByTestId("account-list-reset-cell")).toHaveText("Reset (0)");
+  await expect(rows.last().getByTestId("account-list-reset-cell")).toHaveText("—");
+  await page.getByRole("combobox", { name: "Filter accounts by plan" }).click();
+  await page.getByRole("option", { name: "Free", exact: true }).click();
+  await expect(rows).toHaveCount(4);
+  await page.getByRole("combobox", { name: "Sort accounts" }).click();
+  await page.getByRole("option", { name: "Monthly quota (lowest remaining)", exact: true }).click();
+  await expect(rows.first()).toContainText("Personal Plus");
+  await expect(rows.last()).toContainText("Team workspace");
+  await expect(page.getByTestId("list-overview-quota-Monthly")).toHaveCount(4);
+  await expect(page.getByTestId("list-overview-quota-5h")).toHaveCount(0);
+  if (directory) await page.screenshot({ path: path.join(directory, "list-free-mobile.png"), animations: "disabled" });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole("button", { name: "Monthly: Ascending", exact: true }).click();
+  await expect(rows.first()).toContainText("Research Pro");
+  await expect(rows.last()).toContainText("Team workspace");
+  if (directory) await page.screenshot({ path: path.join(directory, "list-free-desktop.png"), animations: "disabled" });
+  showResetCreditBadges = false;
+  await page.reload();
+  await expect(page.getByTestId("account-list-reset-cell")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Reset:/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Status:/ })).toBeVisible();
+  if (directory) await page.screenshot({ path: path.join(directory, "list-without-reset-desktop.png"), animations: "disabled" });
+});
+
 test("A delayed subscription response does not restore a paid term after the plan changes", async ({ page }) => {
   const liveAccounts = structuredClone(sampleAccounts).map((account) => ({
     ...account, subscription: account.subscription as AccountSummary["subscription"],

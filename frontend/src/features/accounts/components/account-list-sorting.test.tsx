@@ -68,6 +68,17 @@ beforeEach(() =>
 afterEach(() => useAccountQuotaDisplayStore.setState({ quotaDisplay: "both" }));
 
 describe("Accounts List sorting controls", () => {
+  it("labels quota sorting separately from the quota data heading", () => {
+    render(<AccountList {...props} />);
+    const controls = screen.getByRole("group", { name: "Sort quota" });
+    const headers = screen.getByTestId("account-list-column-headers");
+    expect(within(headers).getByText("Quota remaining")).toBeInTheDocument();
+    for (const label of ["Quota 5h", "Quota 7d", "Monthly"]) {
+      expect(within(controls).getByRole("button", { name: `${label}: Not sorted` })).toBeInTheDocument();
+      expect(within(headers).queryByRole("button", { name: `${label}: Not sorted` })).not.toBeInTheDocument();
+    }
+  });
+
   it.each([
     {
       label: "Plan",
@@ -117,9 +128,9 @@ describe("Accounts List sorting controls", () => {
         screen.getByRole("combobox", { name: "Sort accounts" }),
       ).toHaveTextContent(mode);
       expect(
-        within(
-          screen.getByRole("button", { name: /Boreal.*Reset \(3\)/ }),
-        ).getByText("Reset (3)"),
+        within(screen.getAllByTestId("account-list-overview-row").find(
+          (row) => row.textContent?.includes("Boreal"),
+        )!).getByText("Reset (3)"),
       ).toBeInTheDocument();
     },
   );
@@ -194,5 +205,73 @@ describe("Accounts List sorting controls", () => {
     expect(screen.getByText("Reset (3)")).toBeInTheDocument();
     view.rerender(<AccountList {...props} showResetCreditBadges={false} />);
     expect(screen.queryByText("Reset (3)")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Reset:/ })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("account-list-reset-cell")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Status:/ })).toBeInTheDocument();
+  });
+
+  it("sorts separate Status and Reset columns through headers and dropdown", async () => {
+    const user = userEvent.setup();
+    const fleet = ["active", "paused", "rate_limited", "quota_exceeded", "reauth_required", "deactivated"].map(
+      (status, index) => createAccountSummary({
+        accountId: `status-${index}`, displayName: `Account ${index}`, status,
+        availableResetCredits: [3, 0, null, 12, 2, 1][index],
+      }),
+    );
+    render(<AccountList {...props} accounts={fleet} />);
+    const firstRow = screen.getAllByTestId("account-list-overview-row")[0];
+    expect(within(firstRow).getByTestId("account-list-status-cell")).toHaveTextContent("Quota exceeded");
+    expect(within(firstRow).getByTestId("account-list-reset-cell")).toHaveTextContent("Reset (12)");
+    expect(within(firstRow).getByTestId("account-list-plan-cell")).not.toHaveTextContent("Reset");
+    await user.click(screen.getByRole("button", { name: "Status: Not sorted" }));
+    expect(rowNames()).toEqual([0, 1, 2, 3, 4, 5].map((n) => `Account ${n}`));
+    const header = screen.getByRole("button", { name: "Status: Ascending" });
+    header.focus();
+    await user.keyboard("{Enter}");
+    expect(rowNames()).toEqual([5, 4, 3, 2, 1, 0].map((n) => `Account ${n}`));
+    await user.click(screen.getByRole("button", { name: "Reset: Not sorted" }));
+    expect(rowNames()).toEqual([1, 5, 4, 0, 3, 2].map((n) => `Account ${n}`));
+    await user.click(screen.getByRole("button", { name: "Reset: Ascending" }));
+    expect(rowNames()).toEqual([3, 0, 4, 5, 1, 2].map((n) => `Account ${n}`));
+    for (const [mode, first] of [
+      ["Status (active first)", "Account 0"],
+      ["Status (inactive first)", "Account 5"],
+      ["Reset credits (fewest first)", "Account 1"],
+      ["Reset credits (most first)", "Account 3"],
+    ]) {
+      await user.click(screen.getByRole("combobox", { name: "Sort accounts" }));
+      await user.click(screen.getByRole("option", { name: mode }));
+      expect(rowNames()[0]).toBe(first);
+    }
+  });
+
+  it.each(["5h", "weekly"] as const)("sorts Monthly and filters Free with %s preference", async (preference) => {
+    useAccountQuotaDisplayStore.setState({ quotaDisplay: preference });
+    const user = userEvent.setup();
+    const free = [90, null, 0, 25].map((remaining, index) => createAccountSummary({
+      accountId: `free-${index}`, displayName: `Free ${index}`, planType: "free",
+      usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, monthlyRemainingPercent: remaining },
+      windowMinutesPrimary: null, windowMinutesSecondary: null, windowMinutesMonthly: 43200,
+      resetAtPrimary: null, resetAtSecondary: null,
+    }));
+    render(<AccountList {...props} accounts={[...free, createAccountSummary({ displayName: "Paid" })]} />);
+    await user.click(screen.getByRole("button", { name: "Monthly: Not sorted" }));
+    expect(rowNames()).toEqual(["Free 2", "Free 3", "Free 0", "Free 1", "Paid"]);
+    await user.click(screen.getByRole("combobox", { name: "Filter accounts by plan" }));
+    await user.click(screen.getByRole("option", { name: "Free" }));
+    expect(rowNames()).toEqual(["Free 2", "Free 3", "Free 0", "Free 1"]);
+    await user.click(screen.getByRole("button", { name: "Monthly: Ascending" }));
+    expect(rowNames()).toEqual(["Free 0", "Free 3", "Free 2", "Free 1"]);
+    expect(screen.getAllByTestId("list-overview-quota-Monthly")).toHaveLength(4);
+    expect(screen.queryByTestId("list-overview-quota-5h")).not.toBeInTheDocument();
+    for (const [mode, first] of [
+      ["Monthly quota (lowest remaining)", "Free 2"],
+      ["Monthly quota (highest remaining)", "Free 0"],
+    ]) {
+      await user.click(screen.getByRole("combobox", { name: "Sort accounts" }));
+      await user.click(screen.getByRole("option", { name: mode }));
+      expect(rowNames()[0]).toBe(first);
+      expect(rowNames().at(-1)).toBe("Free 1");
+    }
   });
 });

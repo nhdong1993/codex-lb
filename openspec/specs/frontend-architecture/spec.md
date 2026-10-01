@@ -2273,7 +2273,7 @@ The Accounts page per-account action bar SHALL render a `Reset (N)` button next 
 
 ### Requirement: AccountListItem displays a reset-credits count badge
 
-The compact `AccountListItem` SHALL render a count badge pinned to the right-upper radius of the item whenever the account reports `available_reset_credits > 0` and dashboard setting `show_reset_credit_badges` is enabled. The badge SHALL display the integer count, capped visually at `"99+"` when the count exceeds 99. The badge SHALL be absent when `available_reset_credits` is `0` or `show_reset_credit_badges` is disabled. The full-width Accounts List SHALL show a compact labeled count of available resets when positive and show_reset_credit_badges is enabled. It SHALL omit zero/missing counts and disabled badges. The compact selector and Grid header SHALL retain their existing badges. The List badge SHALL use summary data without extra credit requests or a direct redemption action.
+The compact `AccountListItem` SHALL render a count badge pinned to the right-upper radius of the item whenever the account reports `available_reset_credits > 0` and dashboard setting `show_reset_credit_badges` is enabled. The badge SHALL display the integer count, capped visually at `"99+"` when the count exceeds 99. The badge SHALL be absent when `available_reset_credits` is `0` or `show_reset_credit_badges` is disabled. The full-width Accounts List SHALL show a separate Reset column with compact labeled counts, including zero, when show_reset_credit_badges is enabled. Unknown counts SHALL display an unknown marker. Disabling badges SHALL hide the Reset column. The compact selector and Grid header SHALL retain their existing badges. The List badge SHALL use summary data without extra credit requests or a direct redemption action.
 
 #### Scenario: Badge shows the available count
 - **WHEN** an `AccountListItem` renders for an account with `available_reset_credits: 3`
@@ -2295,8 +2295,8 @@ The compact `AccountListItem` SHALL render a count badge pinned to the right-upp
 
 #### Scenario: List shows available reset count
 - **WHEN** an Accounts List row has three available reset credits and badges are enabled
-- **THEN** a compact Reset (3) indicator appears beside plan/status
-- **AND** disabling badges or having zero/missing credits hides the indicator
+- **THEN** a compact Reset (3) indicator appears in a separate Reset column
+- **AND** zero credits display Reset (0), unknown credits display an unknown marker, and disabling badges hides the column
 - **AND** selecting the row opens details without redeeming credits
 
 ### Requirement: Accounts page can sort by available reset credits
@@ -4338,7 +4338,7 @@ The dashboard SHALL retain unresolved reset request identity per account in the 
 
 ### Requirement: Accounts List headers control sorting
 
-Desktop List SHALL offer keyboard-operable Plan, Subscription, Quota 5h and Quota 7d header controls. Selecting an inactive header SHALL sort ascending; selecting it again SHALL toggle direction. Active controls SHALL expose visible direction arrows and an accessible direction description. The same ascending/descending modes SHALL be available from the existing sort dropdown at all viewport sizes. Header sorting SHALL preserve the compact row layout.
+Desktop List SHALL offer keyboard-operable Plan, Status, Reset credits and Subscription header controls. Quota 5h, Quota 7d and Monthly sorting SHALL be presented in a separate labeled group above the headers. The quota data column SHALL have a shared Quota remaining heading rather than window-specific sort buttons. Selecting an inactive header SHALL sort ascending; selecting it again SHALL toggle direction. Active controls SHALL expose visible direction arrows and an accessible direction description. The same ascending/descending modes SHALL be available from the existing sort dropdown at all viewport sizes. Header sorting SHALL preserve the compact row layout.
 
 #### Scenario: Toggle header direction
 - **WHEN** an operator activates a List sort header by pointer or keyboard
@@ -4348,3 +4348,38 @@ Desktop List SHALL offer keyboard-operable Plan, Subscription, Quota 5h and Quot
 #### Scenario: Mobile sorting
 - **WHEN** desktop headers are hidden at narrow widths
 - **THEN** the operator can select every new sort mode from the sort dropdown
+
+### Requirement: List separates account status and reset-credit counts
+
+List SHALL display Plan, Status and available Reset credits in separate desktop columns. Reset counts SHALL display zero distinctly from unknown data. Disabling reset-credit badges SHALL hide the Reset column. Sorting SHALL preserve filters and selection, apply before pagination and return to page one.
+
+#### Scenario: Distinct count values
+- **WHEN** accounts report 3, 0 and unknown reset credits
+- **THEN** their Reset cells show 3, 0 and an unknown marker respectively
+- **AND** status remains in its own column with its existing reason tooltip
+
+#### Scenario: Sort status and counts
+- **WHEN** the operator selects ascending Status order
+- **THEN** accounts appear in active, paused, rate-limited, quota-exceeded, reauthentication-required and deactivated order
+- **AND** descending Status reverses that order
+- **WHEN** the operator sorts Reset ascending or descending
+- **THEN** counts are ordered numerically in that direction with unknown counts last and equal counts ordered by nearest known expiry first
+
+#### Scenario: Hide reset counts
+- **WHEN** reset-credit badge visibility is disabled
+- **THEN** List omits both the Reset header and its cells while keeping the other columns aligned
+
+### Requirement: List metadata remains readable on narrow screens
+
+At widths down to 320 CSS pixels, List Plan, Status and Reset badges SHALL wrap or stack when necessary without intersecting each other or overflowing the row. Desktop SHALL retain separate aligned metadata columns. These behaviors SHALL hold for all supported interface languages and with reset-credit badges enabled or disabled.
+
+#### Scenario: Long recovery status on a phone
+- **WHEN** an Enterprise account with reauthentication-required status and 12 reset credits is shown at 320px
+- **THEN** all three badges remain readable and do not overlap
+- **AND** the account row remains operable
+
+#### Scenario: Quota controls do not impersonate quota data columns
+- **WHEN** a mixed paid/Free List uses both, 5h-only or Weekly quota display
+- **THEN** a single Quota remaining heading describes the quota data region
+- **AND** the separate labeled quota sort group offers 5h, 7d and Monthly directions
+- **AND** Free monthly-only rows retain one Monthly bar

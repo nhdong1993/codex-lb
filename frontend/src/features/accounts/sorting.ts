@@ -1,12 +1,16 @@
 import type { AccountSummary } from "@/features/accounts/schemas";
 import type { AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
 import { parseDate } from "@/utils/formatters";
+import { normalizeStatus, type DashboardAccountStatus } from "@/utils/account-status";
 
 export type AccountSortColumn =
   | "plan"
+  | "status"
+  | "reset_credits"
   | "subscription"
   | "quota_5h"
-  | "quota_7d";
+  | "quota_7d"
+  | "quota_monthly";
 
 export type AccountSortMode =
   | "reset_soonest"
@@ -27,15 +31,30 @@ export const ACCOUNT_SORT_OPTIONS: readonly {
   { value: "name_desc", label: "Name (Z-A)" },
   { value: "plan_asc", label: "Plan (A-Z)" },
   { value: "plan_desc", label: "Plan (Z-A)" },
+  { value: "status_asc", label: "Status (active first)" },
+  { value: "status_desc", label: "Status (inactive first)" },
+  { value: "reset_credits_asc", label: "Reset credits (fewest first)" },
+  { value: "reset_credits_desc", label: "Reset credits (most first)" },
   { value: "subscription_asc", label: "Subscription (soonest)" },
   { value: "subscription_desc", label: "Subscription (latest)" },
   { value: "quota_5h_asc", label: "5h quota (lowest remaining)" },
   { value: "quota_5h_desc", label: "5h quota (highest remaining)" },
   { value: "quota_7d_asc", label: "7d quota (lowest remaining)" },
   { value: "quota_7d_desc", label: "7d quota (highest remaining)" },
+  { value: "quota_monthly_asc", label: "Monthly quota (lowest remaining)" },
+  { value: "quota_monthly_desc", label: "Monthly quota (highest remaining)" },
 ] as const;
 
 export const DEFAULT_ACCOUNT_SORT_MODE: AccountSortMode = "most_reset_credits";
+
+const STATUS_ORDER: Record<DashboardAccountStatus, number> = {
+  active: 0,
+  paused: 1,
+  limited: 2,
+  exceeded: 3,
+  reauth: 4,
+  deactivated: 5,
+};
 
 function visibleQuotaResetTimestamps(
   account: AccountSummary,
@@ -104,12 +123,14 @@ function resetCreditNearestExpiry(account: AccountSummary): number {
 function compareByResetCredits(
   left: AccountSummary,
   right: AccountSummary,
+  direction: "asc" | "desc",
 ): number {
-  const leftCount = left.availableResetCredits ?? 0;
-  const rightCount = right.availableResetCredits ?? 0;
-  if (leftCount !== rightCount) {
-    return rightCount - leftCount;
-  }
+  const comparison = compareKnownNumbers(
+    left.availableResetCredits ?? Infinity,
+    right.availableResetCredits ?? Infinity,
+    direction,
+  );
+  if (comparison !== 0) return comparison;
   // Tiebreak by soonest expiry ascending; null expiry (Infinity) sorts last.
   return compareKnownNumbers(
     resetCreditNearestExpiry(left),
@@ -128,7 +149,17 @@ function compareBySortMode(
     sortMode.endsWith("_desc") || sortMode === "reset_latest" ? "desc" : "asc";
   switch (sortMode) {
     case "most_reset_credits":
-      return compareByResetCredits(left, right);
+      return compareByResetCredits(left, right, "desc");
+    case "reset_credits_asc":
+    case "reset_credits_desc":
+      return compareByResetCredits(left, right, direction);
+    case "status_asc":
+    case "status_desc":
+      return compareKnownNumbers(
+        STATUS_ORDER[normalizeStatus(left.status)],
+        STATUS_ORDER[normalizeStatus(right.status)],
+        direction,
+      );
     case "reset_soonest":
     case "reset_latest":
       return compareKnownNumbers(
@@ -173,6 +204,13 @@ function compareBySortMode(
       return compareKnownNumbers(
         left.usage?.secondaryRemainingPercent ?? Infinity,
         right.usage?.secondaryRemainingPercent ?? Infinity,
+        direction,
+      );
+    case "quota_monthly_asc":
+    case "quota_monthly_desc":
+      return compareKnownNumbers(
+        left.usage?.monthlyRemainingPercent ?? Infinity,
+        right.usage?.monthlyRemainingPercent ?? Infinity,
         direction,
       );
   }

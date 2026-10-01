@@ -216,7 +216,7 @@ describe("AccountListOverviewRow", () => {
   });
 
   it.each([0, null, undefined])(
-    "omits reset counts when none are available (%s)",
+    "distinguishes zero from unknown reset counts (%s)",
     (count) => {
       render(
         <AccountListOverviewRow
@@ -225,7 +225,9 @@ describe("AccountListOverviewRow", () => {
           account={createAccountSummary({ availableResetCredits: count })}
         />,
       );
-      expect(screen.queryByText(/^Reset \(/)).not.toBeInTheDocument();
+      expect(screen.getByTestId("account-list-reset-cell")).toHaveTextContent(
+        count === 0 ? "Reset (0)" : "—",
+      );
     },
   );
 });

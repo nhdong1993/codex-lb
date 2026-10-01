@@ -7,6 +7,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AccountSubscription } from "@/features/accounts/components/account-subscription";
+import { ACCOUNT_LIST_COLUMNS, ACCOUNT_LIST_COLUMNS_WITHOUT_RESET } from "@/features/accounts/components/account-list-layout";
 import type { AccountRoutingPolicy, AccountSummary } from "@/features/accounts/schemas";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
@@ -89,8 +90,8 @@ export function AccountListOverviewRow({
       role="group"
       data-testid="account-list-overview-row"
       className={cn(
-        "group relative grid w-full min-w-0 grid-cols-2 items-center gap-x-4 gap-y-2 rounded-lg border bg-card px-4 py-2.5 text-left transition-colors hover:border-primary/30 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        "lg:grid-cols-[minmax(0,1.5fr)_minmax(0,.9fr)_minmax(0,.6fr)_minmax(0,1.5fr)] lg:gap-5",
+        "group relative grid w-full min-w-0 grid-cols-[auto_1fr_auto] items-center gap-x-3 gap-y-1.5 rounded-lg border bg-card px-4 py-2 text-left transition-colors hover:border-primary/30 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:py-2.5",
+        showResetCreditBadge ? ACCOUNT_LIST_COLUMNS : ACCOUNT_LIST_COLUMNS_WITHOUT_RESET,
         selected && "border-primary/30 bg-primary/[0.03]",
       )}
     >
@@ -101,7 +102,7 @@ export function AccountListOverviewRow({
         aria-label={t("accounts.listOverview.detailsFor", { account: label })}
         onClick={() => onSelect(account.accountId)}
       />
-      <div className="pointer-events-none relative col-span-2 min-w-0 lg:col-span-1">
+      <div className="pointer-events-none relative col-span-3 min-w-0 lg:col-span-1">
         <div className="flex min-w-0 items-center gap-2">
           <div className="min-w-0 flex-1">
             <p
@@ -180,11 +181,14 @@ export function AccountListOverviewRow({
         </p>
       </div>
 
-      <div className="pointer-events-none relative min-w-0">
-        <div className="flex flex-wrap items-center gap-1.5">
+      <div className="pointer-events-none col-span-3 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 lg:contents">
+        <div className="pointer-events-none relative min-w-0 shrink-0" data-testid="account-list-plan-cell">
           <Badge variant="outline" className={cn("text-[10px]", planBadgeClass(account.planType))}>
             {formatSlug(account.planType)}
           </Badge>
+        </div>
+
+        <div className="pointer-events-none relative min-w-0 shrink-0" data-testid="account-list-status-cell">
           <StatusBadge
             status={status}
             title={
@@ -194,24 +198,28 @@ export function AccountListOverviewRow({
                 : undefined)
             }
           />
-          {showResetCreditBadge && (account.availableResetCredits ?? 0) > 0 ? (
-            <Badge
-              variant="outline"
-              className="border-primary/20 bg-primary/5 text-[10px] tabular-nums text-primary"
-              title={t("accounts.resetCreditDialog.availableCount", {
-                count: account.availableResetCredits ?? 0,
-              })}
-            >
-              {t("accounts.actions.resetWithCount", {
-                count: account.availableResetCredits ?? 0,
-              })}
-            </Badge>
-          ) : null}
-
         </div>
+
+        {showResetCreditBadge ? (
+          <div className="pointer-events-none relative min-w-0 shrink-0" data-testid="account-list-reset-cell">
+            {account.availableResetCredits != null ? (
+              <Badge
+                variant="outline"
+                className="border-primary/20 bg-primary/5 text-[10px] tabular-nums text-primary"
+                title={t("accounts.resetCreditDialog.availableCount", {
+                  count: account.availableResetCredits ?? 0,
+                })}
+              >
+                {t("accounts.actions.resetWithCount", {
+                  count: account.availableResetCredits ?? 0,
+                })}
+              </Badge>
+            ) : <span className="text-xs text-muted-foreground">—</span>}
+          </div>
+        ) : null}
       </div>
 
-      <div className="pointer-events-none relative min-w-0 text-right lg:text-left">
+      <div className="pointer-events-none relative col-span-3 min-w-0 lg:col-span-1">
         <span className="mr-1 text-[10px] text-muted-foreground lg:hidden">
           {t("accounts.listOverview.subscription")}
         </span>
@@ -220,7 +228,7 @@ export function AccountListOverviewRow({
 
       <div
         className={cn(
-          "pointer-events-none relative col-span-2 grid min-w-0 gap-4 lg:col-span-1",
+          "pointer-events-none relative col-span-3 grid min-w-0 gap-4 lg:col-span-1",
           showPrimary && showSecondary ? "grid-cols-2" : "grid-cols-1",
         )}
       >

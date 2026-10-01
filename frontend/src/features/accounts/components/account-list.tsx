@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
 import { AccountListOverviewRow } from "@/features/accounts/components/account-list-overview-row";
+import { ACCOUNT_LIST_COLUMNS, ACCOUNT_LIST_COLUMNS_WITHOUT_RESET } from "@/features/accounts/components/account-list-layout";
 import { AccountGridCard } from "@/features/accounts/components/account-grid-card";
 import { cn } from "@/lib/utils";
 import { AddAccountDialog } from "@/features/accounts/components/add-account-dialog";
@@ -59,7 +60,7 @@ function AccountSortHeader({
 }) {
   const { t } = useTranslation();
   const ascending = mode === `${column}_asc`;
-  const descending = mode === `${column}_desc`;
+  const descending = mode === `${column}_desc` || (column === "reset_credits" && mode === "most_reset_credits");
   const active = ascending || descending;
   const Icon = ascending ? ArrowUp : descending ? ArrowDown : ArrowUpDown;
   const label = t(`accounts.sortColumn.${column}`);
@@ -312,6 +313,18 @@ export function AccountList({
             <ChevronDown className="h-3.5 w-3.5" />
           )}
         </Button>
+        {viewMode === "list" && filtered.length > 0 ? (
+          <div
+            role="group"
+            aria-label={t("accounts.list.sortQuota")}
+            className="hidden flex-wrap items-center gap-x-3 gap-y-1 text-[10px] font-semibold text-muted-foreground lg:flex"
+          >
+            <span>{t("accounts.list.sortQuota")}:</span>
+            {sortHeader("quota_5h")}
+            {sortHeader("quota_7d")}
+            {sortHeader("quota_monthly")}
+          </div>
+        ) : null}
         <Button
           type="button"
           size="sm"
@@ -327,14 +340,16 @@ export function AccountList({
       {helpOpen ? <WindowsOauthHelp /> : null}
 
       {viewMode === "list" && filtered.length > 0 ? (
-        <div className="hidden grid-cols-[minmax(0,1.5fr)_minmax(0,.9fr)_minmax(0,.6fr)_minmax(0,1.5fr)] gap-5 rounded-lg bg-muted/50 px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground lg:grid">
+        <div data-testid="account-list-column-headers" className={cn(
+          "hidden items-center gap-3 rounded-lg bg-muted/50 px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground lg:grid",
+          showResetCreditBadges ? ACCOUNT_LIST_COLUMNS : ACCOUNT_LIST_COLUMNS_WITHOUT_RESET,
+        )}>
           <span>{t("accounts.listOverview.identity")}</span>
           {sortHeader("plan")}
+          {sortHeader("status")}
+          {showResetCreditBadges ? sortHeader("reset_credits") : null}
           {sortHeader("subscription")}
-          <div className="grid min-w-0 grid-cols-2 gap-4">
-            {sortHeader("quota_5h")}
-            {sortHeader("quota_7d")}
-          </div>
+          <span>{t("accounts.listOverview.quota")}</span>
         </div>
       ) : null}
 
