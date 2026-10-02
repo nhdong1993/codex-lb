@@ -40,6 +40,7 @@ async def test_native_handshake_endpoint_auth_and_proxy_policy(monkeypatch, sche
     assert options["proxy"] == ("http://proxy.invalid:8888" if trust_env else None)
     assert proxy_lookups == ([args[0]] if trust_env else [])
     assert options["open_timeout"] == 3.5 and options["close_timeout"] <= 3.5
+    assert options["ping_timeout"] is None
     assert options["max_size"] == transport.MAX_MESSAGE_BYTES and options["max_queue"] == 4
 
 

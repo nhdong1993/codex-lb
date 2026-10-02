@@ -32,6 +32,14 @@ An explicit turn-state header with a subscription owner under the same API key k
 
 HTTP and WebSocket share source revision hashes and the ownership store. Output references are published before events reach the client. Failover is limited to a portable initial request with a proved pre-send connection/handshake failure, up to five sources. A send failure is never replayed automatically.
 
+### Delayed pongs during generation
+
+Some sequential providers defer reading WebSocket control frames while streaming a response. Source connections keep sending transport pings but set no independent pong deadline. These keepalive probes do not allocate acknowledgment futures, keeping bookkeeping bounded even when a provider completes many turns without ever sending a pong. The connection owns and cancels the keepalive task; delayed pongs are harmless. The first-frame, stream-idle, total-turn and downstream-idle budgets still close stalled or unused sessions according to [spec.md](spec.md). This avoids cutting off an otherwise progressing response solely because the provider has not yet read its ping. For example, a generation can stream for 60 seconds and complete normally even if its first pong arrives only after completion.
+
+On October 2, 2026, CLIProxyAPI disconnects clustered around 42–44 seconds after connection, consistent with the previous 20-second ping interval plus 20-second pong timeout and close handling. Provider logs reported broken pipes while writing events. These observations support the heartbeat explanation but do not prove the cause of every production disconnect; the public error groups several connection failures together. Local route tests reproduce the delayed-pong failure with a finite timeout and exercise progress, continuation, silent-source deadlines and real peer closure without relaxing replay or ownership rules.
+
+The fix needs an application rollout to take effect on new source connections; no source configuration or database migration is needed. Compare truncation and timeout logs after rollout. Real peer disconnects still fail the active turn and do not trigger automatic replay. This change adds no new close-code diagnostic fields.
+
 Selection may lose an admission slot while effective policy is being read. A portable initial request then tries another eligible source, with at most five candidates and no extension of the original deadline. The replacement's capability, controls and ownership are checked before quota acquisition. A bound socket or owned continuation does not move sources after losing admission.
 
 ## Accounting and operations

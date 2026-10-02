@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from urllib.parse import urlsplit, urlunsplit
 
@@ -30,6 +31,23 @@ class _SourceConnect(connect):
         # A source handshake is bound to its configured endpoint, including
         # same-origin redirects. Never replay source credentials on a redirect.
         return exc
+
+
+class _SourceConnection(ClientConnection):
+    async def keepalive(self) -> None:
+        """Send probes without retaining a future for each unanswered pong."""
+        assert self.ping_interval is not None
+        try:
+            while True:
+                await asyncio.sleep(self.ping_interval)
+                # The base connection owns this task and cancels it on close.
+                # Send through its flow-controlled context, but don't create
+                # acknowledgment futures: source liveness uses response budgets.
+                async with self.send_context():
+                    self.protocol.send_ping(b"")
+        except Exception:
+            # Provider close reasons may contain secrets; don't log exceptions.
+            self.logger.warning("source_websocket_keepalive_failed")
 
 
 def source_ws_error(code: str, message: str, *, status: int = 400) -> ModelSourceForwardingError:
@@ -65,6 +83,13 @@ async def open_source_websocket(source: ModelSource, *, timeout: float) -> Clien
             additional_headers={"Authorization": f"Bearer {secret}"} if secret else None,
             proxy=proxy,
             open_timeout=timeout,
+            # Source providers can defer control-frame handling while a long
+            # Responses generation is in flight. Keep sending pings, but let
+            # the response first-frame/idle/turn budgets decide whether work
+            # is stalled instead of closing a progressing stream after the
+            # library's short default pong deadline.
+            ping_timeout=None,
+            create_connection=_SourceConnection,
             close_timeout=2,
             max_size=MAX_MESSAGE_BYTES,
             max_queue=4,

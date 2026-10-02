@@ -170,7 +170,7 @@ All response, item, call, encrypted and hosted-resource references introduced by
 
 ### Requirement: Source WebSocket attempts preserve settlement and safe retry boundaries
 
-Source admission MUST precede quota reservation. Each attempt MUST settle or release exactly once and produce one source-attributed log. Existing source usage policy MUST apply: successful limited-key responses without usage settle an estimate; cancellation after content delivery follows the existing estimate policy; pre-content cancellation and failure/truncated responses release. A portable initial request MAY try at most five distinct eligible sources only for proven pre-send connection failure or eligible handshake rejection. After send begins, ambiguous delivery MUST NOT cause automatic replay. Owned continuations MUST NOT switch sources. Prior settlement/admission release MUST finish before cooldown writes or another reservation.
+Source admission MUST precede quota reservation. Each attempt MUST settle or release exactly once and produce one source-attributed log. Existing source usage policy MUST apply: successful limited-key responses without usage settle an estimate; cancellation after content delivery follows the existing estimate policy; pre-content cancellation and failure/truncated responses release. A portable initial request MAY try at most five distinct eligible sources only for proven pre-send connection failure or eligible handshake rejection. After send begins, ambiguous delivery MUST NOT cause automatic replay. Owned continuations MUST NOT switch sources. Prior settlement/admission release MUST finish before cooldown writes or another reservation. A source WebSocket MUST retain transport-level keepalive pings without treating a delayed pong as a response-stream failure; first-frame, stream-idle and total-turn deadlines remain authoritative bounds for stalled work.
 
 #### Scenario: Admission changes during effective-policy lookup
 - **WHEN** another request fills a portable initial request's selected source while its effective policy is being checked
@@ -211,6 +211,16 @@ Source admission MUST precede quota reservation. Each attempt MUST settle or rel
 #### Scenario: Retry preparation stalls
 - **WHEN** source preparation stalls after a pre-send connection failure
 - **THEN** the original request deadline bounds the retry preparation and timeout does not reset that deadline
+
+#### Scenario: Provider delays pong while response work is active
+
+- **WHEN** an opted-in source delays its WebSocket pong beyond the transport library's default heartbeat interval while response events remain within the configured first-frame, stream-idle and total-turn deadlines
+- **THEN** the proxy MUST keep the source connection available for the response and MUST NOT report `model_source_stream_truncated` solely because the pong was delayed
+
+#### Scenario: Response deadlines still bound a silent source
+
+- **WHEN** a source sends no response event within the configured first-frame or stream-idle deadline
+- **THEN** the proxy MUST close the source connection and return its existing timeout error with exactly-once settlement
 
 ### Requirement: Source transport policy and health are scoped correctly
 
@@ -286,3 +296,19 @@ Catalog and source-only installer WebSocket capability MUST reflect the model an
 #### Scenario: Equivalent sources have mixed capabilities
 - **WHEN** one authorized equivalent source supports WebSocket and another supports only HTTP
 - **THEN** the catalog does not prefer WebSocket and an anchored HTTP-only owner cannot be replaced during a WS request
+
+### Requirement: Source keepalive resources remain bounded without pongs
+
+Source WebSocket keepalive MUST consume bounded bookkeeping resources independent of the number of successful turns or unanswered pings on a reused connection. Periodic transport pings MUST continue without a pong deadline. Delayed pongs MUST NOT corrupt subsequent turns, and connection closure MUST terminate its keepalive work. Existing response deadlines, ownership, no-replay and settlement rules MUST remain in effect.
+
+#### Scenario: Reused source never answers pings
+- **WHEN** a source completes repeated turns without answering transport pings
+- **THEN** successful responses and connection reuse MUST continue while keepalive bookkeeping stays bounded independently of turn count
+
+#### Scenario: Provider resumes pong delivery
+- **WHEN** a source sends delayed pong frames after completing a response
+- **THEN** the connection MUST remain usable for the next owned continuation
+
+#### Scenario: Source connection closes
+- **WHEN** the source connection closes after success, timeout, peer closure or client cancellation
+- **THEN** its keepalive work MUST terminate and MUST NOT retain pending pong state
