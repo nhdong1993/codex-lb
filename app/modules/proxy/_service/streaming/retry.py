@@ -64,6 +64,7 @@ from app.modules.proxy._service.support import (
     _account_capacity_wait_payload,
     _account_selection_recovery_sleep_seconds,
     _request_log_client_fields,
+    _request_plan_verification,
     _RetryableStreamError,
     _signal_propagated_capacity_startup_wait,
     _signal_propagated_responses_service_cleanup_ready,
@@ -1225,6 +1226,7 @@ class _StreamingRetryMixin:
                 model=payload.model,
             ):
                 return None
+            _request_plan_verification(proxy, account, error.message if error else None)
             can_move_verified_owner = bool(
                 require_preferred_account
                 and preferred_account_id == account.id

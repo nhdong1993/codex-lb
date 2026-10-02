@@ -67,6 +67,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyUsageReservationData,
 )
+from app.modules.proxy import model_admission
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -95,6 +96,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_key_strength,
     _http_bridge_payload_looks_like_full_resend,
     _http_bridge_precreated_retry_failure_error,
+    _http_bridge_previous_response_owner_unavailable_error,
     _http_bridge_prewarm_enabled,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
@@ -2324,6 +2326,21 @@ class _HTTPBridgeRequestSubmitMixin:
                                 ),
                                 retry_after_seconds=suppressed_retry_after_seconds,
                             )
+                    # Remain on the proven pre-dispatch cleanup path: raising
+                    # inside the send try would retire accepted siblings too.
+                    if session.account.id in await model_admission.rejected_model_account_ids(
+                        [session.account], request_state.model
+                    ):
+                        if (
+                            request_state.file_required_preferred_account
+                            or request_state.previous_response_id is not None
+                            or _http_bridge_key_strength(session.key) == "hard"
+                        ):
+                            raise _http_bridge_previous_response_owner_unavailable_error()
+                        raise ProxyResponseError(
+                            502,
+                            openai_error("upstream_unavailable", "Account is unavailable for this model; retry later."),
+                        )
                     async with session.pending_lock:
                         session.pending_requests.append(request_state)
                         session.admission_waiter_count = max(0, session.admission_waiter_count - 1)

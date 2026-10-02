@@ -33,6 +33,7 @@ from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager, _clean_optional
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.usage import plan_checks
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.plan_downgrade_observations import (
@@ -276,6 +277,7 @@ class UsageUpdater:
         auth_manager: AuthManager | None = None,
     ) -> None:
         self._usage_repo = usage_repo
+        self._plan_check_generation: str | None = None
         self._accounts_repo = accounts_repo
         self._additional_usage_repo = additional_usage_repo
         self._encryptor = TokenEncryptor()
@@ -630,7 +632,10 @@ class UsageUpdater:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             try:
-                account = await self._auth_manager.ensure_fresh(account, force=True)
+                if self._plan_check_generation is not None:
+                    account = await self._auth_manager.ensure_fresh(account, force=True, settle_on_cancel=True)
+                else:
+                    account = await self._auth_manager.ensure_fresh(account, force=True)
             except RefreshError:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
@@ -661,7 +666,18 @@ class UsageUpdater:
         if payload is None:
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
-        if await _payload_mismatches_account_slot(account, payload):
+        if (
+            self._plan_check_generation is not None
+            and normalize_account_plan_type(payload.plan_type) not in ACCOUNT_PLAN_TYPES
+        ):
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+
+        if self._plan_check_generation is not None and not await plan_checks.plan_check_is_current(
+            account, self._plan_check_generation
+        ):
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+
+        if await _payload_mismatches_account_slot(account, payload, plan_check_generation=self._plan_check_generation):
             logger.warning(
                 "Usage refresh payload identity mismatch; skipping account mutation "
                 "account_id=%s stored_workspace_id=%s payload_workspace_id=%s stored_plan_type=%s "
@@ -687,6 +703,14 @@ class UsageUpdater:
                 get_request_id(),
             )
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+
+        if account.plan_type == "free" and normalize_account_plan_type(payload.plan_type) == "free":
+            # Consume confirmation only after the guarded plan write succeeds.
+            # Routine token rotation may reject that write without changing
+            # lineage; the remaining attempt must retain its agreeing samples.
+            await _clear_workspace_less_free_plan_observations(
+                account, plan_check_generation=self._plan_check_generation
+            )
 
         now_epoch = _now_epoch()
         if self._additional_usage_repo is not None:
@@ -813,6 +837,22 @@ class UsageUpdater:
             if exc.code in PERMANENT_FAILURE_CODES
             else AccountStatus.DEACTIVATED
         )
+        if self._plan_check_generation is not None:
+            if not await plan_checks.plan_check_is_current(account, self._plan_check_generation):
+                return
+            applied = await self._auth_manager._repo.update_status_if_current(
+                account.id,
+                status,
+                reason,
+                expected_status=account.status,
+                expected_deactivation_reason=account.deactivation_reason,
+                expected_reset_at=account.reset_at,
+                expected_refresh_token_encrypted=account.refresh_token_encrypted,
+            )
+            if not applied:
+                return
+        else:
+            await self._auth_manager._repo.update_status(account.id, status, reason)
         logger.warning(
             "Marking account unavailable due to client error account_id=%s account_status=%s status=%s "
             "message=%s request_id=%s",
@@ -822,7 +862,6 @@ class UsageUpdater:
             exc.message,
             get_request_id(),
         )
-        await self._auth_manager._repo.update_status(account.id, status, reason)
         account.status = status
         account.deactivation_reason = reason
         if status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -858,6 +897,7 @@ class UsageUpdater:
         ):
             return True
 
+        previous_plan_type = account.plan_type
         account.plan_type = next_plan_type
         account.workspace_id = next_workspace_id
         account.workspace_label = next_workspace_label
@@ -870,7 +910,15 @@ class UsageUpdater:
         # through the metadata-only writer, which structurally cannot touch
         # token ciphertext. Persisting token material from this snapshot would
         # clobber a peer replica's concurrent refresh-token rotation.
-        await self._auth_manager._repo.update_account_metadata(
+        guarded_check = (
+            {
+                "expected_plan_check_generation": self._plan_check_generation,
+                "expected_refresh_token_encrypted": account.refresh_token_encrypted,
+            }
+            if self._plan_check_generation is not None
+            else {}
+        )
+        applied = await self._auth_manager._repo.update_account_metadata(
             account.id,
             plan_type=account.plan_type,
             email=account.email,
@@ -878,7 +926,13 @@ class UsageUpdater:
             workspace_id=account.workspace_id,
             workspace_label=account.workspace_label,
             seat_type=account.seat_type,
+            **guarded_check,
         )
+        if not applied:
+            await self._sync_account_from_repo(account)
+            return False
+        if previous_plan_type != account.plan_type:
+            get_account_selection_cache().invalidate()
         return True
 
     async def _recover_quota_status_from_usage(
@@ -978,6 +1032,7 @@ class UsageUpdater:
         account.plan_type = stored.plan_type
         account.access_token_encrypted = stored.access_token_encrypted
         account.refresh_token_encrypted = stored.refresh_token_encrypted
+        account.credential_generation = stored.credential_generation
         account.id_token_encrypted = stored.id_token_encrypted
         account.last_refresh = stored.last_refresh
         account.status = stored.status
@@ -1051,7 +1106,9 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
     return credits_has, credits_unlimited, _parse_credits_balance(balance_value)
 
 
-async def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) -> bool:
+async def _payload_mismatches_account_slot(
+    account: Account, payload: UsagePayload, *, plan_check_generation: str | None = None
+) -> bool:
     payload_workspace_id = _clean_optional(payload.workspace_id)
     if account.workspace_id and payload_workspace_id and account.workspace_id != payload_workspace_id:
         # The payload reports a different workspace slot than the one this
@@ -1089,6 +1146,7 @@ async def _payload_mismatches_account_slot(account: Account, payload: UsagePaylo
                 account,
                 stored_plan_type=stored_plan_type,
                 normalized_payload_plan_type=normalized_payload_plan_type,
+                plan_check_generation=plan_check_generation,
             ):
                 return False
             return True
@@ -1097,7 +1155,7 @@ async def _payload_mismatches_account_slot(account: Account, payload: UsagePaylo
             # evidence that it is still paid, so any pending downgrade evidence
             # is discarded. An unrecognized value is absence of evidence and
             # deliberately does not reach here.
-            await _clear_workspace_less_free_plan_observations(account.id)
+            await _clear_workspace_less_free_plan_observations(account, plan_check_generation=plan_check_generation)
     return False
 
 
@@ -1106,6 +1164,7 @@ async def _free_plan_downgrade_is_confirmed(
     *,
     stored_plan_type: str,
     normalized_payload_plan_type: str | None,
+    plan_check_generation: str | None = None,
 ) -> bool:
     """Record a workspace-less paid -> free observation and report confirmation.
 
@@ -1142,8 +1201,21 @@ async def _free_plan_downgrade_is_confirmed(
         account.id,
         credential_fingerprint=fingerprint,
         observed_plan_type="free",
+        plan_check_generation=plan_check_generation,
     )
+    if observations == 0:
+        return False
     if observations < _FREE_PLAN_DOWNGRADE_CONFIRMATIONS:
+        # A priority worker already owns a delayed retry. Only an independent
+        # sample must enqueue/fence work; otherwise the worker would invalidate
+        # its own generation and leave its completion unowned.
+        if plan_check_generation is None:
+            try:
+                await plan_checks.request_plan_check(account)
+            except Exception as exc:
+                logger.warning(
+                    "Could not request priority plan check account_id=%s error_type=%s", account.id, type(exc).__name__
+                )
         logger.info(
             "Usage refresh observed a workspace-less downgrade to free; awaiting confirmation "
             "account_id=%s stored_plan_type=%s observations=%s required=%s request_id=%s",
@@ -1154,7 +1226,6 @@ async def _free_plan_downgrade_is_confirmed(
             get_request_id(),
         )
         return False
-    await store.clear(account.id)
     logger.info(
         "Usage refresh confirmed a workspace-less downgrade to free; persisting plan change "
         "account_id=%s stored_plan_type=%s observations=%s request_id=%s",
@@ -1180,8 +1251,15 @@ def _plan_downgrade_observation_store() -> PlanDowngradeObservationStorePort:
     return _FALLBACK_PLAN_DOWNGRADE_OBSERVATIONS
 
 
-async def _clear_workspace_less_free_plan_observations(account_id: str) -> None:
-    await _plan_downgrade_observation_store().clear(account_id)
+async def _clear_workspace_less_free_plan_observations(
+    account: Account, *, plan_check_generation: str | None = None
+) -> None:
+    await _plan_downgrade_observation_store().clear(
+        account.id,
+        plan_check_generation=plan_check_generation,
+        expected_credential_generation=account.credential_generation or 0,
+        expected_installation_id=account.codex_installation_id,
+    )
 
 
 def _usage_entry_written(entry: UsageHistory | None) -> bool:

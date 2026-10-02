@@ -2184,3 +2184,114 @@ with zero configuration and MUST NOT require an operator setting.
 - **GIVEN** an active workspace-less account with stored `plan_type` `plus`
 - **WHEN** two refreshes of that account observe `plan_type` `free` concurrently
 - **THEN** the recorded observation count reflects both observations rather than one
+
+### Requirement: Suspicious paid plans receive bounded priority verification
+
+When background usage refresh is enabled, the system MUST request a priority usage check for an eligible account after a model-entitlement rejection or its first confirmable Free observation. These checks MUST run independently of the fleet scan, coalesce across replicas, use at most three concurrent workers, and allow at most three attempts in a two-minute request window. A first Free observation MUST schedule the follow-up after 15 seconds. Failed or unconfirmed checks MUST retry with a delay and MUST NOT loop indefinitely. Shutdown MUST cancel and await owned work. All existing two-observation, workspace-identity and credential-replacement guards MUST continue to apply. A successful plan change MUST invalidate routing selection caches. Plan verification MUST NOT itself rotate tokens or assign reauthentication solely because the plan changed; actual authentication failures MUST retain the existing guarded refresh and permanent-error handling.
+
+#### Scenario: Free is promptly confirmed without scanning the fleet
+- **WHEN** the first eligible usage sample reports Free while thousands of accounts await ordinary refresh
+- **THEN** a priority follow-up becomes due after 15 seconds
+- **AND** a second agreeing sample persists Free without altering credential bytes
+
+#### Scenario: A paid sample contradicts the suspicion
+- **WHEN** priority verification returns a recognized paid plan
+- **THEN** pending downgrade evidence is cleared and priority verification completes
+
+#### Scenario: Partial failure and replica contention
+- **WHEN** multiple replicas request verification and one upstream endpoint fails
+- **THEN** duplicate requests share one attempt budget, each claim has one winner, and the other endpoint is still checked
+- **AND** failures preserve existing account health unless explicit authentication evidence requires a change
+
+#### Scenario: Reauthentication supersedes pending work
+- **WHEN** new credentials replace an account while old verification is pending or in flight
+- **THEN** old work and evidence cannot downgrade or suppress the repaired account
+
+### Requirement: Priority work remains fenced during replacement contention
+
+Priority enqueue and downgrade-evidence mutations MUST serialize with credential replacement before checking their source. A statement that began while replacement was uncommitted MUST NOT recreate old pending work or observations after replacement commits.
+
+#### Scenario: Delayed enqueue waits behind reauthentication
+- **WHEN** reauthentication holds the account transaction and deletes old pending work while an old enqueue is waiting
+- **THEN** the enqueue cannot reinsert work or suppress routing for the repaired account
+
+#### Scenario: Delayed observation waits behind reauthentication
+- **WHEN** replacement deletes downgrade observations while an old priority observation is waiting
+- **THEN** the old observation cannot count toward confirmation under the new credentials
+
+### Requirement: New Free evidence reopens remaining priority work
+
+A first confirmable Free observation after completed priority verification MUST reopen work if the original window and attempt budget permit it. Reopening MUST preserve the original expiry and used attempts, schedule a follow-up after 15 seconds, and fence completion from the previous generation. Exhausted work MUST NOT restart within the same window.
+
+#### Scenario: Paid confirmation precedes new Free evidence
+- **WHEN** a check completes with a paid sample and a first Free sample arrives within its window with attempts remaining
+- **THEN** verification becomes pending again and a follow-up can confirm Free
+
+### Requirement: Priority cancellation settles shared authentication work
+
+When priority verification has entered a shared OAuth refresh, cancellation or timeout MUST wait for that refresh's exchange and guarded persistence to settle before returning. Cancellation MUST still propagate after settlement. Shared refresh MUST NOT be cancelled because a priority caller stops, and ordinary request callers MUST retain their existing cancellation behavior.
+
+#### Scenario: Shutdown during OAuth refresh
+- **WHEN** a usage 401 starts OAuth refresh and the priority scheduler stops during the exchange
+- **THEN** shutdown waits for token/status persistence before closing resources and no priority-owned refresh remains running
+
+#### Scenario: Priority waiter shares an exchange with a request
+- **WHEN** a priority waiter is cancelled while an ordinary request joins the same refresh
+- **THEN** the request can receive the refresh result and the priority waiter propagates cancellation after settlement
+
+### Requirement: New Free evidence survives in-flight paid completion
+
+When a separate refresh records a first confirmable Free observation after an in-flight check's paid sample, the system MUST preserve a pending follow-up while attempts and the original request window remain. The older completion MUST NOT clear that pending state. The check's own first Free observation MUST retain delayed retry behavior without resetting its budget.
+
+#### Scenario: Free arrives before paid check completion
+- **WHEN** a paid check has processed its sample and another refresh observes Free before that check completes
+- **THEN** the account summary remains pending and a subsequent agreeing Free sample can confirm the downgrade
+- **AND** the original expiry and used attempts are preserved
+
+#### Scenario: Priority check itself observes first Free
+- **WHEN** priority verification records the first Free observation
+- **THEN** it schedules a delayed follow-up using its remaining attempts
+
+### Requirement: Delayed first-Free enqueue cannot supersede consumed evidence
+
+A first-Free enqueue MUST create or reopen priority work only while shared evidence for the same account identity still contains exactly one pending Free observation. Enqueue MUST serialize with priority evidence mutations before checking this condition. An enqueue delayed until confirmation has advanced or consumed that evidence MUST NOT change the confirming generation or prevent the confirmed plan from being persisted.
+
+#### Scenario: Confirmation overtakes first-Free enqueue
+- **WHEN** an ordinary refresh commits its first Free observation and its enqueue resumes after a priority refresh consumes the second Free observation but before saving the plan
+- **THEN** the enqueue does not replace the priority generation
+- **AND** the account summary reports Free after confirmation, including when only one attempt remains
+
+#### Scenario: Enqueue waits behind evidence mutation
+- **WHEN** a priority refresh holds the account transaction while advancing or clearing Free evidence and an older first-Free enqueue waits for it
+- **THEN** the enqueue rechecks committed evidence and does not recreate or reopen work from the consumed first sample
+
+### Requirement: Confirmed downgrade evidence survives failed persistence
+
+Confirmed agreeing Free observations MUST remain available until the guarded plan metadata write succeeds. A routine OAuth token rotation that rejects a stale write MUST NOT reset the observation sequence or bypass credential-generation guards. A later check within the original attempt budget MUST be able to persist the confirmed downgrade using current credentials. Successful persistence MUST clear consumed evidence, and credential replacement MUST continue to discard old evidence.
+
+Evidence clearing by ordinary as well as priority refreshes MUST be fenced against credential replacement. The credential condition MUST be evaluated after serializing with replacement, so an older successful refresh cannot delete the replacement's new observations.
+
+Routine token rotation MUST NOT prevent a recognized paid sample from clearing earlier Free evidence or prevent a first Free observation from scheduling priority verification. These mutations MUST use the persisted replacement generation, not token ciphertext, to distinguish rotation from import/reauthentication.
+
+#### Scenario: Routine rotation races the confirming plan write
+- **WHEN** a priority worker confirms Free but routine token rotation causes its metadata write to fail
+- **THEN** the account remains unchanged and the agreeing observations remain available
+- **AND** the next available attempt can persist Free, complete verification and clear the consumed observations without marking the account reauth-required
+
+#### Scenario: Replacement occurs after a rejected confirming write
+- **WHEN** credentials are replaced before the remaining priority attempt
+- **THEN** replacement clears the old evidence/check and the rejected worker cannot apply or clear the replacement generation's evidence
+
+#### Scenario: Replacement overtakes ordinary evidence consumption
+- **WHEN** an ordinary refresh persists Free and credential replacement records new Free evidence before the older refresh consumes its observations
+- **THEN** the older clear preserves the replacement's evidence
+- **AND** its pending verification can confirm Free using the remaining original attempts
+
+#### Scenario: Paid reset races rotation
+- **WHEN** a recognized paid sample clears earlier Free evidence while routine token rotation commits
+- **THEN** the paid sample clears the evidence and a later single Free sample cannot confirm a downgrade
+
+#### Scenario: First Free enqueue races rotation
+- **WHEN** routine rotation commits after recording the first Free sample but before requesting priority verification
+- **THEN** the same credential generation can enqueue or reopen verification within the existing budget
+- **AND** a genuine replacement, including one with unchanged token values, still fences the stale enqueue

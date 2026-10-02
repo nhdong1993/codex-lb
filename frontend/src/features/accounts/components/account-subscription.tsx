@@ -38,7 +38,9 @@ export function AccountSubscription({
   const { t } = useTranslation();
   const now = useAccountClock();
   const dateFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
-  const end = account.subscription?.activeUntil;
+  const verifying = account.planCheckPending === true;
+  const paid = !["free", "unknown"].includes(account.planType.toLowerCase());
+  const end = paid && !verifying ? account.subscription?.activeUntil : null;
   const endMs = end ? Date.parse(end) : NaN;
   const known = Number.isFinite(endMs);
   const remaining = endMs - now;
@@ -50,6 +52,18 @@ export function AccountSubscription({
         ? "accounts.subscription.apiSource"
         : "accounts.subscription.tokenSource")
     : null;
+  const summary = verifying
+    ? t("accounts.subscription.verifying")
+    : !known
+      ? t("accounts.subscription.unknown")
+      : remaining <= 0
+        ? t("accounts.subscription.elapsed")
+        : t("accounts.subscription.remaining", { duration });
+  const hint = verifying
+    ? "accounts.subscription.verifyingHint"
+    : known
+      ? "accounts.subscription.recordedHint"
+      : "accounts.subscription.unknownHint";
   const refreshButton = onRefresh ? (
     <Button
       type="button"
@@ -69,11 +83,6 @@ export function AccountSubscription({
   ) : null;
 
   if (compact) {
-    const summary = !known
-      ? t("accounts.subscription.unknown")
-      : remaining <= 0
-        ? t("accounts.subscription.elapsed")
-        : t("accounts.subscription.remaining", { duration });
     const description = [
       `${t("accounts.subscription.title")}: ${summary}`,
       sourceLabel ? `${t("accounts.subscription.source")}: ${sourceLabel}` : null,
@@ -83,11 +92,7 @@ export function AccountSubscription({
       checked
         ? `${t("accounts.subscription.checked")}: ${formatDateTimeInline(checked, dateFormat)}`
         : null,
-      t(
-        known
-          ? "accounts.subscription.recordedHint"
-          : "accounts.subscription.unknownHint",
-      ),
+      t(hint),
     ]
       .filter(Boolean)
       .join("\n");
@@ -104,7 +109,9 @@ export function AccountSubscription({
           title={description}
           aria-label={description}
         >
-          {!known
+          {verifying
+            ? t("accounts.subscription.verifying")
+            : !known
             ? t("accounts.subscription.unknown")
             : remaining <= 0
               ? t("accounts.subscription.elapsedShort")
@@ -133,11 +140,7 @@ export function AccountSubscription({
                 "text-amber-600 dark:text-amber-400",
             )}
           >
-            {!known
-              ? t("accounts.subscription.unknown")
-              : remaining <= 0
-                ? t("accounts.subscription.elapsed")
-                : t("accounts.subscription.remaining", { duration })}
+            {summary}
           </span>
           {refreshButton}
         </div>
@@ -163,11 +166,7 @@ export function AccountSubscription({
         ) : null}
       </dl>
       <p className="text-[11px] text-muted-foreground">
-        {t(
-          known
-            ? "accounts.subscription.recordedHint"
-            : "accounts.subscription.unknownHint",
-        )}
+        {t(hint)}
       </p>
     </section>
   );

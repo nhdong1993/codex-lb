@@ -30,7 +30,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
-from app.core.utils.shared_future import wait_on_shared_future
+from app.core.utils.shared_future import _await_task_deferring_cancellation, wait_on_shared_future
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus
 from app.db.session import get_background_session
@@ -95,6 +95,8 @@ class AccountsRepositoryPort(Protocol):
         workspace_label: str | None = None,
         seat_type: str | None = None,
         last_refresh: datetime | None = None,
+        expected_plan_check_generation: str | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool: ...
 
     async def workspace_slot_taken(
@@ -178,6 +180,8 @@ class _RefreshSingleflight:
         self,
         key: _RefreshSingleflightKey,
         factory: Callable[[], Coroutine[object, object, Account]],
+        *,
+        settle_on_cancel: bool = False,
     ) -> Account:
         account_id = key[0]
         async with self._lock:
@@ -202,7 +206,18 @@ class _RefreshSingleflight:
         # when piled-up waiters are cancelled (see shared_future.py). The
         # helper preserves shield semantics: a cancelled waiter detaches
         # without aborting the refresh.
-        return await wait_on_shared_future(task)
+        try:
+            return await wait_on_shared_future(task)
+        except asyncio.CancelledError:
+            if settle_on_cancel:
+                # A rotating exchange may have consumed the old token. Drain
+                # its guarded persistence, including when other callers share
+                # it; preserve the original cancellation after settlement.
+                try:
+                    await _await_task_deferring_cancellation(task)
+                except (Exception, asyncio.CancelledError):
+                    pass
+            raise
 
     def _schedule_complete(self, key: _RefreshSingleflightKey, task: asyncio.Task[Account]) -> None:
         asyncio.create_task(self._complete(key, task))
@@ -286,11 +301,12 @@ class AuthManager:
         # which the test harness may set to ``None`` to disable claims.
         self._refresh_claims = refresh_claims
 
-    async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+    async def ensure_fresh(self, account: Account, *, force: bool = False, settle_on_cancel: bool = False) -> Account:
         if force or (account.status != AccountStatus.REAUTH_REQUIRED and should_refresh(account.last_refresh)):
             account = await _REFRESH_SINGLEFLIGHT.run(
                 _refresh_singleflight_key(self._encryptor, account),
                 lambda: self._run_refresh(account),
+                settle_on_cancel=settle_on_cancel,
             )
         return await self._ensure_chatgpt_account_id(account)
 

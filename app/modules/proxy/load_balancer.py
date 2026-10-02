@@ -64,6 +64,7 @@ from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
+from app.modules.proxy import model_admission
 from app.modules.proxy._load_balancer.error_rate import (
     ErrorRateWeightingPolicy,
     error_rate_weight_multiplier,
@@ -690,8 +691,10 @@ class LoadBalancer:
                         selection_inputs.quota_admitted_catalog_omission_account_ids
                     ),
                 )
-            if excluded_ids and selection_inputs.accounts:
-                filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]
+            rejected_ids = await model_admission.rejected_model_account_ids(selection_inputs.accounts, model)
+            blocked_ids = excluded_ids | rejected_ids
+            if blocked_ids and selection_inputs.accounts:
+                filtered_accounts = [account for account in selection_inputs.accounts if account.id not in blocked_ids]
                 if require_security_work_authorized and not filtered_accounts:
                     return _SelectionInputs(
                         accounts=[],

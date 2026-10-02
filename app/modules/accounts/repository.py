@@ -491,6 +491,7 @@ class AccountsRepository:
         (:meth:`rotate_tokens`) and deliberately does not discard evidence.
         """
         _apply_account_updates(target, source)
+        target.credential_generation = (target.credential_generation or 0) + 1
         await discard_plan_downgrade_observations(self._session, target.id)
 
     async def upsert_account_slot(
@@ -1343,6 +1344,8 @@ class AccountsRepository:
         workspace_label: str | None = None,
         seat_type: str | None = None,
         last_refresh: datetime | None = None,
+        expected_plan_check_generation: str | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         """Update non-token account metadata (identity/plan/workspace fields).
 
@@ -1377,9 +1380,20 @@ class AccountsRepository:
             if not values:
                 existing = await self._session.get(Account, account_id)
                 return existing is not None
-            result = await self._session.execute(
-                update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
-            )
+            stmt = update(Account).where(Account.id == account_id)
+            if expected_plan_check_generation is not None:
+                from app.db.models import AccountPlanCheck
+
+                stmt = stmt.where(
+                    Account.refresh_token_encrypted == expected_refresh_token_encrypted,
+                    select(AccountPlanCheck.account_id)
+                    .where(
+                        AccountPlanCheck.account_id == account_id,
+                        AccountPlanCheck.generation == expected_plan_check_generation,
+                    )
+                    .exists(),
+                )
+            result = await self._session.execute(stmt.values(**values).returning(Account.id))
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 

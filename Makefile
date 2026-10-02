@@ -29,6 +29,8 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_conversation_presence_rollup_migration_upgrade_and_downgrade \
 	tests/integration/test_data_retention.py \
 	tests/integration/test_plan_downgrade_observation_store.py \
+	tests/integration/test_priority_plan_checks.py \
+	tests/integration/test_priority_plan_check_lifecycle.py \
 	tests/integration/test_accounts_api_probe.py::test_force_probe_confirms_paid_to_free_plan_downgrade \
 	tests/integration/test_accounts_api_probe.py::test_force_probe_keeps_paid_plan_for_unrecognized_payload_plan \
 	tests/integration/test_accounts_api_probe.py::test_pending_downgrade_evidence_is_persisted_for_all_replicas \

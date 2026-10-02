@@ -87,6 +87,7 @@ class AccountAdditionalQuota(DashboardModel):
 
 class AccountSummary(DashboardModel):
     account_id: str
+    plan_check_pending: bool = False
     chatgpt_account_id: str | None = None
     email: str
     alias: str | None = None

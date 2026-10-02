@@ -72,3 +72,15 @@ branch. See the [repair context](../../changes/merge-overflow-transport-migratio
 ## Example
 
 Branch A and B each create migration revisions in parallel. After merge, CI detects multiple heads and fails. The resolver adds a merge revision, reruns CI, and proceeds. During deployment, a DB still storing old `013_add_dashboard_settings_routing_strategy` in `alembic_version` is auto-remapped to `20260225_000000_add_dashboard_settings_routing_strategy` before upgrade.
+
+## Priority plan-check state
+
+Revision `20261002_000000_add_account_plan_checks` follows `20260929_000000_add_source_websocket`. It adds one ephemeral row per account with generation, identity fingerprint, timing, attempt budget, completion and the latest rejected model. The due index supports bounded polling; account deletion cascades and credential replacement clears the row in its existing transaction. Historical accounts begin without pending work, and no plan, status, token or subscription snapshot is backfilled.
+
+For example, an existing Plus account retains identical credential bytes across upgrade, downgrade and re-upgrade; only queued verification and temporary model exclusion disappear on downgrade. SQLite and PostgreSQL use guarded atomic claims with a bounded lease, and stale generations cannot overwrite replacement work. Startup must apply the migration before this feature serves traffic. Older replicas in a mixed-version rollout do not provide the new verification or routing behavior.
+
+## Credential replacement generation
+
+The account credential generation distinguishes import/reauthentication from routine OAuth rotation. The additive migration initializes existing rows to zero without rewriting tokens, plans or status. Replacement increments the value in the same transaction as credential writes and evidence/check deletion; rotation leaves it unchanged. This lets a paid sample clear old Free evidence and a first Free sample enqueue verification even if tokens rotate concurrently, while a genuine replacement fences both operations.
+
+The updated application requires the migration first. Older replicas do not increment this field during replacement; replacement isolation through generation checks therefore requires all participating application replicas to use the updated code. This change does not deploy or modify production data. Upgrade/downgrade/re-upgrade and historical-row preservation are covered on SQLite and PostgreSQL.

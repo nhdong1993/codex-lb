@@ -159,6 +159,14 @@ def _stub_socket_account_availability(monkeypatch: pytest.MonkeyPatch) -> None:
     availability = RoutingAvailabilityCache()
     monkeypatch.setattr(websocket_mixin_module, "is_account_routing_unavailable", availability.is_unavailable)
 
+    # These socket fakes have no persisted account and may emit response events
+    # before send_text. Keep their admission check immediate; real database
+    # exclusions and peer updates are covered in account_availability tests.
+    async def no_model_rejections(accounts, model):
+        return set()
+
+    monkeypatch.setattr(websocket_mixin_module.model_admission, "rejected_model_account_ids", no_model_rejections)
+
 
 class _FakeUpstreamMessage:
     def __init__(
@@ -10138,6 +10146,14 @@ def test_backend_responses_websocket_retries_stale_account_model_route_on_anothe
     app_instance,
     monkeypatch,
 ):
+    from app.modules.proxy._service.websocket import mixin as websocket_mixin
+
+    plan_checks: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        websocket_mixin,
+        "_request_plan_verification",
+        lambda proxy, account, message: plan_checks.append((account.id, message)),
+    )
     first_upstream = _FakeUpstreamWebSocket(
         [
             _FakeUpstreamMessage(
@@ -10272,6 +10288,9 @@ def test_backend_responses_websocket_retries_stale_account_model_route_on_anothe
     assert connect_models == ["gpt-5.6-sol", "gpt-5.6-sol"]
     assert excluded_snapshots == [set(), {account_ids[0]}]
     assert handled_error_codes == []
+    assert plan_checks == [
+        (account_ids[0], "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.")
+    ]
     assert first_upstream.closed is True
     assert len(first_upstream.sent_text) == 1
     assert len(second_upstream.sent_text) == 1

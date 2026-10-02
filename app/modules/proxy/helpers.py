@@ -44,8 +44,13 @@ _TRANSIENT_CODES = frozenset(
 )
 _MODEL_CAPACITY_MESSAGE_MARKERS = ("selected model is at capacity",)
 _MODEL_UNSUPPORTED_MESSAGE_RE = re.compile(
-    r"^The '.+' model is not supported when using Codex with a ChatGPT account\.$"
+    r"^The '(.+)' model is not supported when using Codex with a ChatGPT account\.$"
 )
+
+
+def rejected_model_from_message(message: str | None) -> str | None:
+    match = _MODEL_UNSUPPORTED_MESSAGE_RE.fullmatch(" ".join(message.split())) if message else None
+    return match.group(1) if match else None
 
 
 def is_model_scoped_upstream_rejection(message: str | None) -> bool:

@@ -300,6 +300,7 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _event_type_from_payload,
+    _request_plan_verification,
     _RequestLogFailureMetadata,
     _signal_propagated_capacity_startup_ready,
     _StreamSettlement,
@@ -1113,6 +1114,7 @@ async def _handle_stream_error(
         http_status=http_status,
         message=error.get("message"),
     ):
+        _request_plan_verification(proxy, account, error.get("message"))
         _facade().logger.info(
             "Skipped account error penalty for model-scoped upstream rejection account_id=%s request_id=%s code=%s",
             "<redacted>" if privacy_policy.redacts_sensitive_details else account.id,

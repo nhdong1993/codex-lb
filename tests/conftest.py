@@ -210,6 +210,21 @@ def _disable_subscription_scheduler_startup(monkeypatch):
     import app.main as main_module
 
     monkeypatch.setattr(main_module, "SubscriptionRefreshScheduler", lambda: _NoopScheduler())
+    monkeypatch.setattr(main_module, "PlanCheckScheduler", lambda: _NoopScheduler())
+
+
+@pytest.fixture(autouse=True)
+def _scope_priority_plan_checks(request, monkeypatch):
+    # Pure unit tests use stub accounts; shared database behavior is exercised
+    # by integration tests against migrated real repositories.
+    if "/tests/unit/" in request.path.as_posix():
+        from unittest.mock import AsyncMock
+
+        from app.modules.usage import plan_checks
+
+        monkeypatch.setattr(plan_checks, "request_plan_check", AsyncMock())
+        monkeypatch.setattr(plan_checks, "pending_plan_check_ids", AsyncMock(return_value=set()))
+        monkeypatch.setattr(plan_checks, "rejected_model_account_ids", AsyncMock(return_value=set()))
 
 
 @pytest.fixture(autouse=True)

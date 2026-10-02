@@ -36,6 +36,8 @@
   "accounts.subscription.unknown": "No data",
   "accounts.subscription.elapsed": "Recorded period elapsed",
   "accounts.subscription.remaining": "{{duration}} remaining",
+  "accounts.subscription.verifying": "Verifying plan",
+  "accounts.subscription.verifyingHint": "Checking the current plan. The previous subscription deadline may no longer apply.",
   "accounts.subscription.until": "Recorded end date",
   "accounts.subscription.checked": "Last checked",
   "accounts.subscription.source": "Source",

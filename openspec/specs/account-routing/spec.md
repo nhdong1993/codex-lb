@@ -1098,3 +1098,135 @@ The Accounts Detail, List and Grid views SHALL expose a local plan filter alongs
 #### Scenario: Plan badge styles
 - **WHEN** account or request-log data has plan type Prolite or Promax
 - **THEN** its badge uses the shared plan style map and remains readable in light and dark themes
+
+### Requirement: Model rejection temporarily excludes the rejected account and model
+
+An exact model-entitlement rejection MUST trigger priority plan verification and temporarily exclude the most recently rejected account/model pair across replicas until the shared two-minute request window expires. Repeated errors MUST NOT extend the window or reset the attempt budget. It MUST NOT penalize global account health, infer Free without usage confirmation, or block unrelated models. Exclusion MUST apply to routing availability while retaining account ownership resolution; a strict file or conversation owner MUST NOT move to another account because of this exclusion. Expired evidence and evidence belonging to replaced credentials MUST NOT suppress routing.
+
+#### Scenario: A repeated request uses another eligible account
+- **WHEN** account A rejects model M and a movable request for M arrives during the exclusion window
+- **THEN** account A is excluded and another eligible account can serve the request
+- **AND** account A remains eligible for unrelated models
+
+#### Scenario: Hard ownership remains authoritative
+- **WHEN** the rejected pair belongs to the required file or conversation owner
+- **THEN** the request fails according to the existing owner-unavailable contract without crossing accounts
+
+#### Scenario: Expiration restores normal model selection
+- **WHEN** the two-minute exclusion window expires
+- **THEN** normal catalog, quota and authentication checks determine eligibility again
+
+### Requirement: Reused WebSockets respect model exclusion
+
+Before dispatching a new response.create on an existing upstream WebSocket, routing MUST apply current account/model rejection evidence. A movable turn MUST re-enter selection if its account/model pair is excluded. A hard file or conversation owner MUST remain authoritative and fail closed when excluded. Accepted sibling turns MUST NOT be interrupted to move a newly excluded turn. Unrelated models and expired evidence MUST remain eligible for reuse.
+
+#### Scenario: Peer rejects the model on an idle reused socket
+- **WHEN** another request records a model rejection for account A and a new movable request for that model arrives on an idle socket using A
+- **THEN** A receives no new frame and another eligible account can serve the request
+
+#### Scenario: Exclusion while a sibling is accepted
+- **WHEN** a new excluded turn arrives while another accepted turn is using the socket
+- **THEN** only the unsent turn is rejected and the accepted turn can complete
+
+#### Scenario: Excluded hard owner
+- **WHEN** an excluded account/model pair belongs to the required conversation or file owner
+- **THEN** the request fails without sending to that account or moving ownership
+
+### Requirement: Asynchronous model admission preserves unsent transport ownership
+
+A direct WebSocket turn MUST recheck transport retirement after asynchronous model admission. A turn whose transport closed before dispatch MUST remain unsent and use the existing reconnect path without consuming its post-send replay budget or penalizing account health.
+
+#### Scenario: Socket closes during model lookup
+- **WHEN** the reader observes upstream closure while a new turn awaits model admission
+- **THEN** the sender does not send that turn to the retired socket and can complete it through a replacement socket
+
+### Requirement: HTTP bridge reuse respects shared model rejection
+
+HTTP bridge requests MUST apply shared account/model exclusion when reusing a session and before dispatch after admission waits. Movable requests MUST be able to re-enter selection; strict conversation or file owners MUST fail closed without crossing accounts. A rejection discovered after admission MUST settle the unsent request without interrupting accepted siblings or penalizing global account health. Unrelated models and expired evidence MUST remain eligible.
+
+#### Scenario: Reused hard owner is excluded
+- **WHEN** an HTTP continuation targets an existing bridge whose account/model pair is excluded
+- **THEN** no new frame is sent to that account and ownership is preserved in the failure
+
+#### Scenario: Movable request uses another account
+- **WHEN** an unanchored HTTP request reuses a bridge with an excluded account/model pair
+- **THEN** another eligible account can serve the request
+
+#### Scenario: Exclusion arrives during admission
+- **WHEN** exclusion is recorded while a bridge request waits for admission
+- **THEN** that unsent request fails with its resources settled and accepted sibling turns remain able to complete
+
+### Requirement: Cached model exclusion applies to the actual required owner
+
+HTTP bridge reuse MUST reject a model-excluded cached or in-flight session as an unavailable required owner only when that session matches the request's required account. A request requiring a different healthy file owner MUST remain eligible to select that owner. Existing conversation and file ownership constraints MUST remain enforced.
+
+#### Scenario: Healthy file owner differs from excluded cached account
+- **WHEN** a cache key maps to model-excluded account A and a request using that key requires a file owned by healthy account B
+- **THEN** both supported HTTP response routes select B and can complete the request
+- **AND** accepted work on A is not interrupted
+
+#### Scenario: In-flight creation resolves to a different account
+- **WHEN** a file request waits for session creation that resolves to an excluded account different from its required file owner
+- **THEN** the request can select its required healthy owner instead of reporting that owner unavailable
+
+### Requirement: Bridge model-evidence read failures are local admission failures
+
+A database failure while reading model-exclusion evidence before dispatch MUST return a sanitized retryable HTTP 503 error with code `upstream_unavailable`. The failing request MUST release its admission resources and API-key reservation. It MUST NOT send upstream, penalize account health, or close a transport serving accepted sibling requests. Cancellation MUST continue to propagate through existing cleanup.
+
+#### Scenario: Evidence database fails after admission
+- **WHEN** a new request has acquired bridge admission but its final model-evidence read fails while an accepted sibling is running
+- **THEN** the new request returns the sanitized admission error without SQL or driver details
+- **AND** its resources are released and the sibling completes normally without an account-health write
+
+#### Scenario: Evidence database fails during cache lookup
+- **WHEN** model-exclusion lookup fails before session reuse or creation
+- **THEN** the request returns the same sanitized retryable error and sends no upstream request
+
+### Requirement: Model-evidence lookup failures remain isolated across driver boundaries
+
+Any failure of the HTTP bridge's pre-dispatch model-evidence lookup MUST produce the sanitized retryable `503 upstream_unavailable` admission error, including connection errors and timeouts not wrapped by SQLAlchemy. It MUST release only the unsent request's admission resources and reservation, preserve accepted sibling requests, and avoid account-health penalties. Cancellation MUST propagate through existing cancellation cleanup.
+
+The same isolation MUST apply during initial account selection and direct WebSocket reuse/final admission. A direct WebSocket lookup failure MUST emit a sanitized terminal error for the unsent turn and preserve the socket and accepted siblings so a later turn can retry.
+
+#### Scenario: Driver connection failure at final admission
+- **WHEN** the database driver raises an unwrapped connection or timeout error during final model-evidence lookup while a sibling is accepted
+- **THEN** the unsent request receives a sanitized 503 on either HTTP response route
+- **AND** the sibling completes normally without a health penalty or premature transport closure
+
+#### Scenario: Driver connection failure during reuse lookup
+- **WHEN** the database driver raises before cached-session reuse
+- **THEN** the request receives the same sanitized admission error without sending upstream
+
+#### Scenario: Cold bridge lookup fails during account selection
+- **WHEN** no bridge session is cached and account selection cannot read model-exclusion evidence
+- **THEN** either HTTP route returns the sanitized 503 and sends no request upstream
+
+#### Scenario: Direct WebSocket lookup fails with an accepted sibling
+- **WHEN** reused-socket or final model admission fails on either WebSocket route
+- **THEN** only the unsent turn receives `upstream_unavailable`, its reservation/gates are released, and the accepted sibling completes without health penalties
+- **AND** the same downstream socket can accept a later turn after the database recovers
+
+#### Scenario: Initial WebSocket selection cannot read model evidence
+- **WHEN** the real account selector fails to read model evidence for a new WebSocket connection on either response route
+- **THEN** it emits a sanitized `upstream_unavailable` error, settles the unsent request and sends nothing upstream
+- **AND** the downstream socket remains available for a subsequent turn after recovery
+
+### Requirement: Model exclusion preserves guarded goal restart selection
+
+For a classified account-neutral goal restart, cached or in-flight owner model exclusion MUST NOT prevent the existing guarded account-selection path from evaluating replacement. Model exclusion alone MUST NOT authorize abandonment of a legacy owner. Requests with file, conversation, previous-response or unresolved tool dependencies MUST retain existing ownership restrictions.
+
+#### Scenario: Excluded unavailable legacy owner on a live bridge
+- **WHEN** a classified self-contained goal restart encounters a live legacy owner that is both quota-exceeded and model-excluded
+- **THEN** guarded selection may select an eligible replacement and the admitted predecessor request completes before retirement
+
+#### Scenario: Excluded unavailable owner after waiting for creation
+- **WHEN** the same restart waits for an in-flight session whose owner is model-excluded
+- **THEN** it still reaches guarded selection for a replacement
+
+#### Scenario: Model rejection is the only unavailability evidence
+- **WHEN** a restart's legacy owner is active but model-excluded
+- **THEN** the model rejection alone cannot authorize abandonment or transfer of the legacy mapping
+
+#### Scenario: Restart-shaped request carries account dependencies
+- **WHEN** a restart-shaped request includes a file or previous-response dependency on an excluded owner
+- **THEN** it remains bound to that owner and fails closed

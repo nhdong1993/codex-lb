@@ -19,7 +19,7 @@ than one replica shares a database:
 same count.
 
 The stored ``credential_fingerprint`` pins evidence to the credential *lineage*
-that produced it: a salted digest over the account's stable seat identity, never
+that produced it: a salted digest over stable seat identity and replacement generation, never
 over token material. Refresh tokens rotate on every successful token refresh
 (``rotate_tokens`` in the accounts repository), and rotation extends the same
 lineage rather than replacing it, so the digest is unmoved by rotation by
@@ -57,8 +57,9 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountPlanDowngradeObservation
+from app.db.models import Account, AccountPlanCheck, AccountPlanDowngradeObservation
 from app.db.session import get_background_session, sqlite_writer_section
+from app.modules.usage.plan_check_lock import lock_plan_check_account
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +107,9 @@ def credential_fingerprint(account: Account) -> str:
     #1456). Seat identity survives rotation by construction, and because no
     input is encrypted there is no decrypt step to fail and no fallback path.
 
-    Credential *replacement* (re-import or in-place reauthentication) does not
-    move this digest either -- the same seat gets new tokens. That event resets
-    pending evidence explicitly instead: every replacement flows through
+    Credential *replacement* (re-import or in-place reauthentication) advances
+    the persisted generation even if the seat and token values are unchanged.
+    It also resets pending evidence explicitly: every replacement flows through
     ``_apply_account_updates`` in the accounts repository, which calls
     :func:`discard_plan_downgrade_observations` in the same transaction.
 
@@ -122,6 +123,7 @@ def credential_fingerprint(account: Account) -> str:
             account.chatgpt_user_id,
             account.email,
             account.codex_installation_id,
+            account.credential_generation or 0,
         ],
         separators=(",", ":"),
     ).encode("utf-8")
@@ -151,6 +153,10 @@ async def discard_plan_downgrade_observations(session: AsyncSession, account_id:
     and failing the import or reauthentication itself.
     """
     global _discard_schema_missing_logged
+    # New credentials supersede both the old observations and queued checks.
+    # This shares the importing transaction; routine rotation does not call it.
+    async with session.begin_nested():
+        await session.execute(delete(AccountPlanCheck).where(AccountPlanCheck.account_id == account_id))
     try:
         async with session.begin_nested():
             await session.execute(
@@ -184,6 +190,7 @@ class PlanDowngradeObservationStorePort(Protocol):
         *,
         credential_fingerprint: str,
         observed_plan_type: str,
+        plan_check_generation: str | None = None,
     ) -> int: ...
 
     async def record(
@@ -195,7 +202,14 @@ class PlanDowngradeObservationStorePort(Protocol):
         observed_plan_type: str,
     ) -> None: ...
 
-    async def clear(self, account_id: str) -> None: ...
+    async def clear(
+        self,
+        account_id: str,
+        *,
+        plan_check_generation: str | None = None,
+        expected_credential_generation: int | None = None,
+        expected_installation_id: str | None = None,
+    ) -> None: ...
 
 
 # Atomic observe: insert the first observation or increment an existing one in a
@@ -277,6 +291,7 @@ class PlanDowngradeObservationStore:
         *,
         credential_fingerprint: str,
         observed_plan_type: str,
+        plan_check_generation: str | None = None,
     ) -> int:
         """Atomically record an observation and return the resulting count.
 
@@ -291,12 +306,23 @@ class PlanDowngradeObservationStore:
                     # shapes: asyncpg in particular must see the naive UTC
                     # ``utcnow()`` values as a plain (timezone-less) TIMESTAMP
                     # rather than inferring a type for a textual parameter.
-                    statement = text(_OBSERVE_SQL_TEMPLATE.format(table=_TABLE_NAME)).bindparams(
+                    sql = _OBSERVE_SQL_TEMPLATE.format(table=_TABLE_NAME)
+                    if plan_check_generation is not None:
+                        await lock_plan_check_account(session, account_id)
+                        sql = sql.replace(
+                            "VALUES (:account_id, 1, :fingerprint, :plan_type, :now, :now)",
+                            "SELECT :account_id, 1, :fingerprint, :plan_type, :now, :now "
+                            "WHERE EXISTS (SELECT 1 FROM account_plan_checks "
+                            "WHERE account_id = :account_id AND generation = :generation)",
+                        )
+                    statement = text(sql).bindparams(
                         bindparam("account_id", type_=String()),
                         bindparam("fingerprint", type_=String()),
                         bindparam("plan_type", type_=String()),
                         bindparam("now", type_=DateTime()),
                     )
+                    if plan_check_generation is not None:
+                        statement = statement.bindparams(bindparam("generation", type_=String()))
                     result = await session.execute(
                         statement,
                         {
@@ -304,11 +330,12 @@ class PlanDowngradeObservationStore:
                             "fingerprint": credential_fingerprint,
                             "plan_type": observed_plan_type,
                             "now": utcnow(),
+                            **({"generation": plan_check_generation} if plan_check_generation is not None else {}),
                         },
                     )
-                    observations = result.scalar_one()
+                    observations = result.scalar_one_or_none()
                     await session.commit()
-                    return int(observations)
+                    return int(observations or 0)
         except (OperationalError, ProgrammingError) as exc:
             if not self._degrade(exc):
                 raise
@@ -358,7 +385,14 @@ class PlanDowngradeObservationStore:
                 observed_plan_type=observed_plan_type,
             )
 
-    async def clear(self, account_id: str) -> None:
+    async def clear(
+        self,
+        account_id: str,
+        *,
+        plan_check_generation: str | None = None,
+        expected_credential_generation: int | None = None,
+        expected_installation_id: str | None = None,
+    ) -> None:
         """Discard pending evidence, touching the writer path only when a row exists.
 
         Every workspace-less refresh that reports a paid plan clears here, and on
@@ -376,11 +410,36 @@ class PlanDowngradeObservationStore:
                 return
             async with sqlite_writer_section():
                 async with get_background_session() as session:
-                    await session.execute(
-                        delete(AccountPlanDowngradeObservation).where(
-                            AccountPlanDowngradeObservation.account_id == account_id
-                        )
+                    stmt = delete(AccountPlanDowngradeObservation).where(
+                        AccountPlanDowngradeObservation.account_id == account_id
                     )
+                    if plan_check_generation is not None or expected_credential_generation is not None:
+                        await lock_plan_check_account(session, account_id)
+                    if expected_credential_generation is not None:
+                        stmt = stmt.where(
+                            select(Account.id)
+                            .where(
+                                Account.id == account_id,
+                                Account.credential_generation == expected_credential_generation,
+                            )
+                            .exists()
+                        )
+                    if expected_installation_id is not None:
+                        stmt = stmt.where(
+                            select(Account.id)
+                            .where(Account.id == account_id, Account.codex_installation_id == expected_installation_id)
+                            .exists()
+                        )
+                    if plan_check_generation is not None:
+                        stmt = stmt.where(
+                            select(AccountPlanCheck.account_id)
+                            .where(
+                                AccountPlanCheck.account_id == account_id,
+                                AccountPlanCheck.generation == plan_check_generation,
+                            )
+                            .exists()
+                        )
+                    await session.execute(stmt)
                     await session.commit()
         except (OperationalError, ProgrammingError) as exc:
             if not self._degrade(exc):
@@ -444,6 +503,7 @@ class InMemoryPlanDowngradeObservationStore:
         *,
         credential_fingerprint: str,
         observed_plan_type: str,
+        plan_check_generation: str | None = None,
     ) -> int:
         """Increment or restart the count without yielding control.
 
@@ -481,7 +541,14 @@ class InMemoryPlanDowngradeObservationStore:
             observed_plan_type=observed_plan_type,
         )
 
-    async def clear(self, account_id: str) -> None:
+    async def clear(
+        self,
+        account_id: str,
+        *,
+        plan_check_generation: str | None = None,
+        expected_credential_generation: int | None = None,
+        expected_installation_id: str | None = None,
+    ) -> None:
         self._rows.pop(account_id, None)
 
     def clear_all(self) -> None:

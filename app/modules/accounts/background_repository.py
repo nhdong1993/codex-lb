@@ -129,6 +129,8 @@ class BackgroundAccountsRepository:
         workspace_label: str | None = None,
         seat_type: str | None = None,
         last_refresh: datetime | None = None,
+        expected_plan_check_generation: str | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         async with get_background_session() as session:
             return await AccountsRepository(session).update_account_metadata(
@@ -141,6 +143,8 @@ class BackgroundAccountsRepository:
                 workspace_label=workspace_label,
                 seat_type=seat_type,
                 last_refresh=last_refresh,
+                expected_plan_check_generation=expected_plan_check_generation,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
             )
 
     async def workspace_slot_taken(

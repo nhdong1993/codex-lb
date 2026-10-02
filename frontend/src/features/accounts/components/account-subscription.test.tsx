@@ -10,6 +10,25 @@ import { createAccountSummary } from "@/test/mocks/factories";
 describe("AccountSubscription", () => {
   afterEach(() => vi.useRealTimers());
 
+  it.each([false, true])("hides the old paid deadline while verifying (compact=%s)", (compact) => {
+    render(<AccountSubscription compact={compact} account={createAccountSummary({
+      planCheckPending: true,
+      subscription: { activeUntil: "2030-10-04T05:54:59Z", lastCheckedAt: "2026-10-02T04:11:03Z" },
+    })} />);
+    expect(screen.getByText("Verifying plan")).toBeInTheDocument();
+    expect(screen.queryByText(/\d+d \d+h/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Recorded end date")).not.toBeInTheDocument();
+  });
+
+  it.each(["free", "unknown"])("never renders a historical paid term for %s", (planType) => {
+    render(<AccountSubscription account={createAccountSummary({
+      planType,
+      subscription: { activeUntil: "2030-10-04T05:54:59Z", lastCheckedAt: null },
+    })} />);
+    expect(screen.getByText("No data")).toBeInTheDocument();
+    expect(screen.queryByText(/\d+d \d+h/)).not.toBeInTheDocument();
+  });
+
   it("updates the remaining period and shows elapsed without changing account status", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));

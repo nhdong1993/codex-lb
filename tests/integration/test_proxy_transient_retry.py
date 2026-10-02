@@ -1065,6 +1065,17 @@ async def test_stream_model_entitlement_rejection_keeps_account_health_after_fai
         assert runtime is None or runtime.last_error_at is None, (
             f"model-scoped rejection must not arm error backoff for {imported_account_id}"
         )
+    from app.db.models import AccountPlanCheck
+
+    async with SessionLocal() as session:
+        checks = list(await session.scalars(select(AccountPlanCheck)))
+    assert {check.account_id for check in checks} == {account_id_1, account_id_2}
+    assert all(check.rejected_model == "gpt-5.1" for check in checks)
+    # Subsequent movable requests must not reselect the rejected pair.
+    seen_account_ids.clear()
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        [line async for line in resp.aiter_lines()]
+    assert seen_account_ids == []
 
 
 @pytest.mark.asyncio

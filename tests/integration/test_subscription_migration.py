@@ -21,7 +21,7 @@ COLUMNS = {
 def test_upgrade_preserves_existing_accounts_and_round_trips(tmp_path: Path):
     url = f"sqlite+aiosqlite:///{tmp_path / 'subscription.db'}"
     config = _build_alembic_config(url)
-    assert ScriptDirectory.from_config(config).get_heads() == ["20260929_000000_add_source_websocket"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["20261002_010000_add_credential_generation"]
     run_upgrade(url, PARENT, bootstrap_legacy=False)
     engine = create_engine(url.replace("+aiosqlite", ""))
     try:

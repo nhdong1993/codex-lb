@@ -54,6 +54,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,
 )
+from app.modules.proxy import model_admission
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -63,6 +64,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge import reuse
 from app.modules.proxy._service.http_bridge.account_sessions import _HTTPBridgeAccountSessionsMixin
 from app.modules.proxy._service.http_bridge.activity import _HTTPBridgeActivityMixin
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -106,7 +108,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_session_generation_count,
     _http_bridge_session_has_admission_waiter,
     _http_bridge_session_matches_preferred_account,
-    _http_bridge_session_retiring_with_visible_requests,
     _http_bridge_session_reusable_for_lookup,
     _http_bridge_session_reusable_for_request,
     _http_bridge_should_wait_for_registration,
@@ -138,6 +139,7 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_session_key_quarantined,
 )
 from app.modules.proxy._service.http_bridge.request_submit import _HTTPBridgeRequestSubmitMixin
+from app.modules.proxy._service.http_bridge.reuse import _bind_recovery_owner, _touch_reused_session
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _call_with_supported_optional_kwargs,
     _estimated_lease_tokens_from_request_usage_budget,
@@ -452,7 +454,7 @@ class _HTTPBridgeMixin(
             durable_lookup = None
         # Account selection consumes this one-shot capability; canonical creation
         # also forces takeover so a prior-ring durable owner cannot reject it.
-        force_goal_restart_account_reselection = affinity.abandon_unavailable_legacy_owner
+        reselect_owner = affinity.abandon_unavailable_legacy_owner
         if await _http_bridge_should_wait_for_registration(self, key, settings):
             skip_registration_gate = False
             async with self._http_bridge_lock:
@@ -495,19 +497,12 @@ class _HTTPBridgeMixin(
         locally_owned_fork_key: _HTTPBridgeSessionKey | None = None
         model_transition_parent_key: _HTTPBridgeSessionKey | None = None
 
-        def bind_account_neutral_recovery_owner(session: _HTTPBridgeSession) -> None:
-            nonlocal preferred_account_id
-            if not is_http_bridge_account_neutral_replay(
-                kind=session.key.affinity_kind,
-                key=session.key.affinity_key,
-            ):
-                return
-            preferred_account_id = resolve_required_account_id(
-                ("requested continuity owner", preferred_account_id),
-                ("local account-neutral recovery", session.account.id),
-            )
-
         while True:
+            # Snapshot cached candidates before taking the registry lock. The
+            # final submit check handles exclusions arriving during admission.
+            model_excluded_ids = await model_admission.rejected_model_account_ids(
+                [cached.account for cached in self._http_bridge_sessions.values()], request_model
+            )
             account_neutral_recovery = is_http_bridge_account_neutral_replay(
                 kind=key.affinity_kind,
                 key=key.affinity_key,
@@ -528,7 +523,7 @@ class _HTTPBridgeMixin(
             continuity_error: ProxyResponseError | None = None
             owner_mismatch_error: ProxyResponseError | None = None
             owner_forward: _HTTPBridgeOwnerForward | None = None
-            force_durable_takeover = force_durable_takeover_after_detach or force_goal_restart_account_reselection
+            force_durable_takeover = force_durable_takeover_after_detach or reselect_owner
             missing_turn_state_alias = False
             sessions_to_close_before_create: list[_HTTPBridgeSession] = []
             session_to_return_after_close: _HTTPBridgeSession | None = None
@@ -570,7 +565,7 @@ class _HTTPBridgeMixin(
                             ):
                                 if alias_session is None:
                                     raise ProxyResponseError(502, _http_bridge_continuity_lost_error_envelope())
-                                bind_account_neutral_recovery_owner(alias_session)
+                                preferred_account_id = _bind_recovery_owner(alias_session, preferred_account_id)
                                 continue
                             self._http_bridge_turn_state_index.pop(alias_index_key, None)
                             key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
@@ -587,7 +582,7 @@ class _HTTPBridgeMixin(
                                     request_scope_id=request_scope_id,
                                 )
                                 assert recovery_fork_key is not None
-                                bind_account_neutral_recovery_owner(alias_session)
+                                preferred_account_id = _bind_recovery_owner(alias_session, preferred_account_id)
                                 key = recovery_fork_key
                                 continue
                             else:
@@ -662,7 +657,7 @@ class _HTTPBridgeMixin(
                                         request_scope_id=request_scope_id,
                                     )
                                     assert recovery_fork_key is not None
-                                    bind_account_neutral_recovery_owner(previous_session)
+                                    preferred_account_id = _bind_recovery_owner(previous_session, preferred_account_id)
                                     key = recovery_fork_key
                                     continue
                             elif previous_session is not None and (
@@ -692,11 +687,17 @@ class _HTTPBridgeMixin(
                         force_durable_takeover = True
                     self._schedule_http_bridge_session_closes(pruned_sessions, reason="registry_detach")
                 existing = self._http_bridge_sessions.get(key)
+                existing_model_excluded = existing is not None and existing.account.id in model_excluded_ids
+                if existing_model_excluded and reuse._is_required_owner(
+                    existing, key, preferred_account_id, require_preferred_account, previous_response_id, reselect_owner
+                ):
+                    raise _http_bridge_previous_response_owner_unavailable_error()
                 retained_handoff = bool(
                     existing and existing.closed and _http_bridge_session_has_admission_waiter(existing)
                 )
                 reusable = (
-                    not force_goal_restart_account_reselection
+                    not reselect_owner
+                    and not existing_model_excluded
                     and existing is not None
                     and _http_bridge_session_reusable_for_lookup(
                         session=existing,
@@ -722,11 +723,11 @@ class _HTTPBridgeMixin(
                     request_service_tier=request_service_tier,
                     request_scope_id=request_scope_id,
                     allow_model_fork=reusable or model_transition_rebind,
-                    force_canonical_replacement=force_goal_restart_account_reselection,
+                    force_canonical_replacement=reselect_owner,
                 )
                 if fork_key is not None:
                     if existing is not None:
-                        bind_account_neutral_recovery_owner(existing)
+                        preferred_account_id = _bind_recovery_owner(existing, preferred_account_id)
                     model_transition_parent_key = key
                     key = fork_key
                     durable_lookup = None
@@ -753,10 +754,7 @@ class _HTTPBridgeMixin(
                     assert existing is not None
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
-                        existing.api_key = api_key
-                        existing.request_model = request_model
-                        existing.request_service_tier = request_service_tier
-                        existing.last_used_at = clock_for(self).monotonic()
+                        _touch_reused_session(existing, api_key, request_model, request_service_tier, clock_for(self))
                         await _refresh_reused_http_bridge_session_with_handoff(
                             self,
                             existing,
@@ -772,11 +770,12 @@ class _HTTPBridgeMixin(
                         self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                     existing = None
                 if existing is not None and (
-                    force_goal_restart_account_reselection
-                    or (not existing.closed and existing.account.status in ROUTABLE_STATUSES)
+                    reselect_owner or (not existing.closed and existing.account.status in ROUTABLE_STATUSES)
                 ):
                     old_account_id = existing.account.id
-                    retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(existing)
+                    retiring_with_visible_requests = reuse._retire_model_excluded_session(
+                        existing, existing_model_excluded
+                    )
                     detached = self._detach_http_bridge_session_locked(
                         key,
                         expected_session=existing,
@@ -785,10 +784,7 @@ class _HTTPBridgeMixin(
                     if detached is not None:
                         force_durable_takeover = True
                         if not retiring_with_visible_requests:
-                            if self._http_bridge_forced_close_must_finish_before_create(
-                                force_goal_restart_account_reselection,
-                                max_sessions,
-                            ):
+                            if self._http_bridge_forced_close_must_finish_before_create(reselect_owner, max_sessions):
                                 sessions_to_close_before_create.append(detached)
                             else:
                                 self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
@@ -1224,7 +1220,7 @@ class _HTTPBridgeMixin(
                                         request_scope_id=request_scope_id,
                                     )
                                     assert recovery_fork_key is not None
-                                    bind_account_neutral_recovery_owner(previous_session)
+                                    preferred_account_id = _bind_recovery_owner(previous_session, preferred_account_id)
                                     if key != recovery_fork_key:
                                         key = recovery_fork_key
                                         continue
@@ -1358,6 +1354,10 @@ class _HTTPBridgeMixin(
                     request_model=request_model,
                 )
             if session_to_return_after_close is not None:
+                if session_to_return_after_close.account.id in await model_admission.rejected_model_account_ids(
+                    [session_to_return_after_close.account], request_model
+                ):
+                    raise _http_bridge_previous_response_owner_unavailable_error()
                 return session_to_return_after_close
             if owner_forward is not None:
                 return owner_forward
@@ -1420,6 +1420,13 @@ class _HTTPBridgeMixin(
                     raise
                 if session is None:
                     continue
+                model_excluded = session.account.id in await model_admission.rejected_model_account_ids(
+                    [session.account], request_model
+                )
+                if model_excluded and reuse._is_required_owner(
+                    session, key, preferred_account_id, require_preferred_account, previous_response_id, reselect_owner
+                ):
+                    raise _http_bridge_previous_response_owner_unavailable_error()
                 fork_key = _http_bridge_parallel_fork_key(
                     key=key,
                     session=session,
@@ -1430,10 +1437,10 @@ class _HTTPBridgeMixin(
                     request_service_tier=request_service_tier,
                     request_scope_id=request_scope_id,
                     same_model_required=True,
-                    force_canonical_replacement=force_goal_restart_account_reselection,
+                    force_canonical_replacement=reselect_owner,
                 )
                 if fork_key is not None:
-                    bind_account_neutral_recovery_owner(session)
+                    preferred_account_id = _bind_recovery_owner(session, preferred_account_id)
                     model_transition_parent_key, key = key, fork_key
                     durable_lookup = None
                     force_durable_takeover_after_detach = False
@@ -1442,7 +1449,8 @@ class _HTTPBridgeMixin(
                     )
                     continue
                 if (
-                    not force_goal_restart_account_reselection
+                    not reselect_owner
+                    and not model_excluded
                     and not session.closed
                     and _http_bridge_session_account_active(session)
                     and _http_bridge_session_allows_api_key(session, api_key)
@@ -1462,16 +1470,11 @@ class _HTTPBridgeMixin(
                 ):
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
-                        session.api_key = api_key
-                        session.request_model = request_model
-                        session.request_service_tier = request_service_tier
-                        session.last_used_at = clock_for(self).monotonic()
+                        _touch_reused_session(session, api_key, request_model, request_service_tier, clock_for(self))
                         return session
-                if force_goal_restart_account_reselection or (
-                    not session.closed and session.account.status in ROUTABLE_STATUSES
-                ):
+                if reselect_owner or (not session.closed and session.account.status in ROUTABLE_STATUSES):
                     old_account_id = session.account.id
-                    retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(session)
+                    retiring_with_visible_requests = reuse._retire_model_excluded_session(session, model_excluded)
                     async with self._http_bridge_lock:
                         detached = self._detach_http_bridge_session_locked(
                             key,

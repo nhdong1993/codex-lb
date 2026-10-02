@@ -229,6 +229,8 @@ class AccountsService:
         for account_quota_list in additional_quotas_by_account.values():
             account_quota_list.sort(key=lambda quota: quota.display_label or quota.quota_key or quota.limit_name)
 
+        from app.modules.usage import plan_checks
+
         return build_account_summaries(
             accounts=accounts,
             primary_usage=primary_usage,
@@ -239,6 +241,7 @@ class AccountsService:
             limit_warmups_by_account=limit_warmups_by_account,
             encryptor=self._encryptor,
             duplicate_account_ids=duplicate_account_ids,
+            plan_check_pending_ids=await plan_checks.pending_plan_check_ids(accounts),
         )
 
     async def get_account_trends(self, account_id: str) -> AccountTrendsResponse | None:

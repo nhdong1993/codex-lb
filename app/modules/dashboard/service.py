@@ -27,6 +27,7 @@ from app.modules.dashboard.schemas import (
     WeeklyCreditPaceResponse,
 )
 from app.modules.dashboard.weekly_pace import DEMAND_WINDOW, FLEET_BURN_WINDOW, build_weekly_credit_pace
+from app.modules.usage import plan_checks
 from app.modules.usage.builders import (
     align_bucket_window_start,
     build_activity_summaries,
@@ -108,6 +109,7 @@ class DashboardService:
                 limit_warmups_by_account=limit_warmups_by_account,
                 encryptor=self._encryptor,
                 include_auth=False,
+                plan_check_pending_ids=await plan_checks.pending_plan_check_ids(accounts),
             ),
             key=lambda a: a.capacity_credits_primary or 0,
             reverse=True,
@@ -237,6 +239,7 @@ class DashboardService:
             monthly_usage=monthly_usage,
             encryptor=self._encryptor,
             include_auth=False,
+            plan_check_pending_ids=await plan_checks.pending_plan_check_ids(accounts),
         )
         dashboard_settings = await self._repo.get_settings()
         primary_history, secondary_history = await _load_projection_histories(

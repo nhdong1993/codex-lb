@@ -188,6 +188,7 @@ async def test_account_update_status_uses_sqlite_writer_section(monkeypatch):
 @pytest.mark.asyncio
 async def test_account_rotate_tokens_uses_sqlite_writer_section(monkeypatch):
     session = MagicMock()
+    session.scalar = AsyncMock(return_value=None)
     session.execute = AsyncMock(return_value=_make_result("acc"))
     session.commit = AsyncMock()
     repo = AccountsRepository(session)
@@ -404,6 +405,7 @@ async def test_local_identity_writers_lock_old_and_incoming_membership(monkeypat
     existing = _stub_account("acc_writer", "writer@example.com", chatgpt_id="chatgpt_old")
     membership_locks: list[tuple[str, str | None]] = []
     cast(Any, repo.session.execute).return_value = _make_result("acc_writer")
+    monkeypatch.setattr(repo.session, "scalar", AsyncMock(return_value=existing))
 
     async def fake_membership_lock(account_id: str, incoming: str | None) -> Account:
         membership_locks.append((account_id, incoming))

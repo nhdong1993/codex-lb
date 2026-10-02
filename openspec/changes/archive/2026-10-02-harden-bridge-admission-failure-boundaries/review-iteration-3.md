@@ -1,0 +1,9 @@
+Two independently reproduced rotation races remain. All 26 selected existing regressions passed; three temporary repro cases failed as described. Scoped production files remained unchanged; PostgreSQL contention and the full suite were not rerun.
+
+Full review comments:
+
+- [P2] Preserve paid-evidence clearing across routine token rotation — /home/dong01/codex-lb/app/modules/usage/plan_downgrade_observations.py:415-420
+  After one Free observation, a Plus sample racing routine token rotation reaches this predicate with outdated ciphertext, so deletion silently does nothing. The refresh still succeeds—and priority verification completes—leaving the earlier Free observation usable. The next single Free sample incorrectly persists `plan_type=free`. Reproduced through both ordinary refresh and scheduler/account-summary paths. Preserve replacement fencing without retaining evidence contradicted by a paid sample: the [paid-reset contract](openspec/specs/usage-refresh-policy/spec.md#L2145-L2151) is authoritative under [AGENTS.md:24](AGENTS.md#L24).
+
+- [P2] Preserve first-Free enqueue across routine token rotation — /home/dong01/codex-lb/app/modules/usage/plan_checks.py:65-68
+  If routine rotation commits between recording the first Free observation and requesting verification, this ciphertext condition suppresses the INSERT. With no existing check, the fallback UPDATE also affects nothing: evidence remains, but no follow-up is scheduled and the API reports `planCheckPending=false`. Reproduced using real token persistence, refresh, and account-summary code. Rebase or retry same-lineage rotation without accepting genuine replacements; otherwise confirmation falls back to the fleet scan, contrary to the [priority-trigger contract](openspec/specs/usage-refresh-policy/spec.md#L2253-L2256) required by [AGENTS.md:24](AGENTS.md#L24).

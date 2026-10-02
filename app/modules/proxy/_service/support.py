@@ -34,6 +34,7 @@ from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.locks import fast_lock
+from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import sse_event_type_from_block
 from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import (
@@ -2115,3 +2116,21 @@ def configured_upstream_stream_transport(dashboard_settings: Any) -> str:
 def upstream_websocket_transport_recently_failed() -> bool:
     marked_at = _upstream_ws_transport_failure_at
     return marked_at is not None and time.monotonic() - marked_at < UPSTREAM_WS_TRANSPORT_FAILURE_TTL_SECONDS
+
+
+def _request_plan_verification(proxy: Any, account: Account, message: str | None) -> None:
+    from app.modules.proxy.helpers import rejected_model_from_message
+    from app.modules.usage import plan_checks
+
+    model = rejected_model_from_message(message)
+    schedule = getattr(proxy, "_schedule_cancel_safe_cleanup", None)
+    if model is None or schedule is None:
+        return
+
+    async def request() -> None:
+        try:
+            await plan_checks.request_plan_check(account, model=model)
+        except Exception as exc:
+            logger.warning("Plan verification request failed error_type=%s", type(exc).__name__)
+
+    schedule(request(), action="request_plan_verification", request_id=get_request_id() or "unknown")

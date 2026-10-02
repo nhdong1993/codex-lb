@@ -111,6 +111,7 @@ from app.modules.model_sources.selection import (
     effective_model_for_api_key,
     responses_model_is_source_owned,
 )
+from app.modules.proxy import model_admission
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -348,6 +349,7 @@ from app.modules.proxy._service.support import (
     _record_upstream_websocket_failure_metadata,
     _record_websocket_route_metadata,
     _request_log_client_fields,
+    _request_plan_verification,
     _sleep_for_account_selection_recovery,
     _stream_settlement_error_payload,
     _StreamSettlement,
@@ -2523,7 +2525,35 @@ class _WebSocketMixin:
                     and account is not None
                 ):
                     required_owner_id = request_state.preferred_account_id
-                    account_unavailable = is_account_routing_unavailable(account.id)
+                    try:
+                        model_excluded = account.id in await model_admission.rejected_model_account_ids(
+                            [account], request_state.model
+                        )
+                    except ProxyResponseError as exc:
+                        # Evidence lookup failed before dispatch. Only this
+                        # turn is rejected; the reader still owns its siblings.
+                        async with pending_lock:
+                            if request_state in pending_requests:
+                                pending_requests.remove(request_state)
+                        request_state_to_fail = request_state
+                        await _reject_websocket_owner_switch_blocked(
+                            proxy,
+                            websocket,
+                            client_send_lock=client_send_lock,
+                            request_state=request_state,
+                            account=account,
+                            api_key=api_key,
+                            response_create_gate=response_create_gate,
+                            downstream_activity=downstream_activity,
+                            error_code="upstream_unavailable",
+                            error_message=exc.payload["error"]["message"],
+                        )
+                        request_state_to_fail = None
+                        request_state = None
+                        text_data = None
+                        payload = None
+                        continue
+                    account_unavailable = is_account_routing_unavailable(account.id) or model_excluded
                     if account_unavailable or (required_owner_id is not None and required_owner_id != account.id):
                         async with pending_lock:
                             owner_switch_blocked = _websocket_owner_switch_has_other_pending_requests(
@@ -2723,6 +2753,39 @@ class _WebSocketMixin:
                         text_data is not None
                         and request_state is not None
                         and payload is not None
+                        and _is_websocket_response_create(payload)
+                    ):
+                        # Admission can await a peer's pause or rejection.
+                        # Recheck model evidence after those waits as well.
+                        model_excluded = account is not None and account.id in (
+                            await model_admission.rejected_model_account_ids([account], request_state.model)
+                        )
+                        if account is not None and (is_account_routing_unavailable(account.id) or model_excluded):
+                            async with pending_lock:
+                                if request_state in pending_requests:
+                                    pending_requests.remove(request_state)
+                            request_state_to_fail = request_state
+                            await _reject_websocket_owner_switch_blocked(
+                                proxy,
+                                websocket,
+                                client_send_lock=client_send_lock,
+                                request_state=request_state,
+                                account=account,
+                                api_key=api_key,
+                                response_create_gate=response_create_gate,
+                                downstream_activity=downstream_activity,
+                                error_code="upstream_unavailable",
+                                error_message=_WEBSOCKET_ACCOUNT_UNAVAILABLE_MESSAGE,
+                            )
+                            request_state_to_fail = None
+                            request_state = None
+                            text_data = None
+                            payload = None
+                            continue
+                    if (
+                        text_data is not None
+                        and request_state is not None
+                        and payload is not None
                         and upstream_control is not None
                         and upstream_control.reconnect_requested
                         and _is_websocket_response_create(payload)
@@ -2803,31 +2866,6 @@ class _WebSocketMixin:
                     if text_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
                         if request_state is not None and payload is not None and _is_websocket_response_create(payload):
-                            # Admission and lease acquisition above can await a
-                            # peer's committed pause. No await separates this
-                            # shared-snapshot check from starting the send.
-                            if account is not None and is_account_routing_unavailable(account.id):
-                                async with pending_lock:
-                                    if request_state in pending_requests:
-                                        pending_requests.remove(request_state)
-                                request_state_to_fail = request_state
-                                await _reject_websocket_owner_switch_blocked(
-                                    proxy,
-                                    websocket,
-                                    client_send_lock=client_send_lock,
-                                    request_state=request_state,
-                                    account=account,
-                                    api_key=api_key,
-                                    response_create_gate=response_create_gate,
-                                    downstream_activity=downstream_activity,
-                                    error_code="upstream_unavailable",
-                                    error_message=_WEBSOCKET_ACCOUNT_UNAVAILABLE_MESSAGE,
-                                )
-                                request_state_to_fail = None
-                                request_state = None
-                                text_data = None
-                                payload = None
-                                continue
                             if account is None or not _bind_websocket_request_dispatch_owner(
                                 request_state,
                                 account_id=account.id,
@@ -4037,7 +4075,21 @@ class _WebSocketMixin:
                         request_state=request_state,
                     )
                     raise _WebSocketConnectFailureEmitted
-                raise
+                error = _parse_openai_error(exc.payload)
+                await proxy._emit_websocket_connect_failure(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    account_id=None,
+                    api_key=api_key,
+                    request_state=request_state,
+                    status_code=exc.status_code,
+                    payload=exc.payload,
+                    error_code=error.code if error and error.code else "upstream_unavailable",
+                    error_message=error.message
+                    if error and error.message
+                    else "Account selection failed; retry later.",
+                )
+                raise _WebSocketConnectFailureEmitted from exc
 
             account = selection.account
             if account is not None:
@@ -6003,6 +6055,7 @@ class _WebSocketMixin:
                 # fresh socket instead of excluding the account it must use.
                 request_state.request_text = safe_request_text
         if retry_error_code == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+            _request_plan_verification(proxy, account, _websocket_event_error_message(event_type, payload))
             retry_text = None
             if not request_state.file_required_preferred_account:
                 retry_text = _prepare_websocket_request_state_for_account_switch(request_state)

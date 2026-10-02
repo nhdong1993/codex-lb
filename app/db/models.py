@@ -160,6 +160,7 @@ class Account(Base):
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    credential_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     id_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
     subscription_active_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -1926,6 +1927,22 @@ class AccountRefreshClaim(Base):
     claimed_by: Mapped[str] = mapped_column(String(128), nullable=False)
     claimed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     claim_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class AccountPlanCheck(Base):
+    """Bounded priority verification and temporary account/model rejection evidence."""
+
+    __tablename__ = "account_plan_checks"
+    __table_args__ = (Index("ix_account_plan_checks_due", "completed", "next_attempt_at"),)
+
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True)
+    generation: Mapped[str] = mapped_column(String(32), nullable=False)
+    credential_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    rejected_model: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class AccountPlanDowngradeObservation(Base):

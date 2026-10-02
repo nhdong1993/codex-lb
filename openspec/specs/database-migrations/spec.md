@@ -510,3 +510,23 @@ remain for operator recovery.
 - **WHEN** recovery is invoked in either replace or non-replace mode
 - **THEN** recovery MUST fail before deleting sidecars, writing output, or
   moving the source
+
+### Requirement: Priority plan-check migration preserves existing accounts
+
+The additive migration for shared priority plan checks MUST preserve existing account plans, status, credentials and subscription snapshots. Historical accounts MUST have no inferred pending check. The migration MUST maintain one Alembic head and support downgrade and upgrade without altering account data. Pending work MUST cascade on account deletion and be discarded on credential replacement.
+
+#### Scenario: Historical account survives migration round trip
+- **WHEN** a database containing a paid account is upgraded, downgraded and upgraded again
+- **THEN** its credential bytes, plan and status remain unchanged and the new check table begins empty
+
+### Requirement: Credential replacement generation migrates without identity changes
+
+Accounts SHALL have a non-null integer credential generation initialized to zero for existing and new rows. Import or reauthentication replacing an existing account's credentials MUST atomically advance its generation with replacement and evidence invalidation, even when token values are unchanged. Routine OAuth rotation MUST preserve the generation. Migration MUST preserve historical token, plan and status values and support downgrade/re-upgrade through a single Alembic head.
+
+#### Scenario: Upgrade historical account credentials
+- **WHEN** a database containing existing account credentials upgrades
+- **THEN** every existing account has credential generation zero and unchanged tokens, plan and status
+
+#### Scenario: Replacement and rotation have distinct generations
+- **WHEN** an account rotates tokens routinely and is later reauthenticated
+- **THEN** rotation preserves the generation and reauthentication advances it atomically

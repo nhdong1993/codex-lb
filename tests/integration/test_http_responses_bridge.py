@@ -6268,10 +6268,14 @@ async def test_backend_responses_http_bridge_prefers_codex_session_header_over_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_excluded", [False, True])
+@pytest.mark.parametrize("inflight", [False, True])
 async def test_backend_responses_goal_restart_bypasses_live_bridge_and_retires_unavailable_legacy_owner(
     async_client,
     app_instance,
     monkeypatch,
+    model_excluded,
+    inflight,
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
     owner_id = await _import_account(
@@ -6361,6 +6365,27 @@ async def test_backend_responses_goal_restart_bypasses_live_bridge_and_retires_u
         await session.execute(update(Account).where(Account.id == owner.id).values(status=AccountStatus.QUOTA_EXCEEDED))
         await session.commit()
 
+    if model_excluded:
+        from app.modules.usage import plan_checks
+
+        await plan_checks.request_plan_check(owner, model="gpt-5.1")
+    creation_waits = []
+    if inflight:
+        service._http_bridge_sessions.pop(bridge_key)
+        pending_creation = asyncio.get_running_loop().create_future()
+        service._http_bridge_inflight_sessions[bridge_key] = pending_creation
+        real_wait = proxy_module.ProxyService._await_http_bridge_registry_wait
+
+        async def finish_creation(self, pending, *, timeout):
+            assert pending is pending_creation
+            creation_waits.append(pending)
+            self._http_bridge_sessions[bridge_key] = old_bridge
+            self._http_bridge_inflight_sessions.pop(bridge_key)
+            pending_creation.set_result(old_bridge)
+            return await real_wait(self, pending, timeout=timeout)
+
+        monkeypatch.setattr(proxy_module.ProxyService, "_await_http_bridge_registry_wait", finish_creation)
+
     try:
         restart_events = await _collect_sse_events(
             async_client,
@@ -6397,6 +6422,7 @@ async def test_backend_responses_goal_restart_bypasses_live_bridge_and_retires_u
     assert len(owner_upstream.sent_text) == 1
     assert len(replacement_upstream.sent_text) == 1
     assert old_bridge.closed is True
+    assert len(creation_waits) == int(inflight)
 
     follow_up_events = await _collect_sse_events(
         async_client,

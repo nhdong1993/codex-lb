@@ -36,6 +36,8 @@
   "accounts.subscription.unknown": "暂无数据",
   "accounts.subscription.elapsed": "记录的订阅周期已结束",
   "accounts.subscription.remaining": "剩余 {{duration}}",
+  "accounts.subscription.verifying": "正在核实套餐",
+  "accounts.subscription.verifyingHint": "正在检查当前套餐，之前记录的订阅到期时间可能已不再适用。",
   "accounts.subscription.until": "记录的结束日期",
   "accounts.subscription.checked": "上次检查",
   "accounts.subscription.source": "来源",

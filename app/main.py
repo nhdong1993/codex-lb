@@ -134,6 +134,7 @@ from app.modules.telemetry.scheduler import build_telemetry_scheduler
 from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 from app.modules.usage.live_ingest import start_live_usage_ingestor, stop_live_usage_ingestor
+from app.modules.usage.plan_check_scheduler import PlanCheckScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -655,6 +656,7 @@ async def lifespan(app: FastAPI):
     rate_limit_reset_credits_scheduler = build_rate_limit_reset_credits_scheduler()
     account_usage_rollup_scheduler = build_account_usage_rollup_scheduler()
     subscription_scheduler = SubscriptionRefreshScheduler()
+    plan_check_scheduler = PlanCheckScheduler()
     account_deletion_scheduler = build_account_deletion_scheduler()
     data_retention_scheduler = build_data_retention_scheduler()
     telemetry_scheduler = build_telemetry_scheduler()
@@ -673,6 +675,8 @@ async def lifespan(app: FastAPI):
     await rate_limit_reset_credits_scheduler.start()
     await account_usage_rollup_scheduler.start()
     await subscription_scheduler.start()
+    if settings.usage_refresh_enabled:
+        await plan_check_scheduler.start()
     await account_deletion_scheduler.start()
     await data_retention_scheduler.start()
     await telemetry_scheduler.start()
@@ -904,6 +908,7 @@ async def lifespan(app: FastAPI):
         await rate_limit_reset_credits_scheduler.stop()
         await account_usage_rollup_scheduler.stop()
         await subscription_scheduler.stop()
+        await plan_check_scheduler.stop()
         await account_deletion_scheduler.stop()
         await data_retention_scheduler.stop()
         await telemetry_scheduler.stop()

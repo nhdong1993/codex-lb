@@ -49,6 +49,7 @@ def build_account_summaries(
     include_auth: bool = True,
     reset_credits_store: RateLimitResetCreditsStore | None = None,
     duplicate_account_ids: set[str] | None = None,
+    plan_check_pending_ids: set[str] | None = None,
 ) -> list[AccountSummary]:
     store = reset_credits_store or get_rate_limit_reset_credits_store()
     duplicate_keys = _duplicate_detection_keys_appearing_more_than_once(accounts)
@@ -69,6 +70,7 @@ def build_account_summaries(
                 else duplicate_detection_key(account) in duplicate_keys
             ),
             reset_credits_snapshot=_reset_credits_snapshot_for_account(account, store),
+            plan_check_pending=account.id in (plan_check_pending_ids or ()),
         )
         for account in accounts
     ]
@@ -116,6 +118,7 @@ def _account_to_summary(
     include_auth: bool = True,
     is_email_duplicate: bool = False,
     reset_credits_snapshot: RateLimitResetCreditsSnapshot | None = None,
+    plan_check_pending: bool = False,
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
     auth_status, subscription = _build_credential_summary(account, encryptor) if include_auth else (None, None)
@@ -260,6 +263,7 @@ def _account_to_summary(
 
     return AccountSummary(
         account_id=account.id,
+        plan_check_pending=plan_check_pending,
         chatgpt_account_id=account.chatgpt_account_id,
         email=account.email,
         alias=account.alias,

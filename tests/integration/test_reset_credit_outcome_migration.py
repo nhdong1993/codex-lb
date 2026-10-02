@@ -1,21 +1,19 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
 from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, insert, inspect, text
+from sqlalchemy import create_engine, inspect, text
 
 from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrade
-from app.db.models import Account, AccountStatus
 
 pytestmark = pytest.mark.integration
 
 PARENT = "20260910_010000_merge_beta6_and_key_groups"
-HEAD = "20260929_000000_add_source_websocket"
+HEAD = "20261002_010000_add_credential_generation"
 
 
 def test_reset_credit_migration_preserves_legacy_pins(tmp_path: Path) -> None:
@@ -27,16 +25,15 @@ def test_reset_credit_migration_preserves_legacy_pins(tmp_path: Path) -> None:
     try:
         with engine.begin() as connection:
             connection.execute(
-                insert(Account).values(
-                    id="historical",
-                    email="migration@example.com",
-                    plan_type="plus",
-                    access_token_encrypted=b"test",
-                    refresh_token_encrypted=b"test",
-                    id_token_encrypted=b"test",
-                    last_refresh=datetime(2026, 9, 21),
-                    status=AccountStatus.ACTIVE,
-                )
+                # Seed the historical schema independently of current ORM
+                # defaults, which include columns added by later revisions.
+                text(
+                    "INSERT INTO accounts (id, email, plan_type, access_token_encrypted, refresh_token_encrypted, "
+                    "id_token_encrypted, last_refresh, status, codex_installation_id) VALUES "
+                    "('historical', 'migration@example.com', 'plus', :token, :token, :token, "
+                    "'2026-09-21 00:00:00', 'active', 'historical-installation')"
+                ),
+                {"token": b"test"},
             )
             connection.execute(
                 text(
