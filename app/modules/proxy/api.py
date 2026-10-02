@@ -5143,16 +5143,27 @@ async def _source_ownership_miss_error(
                         break
     except Exception:
         logger.warning("model_source_pool_lookup_failed", exc_info=True)
-        return source_ws_error(
-            "model_source_lookup_failed", "Unable to resolve model source availability and ownership", status=502
+        return ModelSourceForwardingError(
+            status_code=502,
+            payload=cast(
+                dict[str, JsonValue],
+                openai_error("model_source_lookup_failed", "Unable to resolve model source availability and ownership"),
+            ),
         )
     if not has_owner:
         return None
-    return source_ws_error(
-        "previous_response_owner_unavailable" if payload.previous_response_id else "model_source_owner_unavailable",
-        "The request's upstream state has no unambiguous available source. "
-        "Use its original source or resend portable full context.",
-        status=409,
+    return ModelSourceForwardingError(
+        status_code=409,
+        payload=cast(
+            dict[str, JsonValue],
+            openai_error(
+                "previous_response_owner_unavailable"
+                if payload.previous_response_id
+                else "model_source_owner_unavailable",
+                "The request's upstream state has no unambiguous available source. "
+                "Use its original source or resend portable full context.",
+            ),
+        ),
     )
 
 

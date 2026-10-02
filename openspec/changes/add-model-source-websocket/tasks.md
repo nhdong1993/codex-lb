@@ -66,6 +66,8 @@
 - [x] 8.17 Exclude allowlisted names with no eligible Responses source from the installer capability aggregate; preserve aliases, model enforcement, empty-set denial and mixed eligible pools, with actual export/catalog/native-route regressions (F23).
 - [x] 8.18 Preserve domain error status, type, code, message and parameter during source preparation and quota reservation; cover both WebSocket route families/slash variants, source/subscription requests, initial/reused turns and unchanged HTTP controls (F24).
 - [x] 8.19 Run F23/F24 reproductions and mapped regressions, lint/type/timing/cancellation and strict OpenSpec checks; independently review the corrections and record the disposition.
+- [x] 8.20 Preserve the existing HTTP source ownership-error envelope in shared preparation (F25); cover disabled owners referenced by response/item IDs on both route families and slash variants, with WebSocket capability off/on and no rejected-turn reservation or dispatch.
+- [x] 8.21 Run the F25 regressions and affected HTTP/WebSocket checks, validate the specifications and independently review the correction before the requested commit, push and HA deployment.
 
 ## Verification status
 
@@ -94,3 +96,12 @@ isolated SQLite on tmpfs after interrupted disk-backed runs encountered timeouts
 the earlier timeout cause remains unproven. Whole-repository type checking still
 reports two pre-existing test errors outside this pass. All 40 local tasks are
 complete; the five original external conformance/release gates remain open.
+
+
+F25 was authorized and corrected under 8.20–8.21 on 2026-10-02. The new
+16-case response/item ownership matrix failed before the fix and passes after
+it, including HTTP and WebSocket assertions on all route/slash variants with
+capability off/on. Verification passed 60 error-contract and 257 mapped
+compatibility cases; independent review returned no actionable findings.
+Progress is 42/47 tasks. The five original external conformance/release gates
+remain open; this correction does not enable any source capability.

@@ -2,23 +2,61 @@
 
 Initial local verification was on 2026-09-29. The native sequential runtime, default-off capability, dashboard control and catalog/installer policy are implemented. Stable specifications and user documentation are synced. The subsequent F23/F24 corrections are implemented, their focused regression suite passes **102 cases**, and the independent fix review returned no actionable findings. Earlier implementation and review evidence remains below. The change is **not ready for archive or production enablement** while the outstanding client/provider, PostgreSQL and release gates remain.
 
-The subsequent full residual review confirmed **F25, an unresolved P2 HTTP error
-contract regression**, despite a fresh **284-case native pass**. See
-[the latest review disposition](notes.md).
+The F25 HTTP ownership-envelope regression is corrected and locally verified
+on 2026-10-02. The correction preserves `server_error` across HTTP and WebSocket
+ownership denials; see [the latest review disposition](notes.md).
 
-The latest corrections exclude names without an eligible Responses source from
-installer aggregation and preserve domain-error envelopes during source and
-subscription WebSocket preparation. See [the latest review disposition](notes.md).
+## F25 correction checks — 2026-10-02
+
+| Check | Result |
+| --- | --- |
+| New response/item ownership regressions before the fix | **16 failed** at the HTTP error-envelope assertion, 17.82s |
+| Complete error-contract file after the fix | **60 passed**, 61.58s |
+| Source pool, prompt/metadata/standalone-output and native WebSocket/policy compatibility | **257 passed**, 333.64s; one existing AnyIO deprecation warning |
+| Independent correction review | **No actionable findings**; 209 targeted integration passes, overlapping mapped coverage |
+| Whole-repository Ruff and formatting | Passed; **1188 files** already formatted in isolated correction tree |
+| Affected-file type checks; timing/cancellation checks | Passed |
+| Strict change/main-spec validation | Passed; **67 specs**, zero failures |
+| Full local CI | `make ci` stopped because Bun is unavailable on the host |
+| Whole-repository type checks | One pre-existing error at `tests/unit/test_key_dashboard_install.py:204` |
+
+```bash
+env -u CODEX_LB_TEST_DATABASE_URL TMPDIR=/dev/shm .venv/bin/python -m pytest -q \
+  tests/integration/test_model_source_websocket_error_contract.py \
+  --timeout=90 --tb=short --show-capture=no
+
+env -u CODEX_LB_TEST_DATABASE_URL TMPDIR=/dev/shm .venv/bin/python -m pytest -q \
+  tests/integration/test_model_source_pool.py \
+  tests/integration/test_source_prompt_compatibility.py \
+  tests/integration/test_source_pool_standalone_outputs.py \
+  tests/integration/test_source_client_metadata.py \
+  tests/integration/test_model_source_websocket.py \
+  tests/integration/test_model_source_websocket_policy_review.py \
+  --timeout=90 --tb=short --show-capture=no
+```
+
+The 16 new cases check exact envelopes on both transports, disabled-source
+response/item ownership, capability off/on and all four URLs. A rejected turn
+leaves only the preceding successful request's finalized reservation and never
+reaches the provider. The compatibility suite and independent review ran in
+an isolated checkout containing only this correction over `976b42d5`.
+
+HA preflight observed three healthy eligible base backends, no rollout in
+progress, public readiness, 52 PostgreSQL connections out of 100, the existing
+WebSocket migration at head and zero sources with the native flag enabled.
+The candidate is planned as the current production image plus the F25 helper
+correction so already deployed unrelated changes are preserved. These are
+preflight observations, not a deployment-success claim.
 
 ## Completeness and coherence
 
 | Area | Assessment |
 | --- | --- |
-| Tasks | 40/45 complete; F23/F24 locally verified; newly confirmed F25 and the five original client/provider/database/release gates remain |
+| Tasks | 42/47 complete; F25 locally verified; five original client/provider/database/release gates remain |
 | Requirements | Runtime implementation found for all 11 new requirements and three modified requirements; the unconditional source WS prohibition is removed |
 | Design | Dedicated native adapter and session owner; shared HTTP candidate shaping, ownership observation and dispatch accounting; no subscription account emulation |
 | Activation | Capability defaults false; no existing source or production configuration was enabled |
-| Publication | No commit, PR, push or deployment performed |
+| Publication | Feature commit `976b42d5`; this document records F25 verification before the requested correction publication and HA rollout |
 
 The implementation shares preparation with HTTP instead of duplicating candidate ownership rules. Subscription routing remains inside its existing session service. Its reader hands source traffic to the native owner before subscription normalization/reservation, and both paths share the downstream send lock. Quota acquisition defers cancellation until its result has an owner; settlement failures stop reuse and handshake retries. Generation cleanup cancels and awaits its reader, worker, lifecycle and heartbeat tasks.
 

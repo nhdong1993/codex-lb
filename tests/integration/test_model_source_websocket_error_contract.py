@@ -145,3 +145,67 @@ async def test_source_quota_errors_match_http_without_new_reservations(
         assert len(calls) == int(reused)
         assert await _reservation_statuses(key["id"]) == (["finalized"] if reused else [])
         assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.parametrize("path", ROUTES)
+@pytest.mark.parametrize("websocket_enabled", [False, True])
+@pytest.mark.parametrize("reference", ["response", "item"])
+async def test_unavailable_source_owner_preserves_http_error_envelope(
+    async_client, app_instance, path, websocket_enabled, reference
+):
+    calls = []
+
+    async def provider(request):
+        calls.append(await request.json())
+        return web.json_response(
+            {
+                "id": "resp_owned_http",
+                "object": "response",
+                "status": "completed",
+                "model": "source-ws-model",
+                "output": [
+                    {
+                        "id": "msg_owned_http",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+                    }
+                ],
+                "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+            }
+        )
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(provider), enabled=websocket_enabled)
+        key = await create_key(async_client, source_id)
+        headers = {"Authorization": f"Bearer {key['key']}"}
+        payload = {"model": "source-ws-model", "input": "hello", "stream": False}
+        first = await async_client.post(path, headers=headers, json=payload)
+        assert first.status_code == 200, first.text
+        disabled = await async_client.patch(f"/api/model-sources/{source_id}", json={"isEnabled": False})
+        assert disabled.status_code == 200, disabled.text
+        continuation = (
+            {**payload, "previous_response_id": first.json()["id"]}
+            if reference == "response"
+            else {**payload, "input": [{"type": "item_reference", "id": first.json()["output"][0]["id"]}]}
+        )
+        expected = {
+            "error": {
+                "type": "server_error",
+                "code": "previous_response_owner_unavailable"
+                if reference == "response"
+                else "model_source_owner_unavailable",
+                "message": "The request's upstream state has no unambiguous available source. "
+                "Use its original source or resend portable full context.",
+            }
+        }
+        http = await async_client.post(path, headers=headers, json=continuation)
+        assert http.status_code == 409, http.text
+        assert http.json() == expected
+        async with websocket_client(app_instance, path, key["key"]) as ws:
+            await ws.send({"type": "response.create", **continuation})
+            assert await ws.receive() == {"type": "error", "status": 409, **expected}
+        assert len(calls) == 1
+        assert await _reservation_statuses(key["id"]) == ["finalized"]
+        assert get_source_bulkhead().in_flight(source_id) == 0

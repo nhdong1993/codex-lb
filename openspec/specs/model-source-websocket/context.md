@@ -61,3 +61,12 @@ Discovery is conservative: all enabled, permitted Responses candidates for a pub
 Catalog and installer capability follow effective model routing, including key enforcement, exact source aliases, canonical fallback and fast-mode prohibition. They evaluate the whole permitted pool for the model that will actually receive the request. For example, an enforced `gpt-5.4-high` alias can use a capable canonical `gpt-5.4` source when no exact source alias exists. With fast mode prohibited, an enforced `gpt-5.4-fast` instead uses `gpt-5.4`; a capable fast-alias source cannot enable WebSocket when the canonical source is HTTP-only. An explicitly configured non-prohibited alias keeps its own source precedence.
 
 Allowlisted names without an eligible Responses source do not enter the installer's aggregate capability decision. For example, a capable Responses model and a Chat-only model can share an allowlist without disabling WebSocket for the Responses model. Disabled, unassigned and unknown models behave the same way. An eligible Responses source that lacks streaming or native WebSocket support still disables the aggregate, and an empty eligible set or an enforced model without an eligible source keeps WebSocket disabled.
+
+The ownership helper is shared by HTTP and WebSocket, so it creates the existing
+HTTP error envelope before transport adaptation. For example, after an HTTP
+response publishes `resp_A`, disabling its source makes a continuation return
+409 `previous_response_owner_unavailable` with `type=server_error`, even when
+that source never enabled WebSocket. An output-item reference uses
+`model_source_owner_unavailable` with the same type. Neither denial starts a
+provider attempt or reserves quota. This preserves the classification of
+unavailable upstream state rather than treating it as malformed client input.

@@ -24,6 +24,14 @@ Both `/v1/responses` and `/backend-api/codex/responses`, including explicit trai
 
 Domain errors raised during shared preparation or source quota reservation MUST retain the existing WebSocket error status, type, code, message and supplied parameter. This contract MUST also apply when the eventual backend is subscription and when no model source is configured.
 
+Shared source ownership preparation MUST preserve the existing HTTP error envelope on both Responses route families and their trailing-slash equivalents. An unavailable recorded source owner MUST return status 409 with type `server_error` and code `previous_response_owner_unavailable` when `previous_response_id` is present, or `model_source_owner_unavailable` for other owned references. This contract MUST apply regardless of the source's WebSocket capability; WebSocket adaptation MUST retain the same ownership-error envelope.
+
+#### Scenario: A recorded source owner becomes unavailable
+- **GIVEN** an HTTP source response published a response or output-item reference
+- **WHEN** the source is disabled and the client continues using that reference over HTTP or WebSocket
+- **THEN** the shared ownership check MUST retain the 409 `server_error` envelope and the reference-appropriate error code
+- **AND** the rejected turn MUST NOT reserve quota, acquire source admission or reach any provider
+
 #### Scenario: Shared preparation rejects key policy
 - **WHEN** a create on either public WebSocket route or trailing-slash equivalent uses a revoked key or a forbidden model or reasoning effort
 - **THEN** it MUST retain the established authentication or permission error type and any parameter such as `reasoning.effort`

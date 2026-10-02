@@ -53,6 +53,11 @@ selection and also wraps source quota acquisition, so it must retain the
 authentication, permission and rate-limit types and parameter fields observed
 by subscription and HTTP clients.
 
+The shared ownership-miss helper constructs errors with the existing HTTP
+`openai_error` factory before either transport renders them. An unavailable
+recorded owner is a 409 `server_error`; selecting the transport must not
+reclassify it as invalid client input, even when native WebSocket support is off.
+
 ### 3. Separate session ownership from turn ownership
 
 Use a focused `SourceWebSocketSession` with one reader, one serialized sender, one reusable upstream connection and bounded pending work. A turn owns admission, one quota reservation, an ownership recorder and one attempt log. The session owns the socket and tasks. Finishing a turn releases its claims but preserves a healthy idle socket; finishing the session cancels/awaits tasks and closes that socket exactly once.

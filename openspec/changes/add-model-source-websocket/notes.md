@@ -1,11 +1,47 @@
 # Review notes
 
-Review scope: the uncommitted native model-source WebSocket implementation
-against `HEAD` (`0b229b15`). Unrelated working-tree changes were excluded. This
-review did not enable a provider or deploy the application. The user authorized
-the original fixes and later explicitly authorized fixing the review findings.
-Historical findings below are retained as evidence; the latest correction status
-is first.
+The latest correction addresses F25 on top of feature commit `976b42d5`.
+Earlier reviews below retain their original scope and evidence. Unrelated
+working-tree changes are outside this correction.
+
+## F25 correction — 2026-10-02
+
+The user authorized fixing F25 after requesting commit, push and deployment.
+The shared ownership-miss helper now builds `ModelSourceForwardingError` from
+`openai_error`, preserving the existing HTTP envelope before either transport
+renders it. Both the 409 ownership denial and 502 lookup error keep their
+original status, code, message and `server_error` classification.
+
+| Finding | Correction | Evidence |
+| --- | --- | --- |
+| F25 / P2 compatibility | Preserve the HTTP ownership-error envelope in shared preparation | 16 new route cases cover response and output-item references, both route families and slash variants, native capability off/on, HTTP/WS parity and no rejected-turn dispatch, admission or reservation |
+
+All 16 new cases failed at the HTTP envelope assertion before the fix. After
+correction, the complete error-contract file passed **60 cases**, and mapped
+source pool, prompt/metadata/standalone-output and native WebSocket/policy
+coverage passed **257 cases**. An independent review of the isolated correction
+returned **no actionable findings** and reported 209 targeted integration
+passes (overlapping the mapped coverage).
+
+Whole-repository Ruff/format, affected-file type checks, timing/cancellation
+checks and strict change/main-spec validation passed. The complete `make ci`
+command cannot start on this host because Bun is absent. Whole-repository type
+checking in the isolated correction retains one pre-existing test diagnostic
+at `tests/unit/test_key_dashboard_install.py:204`; affected-file checking is
+clean. These results do not claim full CI or external provider conformance.
+
+Evidence: `/tmp/source-ws-f25-before.log`,
+`/tmp/source-ws-f25-error-contract.log`, `/tmp/source-ws-f25-compat.log`, and
+`/tmp/source-ws-f25-z8tc5i8x/independent.log`.
+
+Deployment preflight found that the serving image already contains this
+feature and unrelated workspace changes. The requested rollout will therefore
+derive from that serving image and replace only `app/modules/proxy/api.py` with
+the reviewed F25 correction; the production-to-candidate source diff contains
+only that helper. Existing application/frontend content and all seven sources'
+disabled native WebSocket flags remain unchanged. The normal HA script owns
+the rollout. This verification precedes publication; deployment results are
+reported separately rather than inferred from local tests.
 
 ## Additional review after F23–F24 — 2026-10-01
 
