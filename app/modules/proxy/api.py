@@ -4536,6 +4536,15 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
         if key not in skip_keys and isinstance(value, (bool, int, float, str, type(None), list, Mapping)):
             extra[key] = value
 
+    # Codex uses this catalog field as the wire effort when Ultra is selected.
+    # Apply the subscription policy to the outgoing catalog, preserving upstream raw metadata.
+    if (
+        model.slug in {"gpt-6-astra", "gpt-6.1-sol"}
+        and model.source_id is None
+        and {"max", "ultra"}.issubset(level.effort for level in reasoning_levels)
+    ):
+        extra["multi_agent_reasoning_effort"] = "max"
+
     # If context_window is overridden, also override max_context_window to match
     effective_cw = _resolved_context_window(model)
     if effective_cw != model.context_window and "max_context_window" in extra:

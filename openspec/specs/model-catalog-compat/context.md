@@ -36,3 +36,31 @@ Configure `cd/gpt-6-astra=cd/linxaq` in the source Models field. After rollout
 and configuration, refresh any pinned client catalog before selecting the alias.
 See [source alias operations](../model-source-routing/context.md#model-aliases)
 for metadata preservation, token scope and rollback considerations.
+
+## Subscription Ultra effort policy
+
+For the subscription `gpt-6-astra` and `gpt-6.1-sol` models, the operator requested
+max reasoning when selecting Ultra. Codex 0.159.1 uses
+`multi_agent_reasoning_effort` from the catalog for this selection; the observed
+upstream value was `xhigh`.
+The [subscription Ultra requirement](spec.md#requirement-selected-subscription-models-advertise-max-for-ultra)
+defines the deliberate exception to upstream catalog passthrough.
+
+The policy is applied only to outgoing subscription Codex catalog entries for
+these two exact model names supporting both `max` and `ultra`. Stored upstream
+metadata remains intact. Other models and custom model sources keep their
+declared policy, and an explicit xhigh request
+still forwards as xhigh. Applying the override at catalog serialization avoids
+turning ordinary xhigh requests into max requests.
+
+For example, an upstream GPT-6.1 Sol entry with
+`multi_agent_reasoning_effort: "xhigh"` is served as
+`multi_agent_reasoning_effort: "max"`. With that catalog, selecting GPT-6.1 Sol Ultra
+in Codex 0.159.1 produces `reasoning: {"effort": "max", "context": "all_turns"}`.
+This changes the actual request effort and may increase latency or token use.
+
+After deployment, refresh any local file configured by `model_catalog_json`
+(for example, re-run the exported installer) and start a new Codex session.
+A stale file or active session can continue to send xhigh even after the server
+catalog changes. The native, versioned compatibility, and installer catalogs
+share the same policy; none requires an environment setting or migration.
