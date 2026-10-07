@@ -202,8 +202,7 @@ def _materialize_provider_reasoning_effort(
         payload.reasoning = ResponsesReasoning(effort=effort)
     else:
         payload.reasoning.effort = effort
-    if isinstance(payload, ResponsesRequest):
-        payload._codex_lb_provider_reasoning_effort_materialized = True
+    payload._codex_lb_provider_reasoning_effort_materialized = True
 
 
 def _client_reasoning_effort_from_model(model: str | None) -> str | None:
@@ -914,10 +913,9 @@ def responses_source_route_excluded(
 ) -> bool:
     """True when a Responses request must stay on subscription accounts.
 
-    A terminal compaction trigger is served by the upstream compact flow on
-    the turn's owner account (Codex path only — callers set
-    ``exclude_compaction=False`` on ``/v1/responses``, which has no Codex
-    compaction path). An ``input_file``/``input_image`` file reference is
+    WebSocket callers retain their structural compaction exclusion. HTTP
+    callers set ``exclude_compaction=False`` so compact requests follow source
+    ownership. An ``input_file``/``input_image`` file reference is
     pinned to the subscription account that received the upload. Previous
     response ownership is resolved separately from recorded continuity
     evidence because response identifier syntax is provider-opaque.
@@ -925,7 +923,8 @@ def responses_source_route_excluded(
     Raises ``ClientPayloadError`` for a malformed compaction trigger, exactly
     like ``strip_terminal_compaction_trigger_input``.
     """
-    if exclude_compaction and strip_terminal_compaction_trigger_input(payload) is not None:
+    has_trigger = strip_terminal_compaction_trigger_input(payload) is not None
+    if exclude_compaction and has_trigger:
         return True
     return bool(extract_input_file_ids(payload.input))
 

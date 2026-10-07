@@ -90,6 +90,7 @@ class SourceUsage:
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int = 0
+    reasoning_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1307,10 +1308,17 @@ def _usage_from_responses_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage
     if is_json_mapping(details):
         raw_cached = details.get("cached_tokens")
         cached_tokens = raw_cached if isinstance(raw_cached, int) else 0
+    output_details = usage.get("output_tokens_details")
+    reasoning_tokens = output_details.get("reasoning_tokens") if isinstance(output_details, dict) else None
     return SourceUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=max(0, min(cached_tokens, input_tokens)),
+        reasoning_tokens=(
+            max(0, min(reasoning_tokens, output_tokens))
+            if isinstance(reasoning_tokens, int) and not isinstance(reasoning_tokens, bool)
+            else None
+        ),
     )
 
 

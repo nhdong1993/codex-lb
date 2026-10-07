@@ -3276,18 +3276,21 @@ requests MUST NOT wait on an orphaned creation future that can never complete.
 
 ### Requirement: Codex compaction triggers are bridged into compact output
 
-When `POST /backend-api/codex/responses` receives a request whose top-level `input` array contains exactly one `{"type":"compaction_trigger"}` item as its final element, the proxy SHALL remove that trigger before calling upstream compaction handling and SHALL emit a raw SSE stream that contains exactly one compaction output item. The internal compact request built for that flow MUST contain exactly one terminal `compaction_trigger` item on the compact wire, and the proxy MUST reject duplicate or non-terminal top-level `compaction_trigger` placement locally with HTTP 400 `invalid_request_error` before any upstream compact handling.
+When a subscription-owned `POST /backend-api/codex/responses` request has a top-level `input` array containing exactly one `{"type":"compaction_trigger"}` item as its final element, the proxy SHALL remove that trigger before calling upstream compaction handling and SHALL emit a raw SSE stream that contains exactly one compaction output item. The internal compact request built for that flow MUST contain exactly one terminal `compaction_trigger` item on the compact wire, and the proxy MUST reject duplicate or non-terminal top-level `compaction_trigger` placement locally with HTTP 400 `invalid_request_error` before any upstream compact handling.
 
 The stream MUST emit `response.created`, `response.output_item.added`, `response.output_item.done`, and `response.completed` in that order with monotonically increasing sequence numbers. The added event MUST expose the selected compaction item as in progress. The done event and terminal completed response MUST carry the same terminal `compaction` item. When the selected encrypted upstream compaction item carries a valid `cmp_` ID or status, the synthetic stream MUST preserve those values with its `encrypted_content`; it MUST NOT generate or rewrite a replacement item ID. A malformed, empty, or non-`cmp_` ID MUST be omitted while the opaque encrypted content remains unchanged.
 
-Codex compact flows SHALL send the upstream compact request to `POST /backend-api/codex/responses` with `stream=true` and `store=false`, accept the upstream SSE response, and reconstruct one normalized compact response item from the terminal response lifecycle; they MUST NOT require the legacy `/backend-api/codex/responses/compact` upstream route to be available.
+Subscription-owned Codex compact flows SHALL send the upstream compact request to `POST /backend-api/codex/responses` with `stream=true` and `store=false`, accept the upstream SSE response, and reconstruct one normalized compact response item from the terminal response lifecycle; they MUST NOT require the legacy `/backend-api/codex/responses/compact` upstream route to be available.
 
-For Codex-affinity standalone compact requests, `POST /backend-api/codex/responses/compact` SHALL remain available as a compatibility endpoint with its subscription-backed compact routing contract, and SHALL normalize an upstream remote-compaction-v2 response that includes historical message output plus a compaction summary into the single compact output item required by Codex clients. A valid upstream `cmp_` compaction item `id` and any non-empty `status` MUST be preserved in that normalized output item. An empty, non-string, or non-`cmp_` ID MUST be omitted rather than rewritten; encrypted content MUST remain unchanged.
+For subscription-owned Codex-affinity standalone compact requests, `POST /backend-api/codex/responses/compact` SHALL remain available as a compatibility endpoint with its subscription-backed compact routing contract, and SHALL normalize an upstream remote-compaction-v2 response that includes historical message output plus a compaction summary into the single compact output item required by Codex clients. A valid upstream `cmp_` compaction item `id` and any non-empty `status` MUST be preserved in that normalized output item. An empty, non-string, or non-`cmp_` ID MUST be omitted rather than rewritten; encrypted content MUST remain unchanged.
 
 OpenAI-style `/v1/responses/compact` is otherwise unchanged by this requirement; when it receives duplicate top-level `compaction_trigger` items, codex-lb preserves the existing compatibility behavior and the forwarded compact input contains one terminal trigger.
 
+Source-owned HTTP terminal triggers SHALL retain the source Responses SSE lifecycle and source ownership rules. Source-owned standalone compact requests SHALL use the source Responses trigger contract defined in this capability.
+
 #### Scenario: terminal trigger emits a complete compact lifecycle
 
+- **GIVEN** the compact request is subscription-owned
 - **WHEN** a `POST /backend-api/codex/responses` request ends with exactly one top-level `compaction_trigger`
 - **THEN** the proxy strips the trigger and invokes compact handling
 - **AND** it emits created, added, done, and completed events in that order
@@ -3296,6 +3299,7 @@ OpenAI-style `/v1/responses/compact` is otherwise unchanged by this requirement;
 
 #### Scenario: terminal trigger becomes one compact-wire trigger
 
+- **GIVEN** the compact request is subscription-owned
 - **WHEN** a `POST /backend-api/codex/responses` request ends with exactly one
   top-level `compaction_trigger`
 - **THEN** the proxy strips that trigger before compact-input preparation
@@ -3304,6 +3308,7 @@ OpenAI-style `/v1/responses/compact` is otherwise unchanged by this requirement;
 
 #### Scenario: encrypted compaction item identity survives trigger streaming
 
+- **GIVEN** the compact request is subscription-owned
 - **WHEN** compaction handling for a terminal trigger returns encrypted content with a non-empty upstream `cmp_*` ID and terminal status
 - **THEN** the added event exposes that ID with in-progress status
 - **AND** the done event and completed response preserve the exact upstream ID, terminal status, and encrypted content
@@ -3342,7 +3347,7 @@ OpenAI-style `/v1/responses/compact` is otherwise unchanged by this requirement;
 
 #### Scenario: Standalone Codex compact remains a compatibility endpoint
 
-- **WHEN** a client calls `POST /backend-api/codex/responses/compact`
+- **WHEN** a client calls `POST /backend-api/codex/responses/compact` for a subscription-owned request
 - **THEN** codex-lb preserves the endpoint and its subscription-backed compact
   routing contract
 - **AND** malformed duplicate or non-terminal top-level triggers are rejected
@@ -4786,7 +4791,8 @@ routes only when the source declares support for the route shape. Chat
 Completions-compatible sources MAY serve `/v1/chat/completions`.
 Responses-compatible sources MAY serve `/v1/responses` and
 `/backend-api/codex/responses`. Audio-transcriptions-compatible sources MAY
-serve `/v1/audio/transcriptions`. Codex-native compaction, file upload,
+serve `/v1/audio/transcriptions`. Responses sources MAY also serve HTTP compact
+endpoints and terminal triggers under the source compaction requirements. File upload,
 control-plane, and websocket bridge paths MUST remain subscription-backed unless
 a later requirement explicitly defines OpenAI-compatible source behavior for
 those paths.
@@ -4816,11 +4822,18 @@ those paths.
 
 #### Scenario: Compaction request is not source-routed
 
+- **GIVEN** a Responses-compatible source exposes the requested model
+- **AND** retained continuity is recorded for a subscription account
+- **WHEN** the client sends a Codex terminal compaction trigger
+- **THEN** it MUST remain on the subscription owner and MUST NOT contact the source
+
+#### Scenario: HTTP compaction request retains source routing
+
 - **GIVEN** an enabled Responses-compatible source exposes model `deepseek-v4-flash`
 - **AND** a client calls `POST /backend-api/codex/responses` for that model whose
   input contains a `compaction_trigger` item
-- **THEN** the request is not forwarded to the external source
-- **AND** it follows the subscription-backed Codex compaction path instead
+- **THEN** the request is forwarded to the external source with its upstream model mapping
+- **AND** its retained state follows the same ownership checks as ordinary Responses
 
 #### Scenario: V1 compaction_trigger remains eligible for model sources
 
@@ -4828,8 +4841,7 @@ those paths.
 - **AND** a client calls `POST /v1/responses` for that model whose input ends with
   a terminal `compaction_trigger` item
 - **THEN** the request remains eligible for that Responses-compatible source
-- **AND** it is not forced onto subscription account selection by the Codex-only
-  compaction source-route exclusion
+- **AND** both HTTP route families preserve the selected source owner
 
 #### Scenario: File-referencing request is not source-routed
 
@@ -9795,7 +9807,7 @@ off. It SHALL refuse such a request with HTTP status `503` and error code
 
 "Switched off" covers both a disabled source row and a disabled model row on an
 enabled source. The refusal SHALL apply on `/v1/chat/completions`,
-`/v1/responses`, and `/backend-api/codex/responses`.
+`/v1/responses`, `/backend-api/codex/responses`, and both HTTP compact endpoints.
 
 The refusal SHALL be decided by the ordinary source-selection rules with the
 enabled-state filter inverted and nothing else changed: same candidate list
@@ -9807,9 +9819,9 @@ behaviour, including a model no source exposes, a source the API key is not
 assigned to, a chat-only source asked for a Responses route, and a
 subscription-registry slug that an unscoped API key never source-routes.
 
-Requests excluded from source routing — a terminal `compaction_trigger`, and
-Responses requests pinned to the subscription account that received an uploaded
-file — MUST NOT be refused, and MUST proceed to subscription routing as before.
+Requests pinned to the subscription account that received an uploaded file
+MUST retain their subscription route. WebSocket structural compaction exclusions
+remain unchanged. HTTP terminal triggers MUST follow the source enablement check.
 
 The WebSocket source preflight SHALL refuse an opted-in source or model that is disabled with `model_source_disabled` before reservation. Sources without native capability SHALL retain `model_source_requires_http_transport`. An established native source session SHALL revalidate enablement before dispatching another turn. Structural subscription exclusions and recorded subscription owners SHALL retain their precedence.
 
@@ -10807,3 +10819,57 @@ When a source model declares a non-blank string `multi_agent_version`, the Respo
 - **GIVEN** a source model does not declare `multi_agent_version`
 - **WHEN** a request contains a namespace tool
 - **THEN** codex-lb omits that tool from the upstream request
+
+### Requirement: Compact source forwarding uses the Responses trigger contract
+
+For a source-owned compact operation, the proxy MUST forward an HTTP Responses
+request with `stream: true`, preserve the public model identity at the client
+boundary, and send exactly one terminal `compaction_trigger` as the final input
+item. It MUST use the source upstream model mapping only on the source wire.
+
+The proxy MUST adapt a successful source stream containing an encrypted
+`compaction` or `compaction_summary` output item to the established
+`response.compaction` JSON result for standalone compact endpoints. It MUST
+preserve a valid upstream compaction item ID, encrypted content, status and
+reported input/output/cached/reasoning usage. It MUST return an existing OpenAI error
+envelope for source failures and MUST NOT fabricate plaintext summaries.
+
+Source compact attempts MUST settle or release API-key usage
+exactly once, publish ownership before returning state-bearing output, and
+close the source transport on error, cancellation and timeout. Request logs
+MUST identify `request_kind=compaction`, the actual source and source revision
+for source attempts.
+
+An upstream transport failure after a source compact stream has opened MUST
+return HTTP 502 with an OpenAI upstream-error envelope. The attempt MUST be
+logged as an error, MUST release its reservation and admission exactly once,
+and MUST NOT replay through a different source credential.
+
+#### Scenario: Encrypted source compaction is returned unchanged
+
+- **WHEN** the source Responses stream completes with an encrypted compaction
+  output item and usage
+- **THEN** `/responses/compact` returns one normalized `type=compaction` item
+- **AND** its encrypted content, valid `cmp_` ID and usage are preserved
+
+#### Scenario: Trigger validation remains fail-fast
+
+- **WHEN** a native Codex request contains duplicate or non-terminal trigger items
+- **THEN** it returns the existing invalid-client-payload response
+- **AND** no source, subscription account or reservation is used
+
+#### Scenario: Source failure cleans up once
+
+- **WHEN** source compaction fails, is cancelled or times out before a usable
+  terminal response
+- **THEN** the source transport and admission are closed
+- **AND** the reservation is released or settled exactly once
+- **AND** the request log records the source attempt as an error or cancellation, as appropriate
+
+#### Scenario: Source compact stream connection breaks
+
+- **GIVEN** the source has opened a compact stream and sent `response.created`
+- **WHEN** its connection breaks before a usable compact completion
+- **THEN** either standalone compact endpoint returns HTTP 502
+- **AND** the source attempt is recorded as an error rather than a client cancellation
+- **AND** no other source receives the request and no reservation or admission remains held

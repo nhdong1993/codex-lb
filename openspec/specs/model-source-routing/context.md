@@ -33,7 +33,7 @@ The routing setting lives in the existing metadata JSON to avoid a database migr
 
 Roll out support to every replica before saving alias metadata. Older versions ignore this setting and would send the public alias directly upstream. Remove mappings before reverting to an older version. Existing sources without the setting keep their current behavior. A client with a pinned local model catalog must refresh that file after aliases are configured, then select the public ID.
 
-The feature uses the existing HTTP routes; it adds no WebSocket or compaction support. Invalid targets are rejected at create/update time. Empty sides, duplicate public names and multiple equals separators are rejected by the form. Unsupported trailing-slash URLs retain their existing errors.
+Aliases use the source's existing route capabilities, including HTTP compaction as described below; alias configuration itself does not enable a transport. Invalid targets are rejected at create/update time. Empty sides, duplicate public names and multiple equals separators are rejected by the form. Unsupported trailing-slash URLs retain their existing errors.
 
 
 ## Multiple credentials for a Codex model
@@ -144,3 +144,105 @@ Codex 0.157.1 attaches metadata such as `{"turn_id":"turn_local","create_time":1
 Direct-source ownership and portability now share a classification-only metadata projection. It accepts the known fields and validated types, then evaluates existing item predicates with just the turn ID. Forwarded items retain all original metadata, and existing instruction lifting remains unchanged. Subscription replay keeps its separate, stricter contract.
 
 Unknown fields, boolean or non-finite timestamps, and malformed content-kind lists remain outside this allowance. Valid metadata cannot make reasoning, compaction, assistant output IDs, file references or unowned calls portable. No credential, schema or source configuration change is needed. Roll out to every HA backend and verify a fresh pooled request followed by a tool continuation through another backend; see [spec.md](spec.md).
+
+## HTTP compaction on Model Sources
+
+HTTP compact operations use the same source assignment, public/enforced model,
+alias and durable ownership checks as ordinary Responses. For example, compacting
+`ch-relay/gpt-6-astra` sends `gpt-6-astra` to the selected source's `/responses`
+endpoint using its credential, with retained history, `stream: true`, `store:
+false` and one final `{"type":"compaction_trigger"}`. Source input overrides
+cannot replace that history or trigger. The client still sees the public model.
+
+Both standalone compact endpoints collect the source stream into a
+`response.compaction` JSON envelope with one genuine encrypted compaction item.
+Codex and v1 HTTP Responses trigger requests retain the source SSE lifecycle.
+Using the trigger avoids depending on a provider-specific `/responses/compact`
+route; the diagnosed endpoint accepted the trigger but returned 404 for the
+standalone upstream route. A source must support streaming Responses and the
+trigger operation. Unsupported operations return an upstream error without
+switching to subscription credentials or manufacturing a text summary.
+
+Compact output ownership is published before delivery. Subsequent turns resolve
+response/item/encrypted references through the shared database, so another HA
+replica retains the same source revision. Mixed owners, unknown history in a
+pool, disabled owners and changed credentials fail closed. Recorded subscription
+continuity and uploaded-file pins keep their existing subscription path only
+when no retained source reference conflicts with that owner.
+
+Before either standalone compact endpoint or HTTP Responses routes a request
+to an account, it checks source ownership even when a subscription response
+anchor, compact turn-state or file pin suppressed source selection. For example,
+a source-generated encrypted compaction item plus a subscription
+`previous_response_id` returns the existing 409 ownership error before reserving
+quota or contacting either credential. Both encrypted content and bare item
+references qualify; the lookup also retains historical source ownership. A
+lookup failure returns 502 rather than dispatching without ownership evidence.
+Merely configuring a source for the same model is not a conflict, and compact
+extras accepted by the subscription schema retain their existing validation.
+Ordinary HTTP Responses continues to ignore turn-state for source selection;
+its source-owned continuation remains on that source.
+
+Collection uses the smaller of the existing source timeout and compact budget,
+closes on completion/error/disconnect, and uses the existing usage settlement
+and admission cleanup. Source request logs identify compaction, source revision
+and reported input/output/cached/reasoning tokens. Malformed, truncated or
+unencrypted standalone output is an error. Standalone compact trailing slashes
+still return 405; the HTTP Responses slash variants remain supported.
+
+Subscription compact routing runs on the compact schema before any conversion
+to source Responses. This preserves accepted compact extras such as
+`conversation: {"id": "conv_existing"}`, even when a source exposes the same
+model but recorded subscription continuity or a file pin owns the request.
+An invalid source payload still fails locally once source selection wins;
+validation failures never select a subscription credential instead.
+
+If an opened source compact stream loses its TCP connection before completion,
+the collector returns HTTP 502 `model_source_unreachable`, records an error and
+releases the reservation and admission. It retains the opened upstream status
+so the pool cannot mistake the interrupted stream for a connection-establishment
+failure and replay it through a different credential. Client disconnects remain
+cancellations, and timeouts retain their existing 504 handling.
+
+Standalone compact selection and the disabled-source probe require streaming
+before resolving raw aliases. For example, if `gpt-5-high` has a non-streaming
+source but its normalized `gpt-5` has a permitted streaming source, compact
+selects the latter just as an equivalent terminal-trigger request does. Retained
+state still has to satisfy ownership; alias fallback cannot change its owner.
+If no streaming source is available, a non-streaming source still claims its
+model. A separate availability check preserves the source-busy or disabled
+denial before subscription dispatch or quota reservation. Explicit subscription
+continuity and file pins retain their normal precedence.
+
+The collector retains the latest validated scalar usage from complete SSE
+events, including root-level usage or earlier response events. If terminal
+response usage is absent or null, these counters populate compact JSON and
+settlement together (for example, 21 input and 8 output tokens finalize 29
+tokens). Present terminal usage retains precedence and validation. Parsing the
+complete bounded events also preserves usage when a large encrypted compact
+item exceeds the lower-level usage observer's buffer. The collector retains no
+arbitrary event history. A malformed terminal error (for example numeric
+`code: 123`) returns 502 `invalid_upstream_response`, records an upstream error
+and releases resources without replay; it is not a client cancellation.
+
+Terminal usage selection distinguishes missing values from invalid values.
+Nested non-null usage has priority; event-root usage is considered when nested
+usage is absent or null. On a limited key, a selected malformed terminal object
+or negative input/output/total/cached/reasoning count returns `usage_unavailable`
+without returning compact output or charging quota. Earlier valid 21/8 counters
+cannot replace terminal input -1 or cached -1. An absent or null terminal object
+can still use earlier validated counters. Validation is local to source compact
+collection; ordinary source Responses retains its existing parser behavior.
+
+Compact-to-Responses conversion also preserves the private marker for reasoning
+effort materialized from provider aliases. For example, `thinking: "minimal"`
+without a reasoning policy remains that provider control, so strict providers
+do not receive an unsolicited `reasoning.effort` beside it. Client-supplied
+canonical effort and summary, and API-key enforced or allowlisted effort, retain
+the same shaping as the equivalent terminal-trigger request.
+
+No database migration or new configuration is required. Deploy to every HA
+backend before testing continuation across replicas. Local regression tests use
+a real HTTP source fixture and reset process-local selection while retaining the
+shared ownership database; they are not evidence of a production rollout. See
+[spec.md](spec.md) for the normative contract.

@@ -387,6 +387,7 @@ class SourceDispatch:
     claims: SourceAdmission
     admission_budget: ApiKeyRequestUsageBudget | None
     requested_service_tier: str | None
+    request_kind: str = "normal"
     request_log_source: str = DEFAULT_REQUEST_LOG_SOURCE
     dispatch_kind: str = DEFAULT_DISPATCH_KIND
     pin_intent: PinIntent | None = None
@@ -690,6 +691,8 @@ class SourceDispatch:
                     input_tokens=usage.input_tokens if usage is not None else None,
                     output_tokens=usage.output_tokens if usage is not None else None,
                     cached_input_tokens=usage.cached_input_tokens if usage is not None else None,
+                    reasoning_tokens=usage.reasoning_tokens if usage is not None else None,
+                    request_kind=self.request_kind,
                     cost_usd=source_usage_cost_usd(self.source, self.model, usage),
                     latency_ms=timings.latency_ms if timings is not None else None,
                     latency_first_token_ms=timings.latency_first_token_ms if timings is not None else None,

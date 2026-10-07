@@ -1329,6 +1329,10 @@ def transcript_is_source_free(
         return False
     direct_source_view = view
     if allow_direct_source_tools:
+        # A bare terminal trigger requests an operation; it carries no retained
+        # state. Classify its history normally without changing the wire body.
+        if input_items and input_items[-1] == {"type": "compaction_trigger"}:
+            input_items = input_items[:-1]
         input_items = project_direct_source_input_metadata(input_items)
         direct_source_body = dict(view.body)
         local_call_ids = self_contained_tool_call_ids(input_items)

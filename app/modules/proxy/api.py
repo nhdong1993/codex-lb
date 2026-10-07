@@ -14,6 +14,7 @@ from json import JSONDecodeError
 from typing import Any, Final, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
+import aiohttp
 import anyio
 from fastapi import (
     APIRouter,
@@ -223,6 +224,7 @@ from app.modules.model_sources.forwarding import (
     SourceUsage,
     SourceUsageHolder,
     _source_timeout_seconds,
+    _usage_from_responses_payload,
     forward_chat_completion,
     source_stream_idle_seconds,
 )
@@ -341,6 +343,11 @@ from app.modules.proxy.schemas import (
 )
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 from app.modules.proxy.source_admission import try_claim as try_claim_source_admission
+from app.modules.proxy.source_compaction import (
+    collect_source_compaction,
+    invalid_source_compaction,
+    source_compact_request,
+)
 from app.modules.proxy.source_dispatch import (
     ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY,
     ABANDON_CLIENT_DISCONNECTED_DURING_OPEN,
@@ -1207,10 +1214,9 @@ async def responses(
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
     try:
-        # Terminal compaction and file pins are structural subscription-only
-        # constraints. Previous-response ownership is resolved from continuity
-        # evidence below, after a viable source candidate exists.
-        source_route_excluded = responses_source_route_excluded(responses_payload)
+        # HTTP compaction uses the same source owner as ordinary Responses.
+        # Uploaded files still require the subscription account that owns them.
+        source_route_excluded = responses_source_route_excluded(responses_payload, exclude_compaction=False)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
@@ -1232,25 +1238,25 @@ async def responses(
     source = source_selection[0] if source_selection is not None else None
     if source_selection is not None:
         responses_payload.model = source_selection[1]
-    elif not source_route_excluded and not continuity_suppressed:
+    else:
+        # Subscription continuity/file pins cannot authorize replay of state
+        # recorded for a different source credential.
         source_ownership_denial = await _source_ownership_miss_denial(
             request, responses_payload, api_key, raw_model=raw_source_model
         )
         if source_ownership_denial is not None:
             return source_ownership_denial
-        # The ordinary lookup itself missed (continuity suppression means an
-        # enabled source claimed the model, so the disabled probe must not
-        # override the recorded subscription anchor).
-        disabled_denial = await _disabled_model_source_denial(
-            request,
-            responses_payload.model,
-            api_key,
-            route="responses",
-            raw_model=raw_source_model,
-            require_streaming=not backend_non_streaming_requested,
-        )
-        if disabled_denial is not None:
-            return disabled_denial
+        if not source_route_excluded and not continuity_suppressed:
+            disabled_denial = await _disabled_model_source_denial(
+                request,
+                responses_payload.model,
+                api_key,
+                route="responses",
+                raw_model=raw_source_model,
+                require_streaming=not backend_non_streaming_requested,
+            )
+            if disabled_denial is not None:
+                return disabled_denial
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -1725,10 +1731,8 @@ async def v1_responses(
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
     try:
-        # Share file-pin exclusions with Codex/WebSocket, but do not treat a
-        # terminal compaction_trigger as a source-route exclusion: /v1 has no
-        # Codex compact path. Previous-response ownership is resolved from
-        # continuity evidence below, after a viable source candidate exists.
+        # HTTP terminal triggers retain source routing; uploaded files remain
+        # pinned to their subscription account.
         source_route_excluded = responses_source_route_excluded(
             responses_payload,
             exclude_compaction=False,
@@ -1754,25 +1758,25 @@ async def v1_responses(
     source = source_selection[0] if source_selection is not None else None
     if source_selection is not None:
         responses_payload.model = source_selection[1]
-    elif not source_route_excluded and not continuity_suppressed:
+    else:
+        # Subscription continuity/file pins cannot authorize replay of state
+        # recorded for a different source credential.
         source_ownership_denial = await _source_ownership_miss_denial(
             request, responses_payload, api_key, raw_model=raw_source_model
         )
         if source_ownership_denial is not None:
             return source_ownership_denial
-        # The ordinary lookup itself missed (continuity suppression means an
-        # enabled source claimed the model, so the disabled probe must not
-        # override the recorded subscription anchor).
-        disabled_denial = await _disabled_model_source_denial(
-            request,
-            responses_payload.model,
-            api_key,
-            route="responses",
-            raw_model=raw_source_model,
-            require_streaming=responses_payload.stream is True,
-        )
-        if disabled_denial is not None:
-            return disabled_denial
+        if not source_route_excluded and not continuity_suppressed:
+            disabled_denial = await _disabled_model_source_denial(
+                request,
+                responses_payload.model,
+                api_key,
+                route="responses",
+                raw_model=raw_source_model,
+                require_streaming=responses_payload.stream is True,
+            )
+            if disabled_denial is not None:
+                return disabled_denial
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -5008,7 +5012,7 @@ async def _select_responses_model_source(
 
 async def _select_responses_model_source_with_continuity(
     request: HTTPConnection,
-    payload: ResponsesRequest,
+    payload: ResponsesRequest | ResponsesCompactRequest,
     context: ProxyContext,
     api_key: ApiKeyData | None,
     *,
@@ -5018,10 +5022,10 @@ async def _select_responses_model_source_with_continuity(
     """Select a source unless recorded subscription continuity owns the anchor.
 
     Returns ``(selection, continuity_suppressed)``. ``continuity_suppressed``
-    is ``True`` when a recorded subscription owner for ``previous_response_id``
-    pins the turn to a subscription account, including after source lookup
-    misses. Neither source ownership nor disabled-source denial may override
-    that authoritative subscription anchor.
+    is ``True`` when recorded subscription ownership for ``previous_response_id``
+    or a compact turn-state header pins the turn to an account, including after
+    source lookup misses. Neither source ownership nor disabled-source denial
+    may override that authoritative subscription anchor.
     """
     source_selection = await _select_responses_model_source(
         payload.model,
@@ -5029,10 +5033,21 @@ async def _select_responses_model_source_with_continuity(
         raw_model=raw_model,
         require_streaming=require_streaming,
     )
-    if payload.previous_response_id is None:
+    if isinstance(payload, ResponsesCompactRequest) or strip_terminal_compaction_trigger_input(payload) is not None:
+        turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(request.headers)
+        if turn_state is not None:
+            owner_account_id = await context.service._resolve_compact_turn_state_owner(
+                turn_state=turn_state,
+                api_key=api_key,
+                fail_on_missing=not proxy_affinity_module._is_synthesized_turn_state(turn_state),
+            )
+            if owner_account_id is not None:
+                return None, True
+    previous_response_id = getattr(payload, "previous_response_id", None)
+    if not isinstance(previous_response_id, str) or not previous_response_id.strip():
         return source_selection, False
     owner_account_id = await context.service._resolve_websocket_previous_response_owner(
-        previous_response_id=payload.previous_response_id,
+        previous_response_id=previous_response_id.strip(),
         api_key=api_key,
         session_id=proxy_affinity_module._owner_lookup_session_id_from_headers(request.headers),
         surface="http_source_route",
@@ -5111,7 +5126,7 @@ async def _disabled_model_source_denial(
 
 async def _source_ownership_miss_denial(
     request: Request,
-    payload: ResponsesRequest,
+    payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
     *,
     raw_model: str | None = None,
@@ -5121,17 +5136,25 @@ async def _source_ownership_miss_denial(
 
 
 async def _source_ownership_miss_error(
-    payload: ResponsesRequest,
+    payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
     *,
     raw_model: str | None = None,
 ) -> ModelSourceForwardingError | None:
-    """Fail closed when owned source state has no currently selectable source."""
+    """Reject owned source state when source selection missed or account continuity suppressed it."""
     scopes = [
         OwnershipScope(api_key.id if api_key is not None else None, model)
         for model in dict.fromkeys(model for model in (raw_model, payload.model) if model)
     ]
-    original_source_payload = payload.model_dump_for_forwarding()
+    original_source_payload = (
+        payload.model_dump_for_forwarding()
+        if isinstance(payload, ResponsesRequest)
+        else payload.model_dump(mode="json", exclude_none=True)
+    )
+    previous_response_id = original_source_payload.get("previous_response_id")
+    previous_response_id = previous_response_id.strip() if isinstance(previous_response_id, str) else None
+    if previous_response_id is not None:
+        original_source_payload["previous_response_id"] = previous_response_id
     request_keys = set().union(*(scope.request_keys(original_source_payload) for scope in scopes))
     if not request_keys:
         return None
@@ -5141,10 +5164,10 @@ async def _source_ownership_miss_error(
             references = await ownership.find(sorted(request_keys), now=utcnow())
             history = await ownership.find_history(sorted(request_keys))
             has_owner = bool(references or history)
-            if not has_owner and payload.previous_response_id:
+            if not has_owner and previous_response_id:
                 for scope in scopes:
                     if await RequestLogsRepository(session).find_source_owner_revisions_for_response_id(
-                        response_id=payload.previous_response_id,
+                        response_id=previous_response_id,
                         api_key_id=scope.api_key_id,
                         model=scope.model,
                     ):
@@ -5166,9 +5189,7 @@ async def _source_ownership_miss_error(
         payload=cast(
             dict[str, JsonValue],
             openai_error(
-                "previous_response_owner_unavailable"
-                if payload.previous_response_id
-                else "model_source_owner_unavailable",
+                "previous_response_owner_unavailable" if previous_response_id else "model_source_owner_unavailable",
                 "The request's upstream state has no unambiguous available source. "
                 "Use its original source or resend portable full context.",
             ),
@@ -5662,6 +5683,7 @@ async def _balanced_source_responses_response(
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
     context: ProxyContext | None = None,
+    compact_json: bool = False,
 ) -> Response:
     """Balance only after normal routing established source ownership of this model."""
     if original_model and original_model != payload.model:
@@ -5712,6 +5734,7 @@ async def _balanced_source_responses_response(
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                 native_codex_heartbeat=native_codex_heartbeat,
                 context=context,
+                compact_json=compact_json,
                 propagate_forwarding_errors=pooled,
                 ownership_request_keys=resolved.request_keys[source.id],
             )
@@ -5745,6 +5768,7 @@ async def _source_responses_response(
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
     context: ProxyContext | None = None,
+    compact_json: bool = False,
     propagate_forwarding_errors: bool = False,
     ownership_request_keys: set[str] | None = None,
 ) -> Response:
@@ -5795,6 +5819,7 @@ async def _source_responses_response(
             claims=claims,
             admission_budget=admission_budget,
             requested_service_tier=payload.service_tier,
+            request_kind="compaction" if strip_terminal_compaction_trigger_input(payload) is not None else "normal",
             cleanup_scheduler=_responses_cleanup_scheduler(context.service) if context is not None else None,
             scheduler=scheduler_for(context.service) if context is not None else REAL_SCHEDULER,
             clock=clock_for(context.service) if context is not None else REAL_CLOCK,
@@ -5848,6 +5873,13 @@ async def _source_responses_response(
         owner.ownership = SourceOwnershipRecorder(
             scope=scope, source=source, input_keys=scope.request_keys(source_payload), scheduler=owner.scheduler
         )
+        if compact_json:
+            result = await open_with_disconnect_watch(
+                request, owner, _collect_owned_source_compact(owner, source_payload)
+            )
+            return await _finish_non_stream_source_dispatch(
+                request, owner, result, rate_limit_headers=rate_limit_headers
+            )
         if payload.stream:
             await open_with_disconnect_watch(request, owner, _open_owned_source_stream(owner, source_payload))
             stream = owner.stream
@@ -5889,6 +5921,57 @@ async def _source_responses_response(
     except BaseException:
         await owner.abandon(ABANDON_DISPATCH_INTERRUPTED)
         raise
+
+
+async def _collect_owned_source_compact(
+    owner: SourceDispatch, source_payload: dict[str, JsonValue]
+) -> SourceResponsesCompletion:
+    async def collect() -> SourceResponsesCompletion:
+        await _open_owned_source_stream(owner, source_payload)
+        stream = owner.stream
+        assert stream is not None
+        events = _iter_source_sse_event_blocks(stream.body)
+        try:
+            result = await collect_source_compaction(events, model=owner.model)
+        finally:
+            await _aclose_stream(events)
+        return SourceResponsesCompletion(
+            payload=result,
+            usage=_usage_from_responses_payload(result),
+            timings=stream.usage_holder.timings,
+            upstream_status_code=stream.upstream_status_code,
+        )
+
+    settings = with_dashboard_overrides(get_settings())
+    try:
+        return await owner.scheduler.wait_for(
+            collect(), timeout=min(settings.compact_request_budget_seconds, _source_timeout_seconds(owner.source))
+        )
+    except TimeoutError:
+        raise ModelSourceForwardingError(
+            status_code=504,
+            payload=cast(
+                dict[str, JsonValue], openai_error("model_source_timeout", "Model source compaction timed out")
+            ),
+            upstream_status_code=owner.stream.upstream_status_code if owner.stream is not None else None,
+        ) from None
+    except StreamEventTooLargeError:
+        raise invalid_source_compaction("Model source compact event exceeds the allowed size") from None
+    except aiohttp.ClientError:
+        # A stream read failed after submission. Preserve the opened status so
+        # pool retry policy cannot treat this as a connection-establishment miss.
+        raise ModelSourceForwardingError(
+            status_code=502,
+            payload=cast(
+                dict[str, JsonValue],
+                openai_error(
+                    "model_source_unreachable",
+                    "Model source compaction stream was interrupted",
+                    error_type="upstream_error",
+                ),
+            ),
+            upstream_status_code=owner.stream.upstream_status_code if owner.stream is not None else None,
+        ) from None
 
 
 async def _open_owned_source_stream(owner: SourceDispatch, source_payload: dict[str, JsonValue]) -> None:
@@ -5957,6 +6040,11 @@ def _shape_source_responses_payload(
         source_payload,
         supported_tool_types=source_model_supported_tool_types(source, payload.model),
     )
+    if strip_terminal_compaction_trigger_input(payload) is not None:
+        # The operation cannot be replaced by an override for an ordinary turn.
+        source_payload["input"] = payload.model_dump_for_forwarding()["input"]
+        source_payload["store"] = False
+        strip_replayed_tool_call_namespaces_from_payload(source_payload)
     return source_payload
 
 
@@ -7803,7 +7891,7 @@ async def responses_compact(
     _raw_trigger_validation: None = Depends(_capture_raw_compaction_trigger_error),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
-) -> JSONResponse:
+) -> Response:
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
@@ -7830,7 +7918,7 @@ async def v1_responses_compact(
     payload: V1ResponsesCompactRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
-) -> JSONResponse:
+) -> Response:
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
@@ -7861,14 +7949,81 @@ async def _compact_responses(
     codex_session_affinity: bool = False,
     openai_cache_affinity: bool = False,
     prohibit_fast_mode: bool = False,
-) -> JSONResponse:
-    # The replaced effort is discarded: this path is subscription-only, so the
-    # rewrite that works around the backend hang must stick.
-    service_tier_was_enforced = apply_api_key_enforcement(
+) -> Response:
+    raw_source_model = _effective_optional_model_for_api_key(api_key, payload.model)
+    enforcement = apply_api_key_enforcement(
         payload,
         api_key,
         prohibit_fast_mode=prohibit_fast_mode,
-    ).service_tier_was_enforced
+    )
+    if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
+        raw_source_model = payload.model
+    validate_model_access(api_key, payload.model)
+    # Route the compact request before applying the source Responses schema;
+    # subscription compact accepts extra fields with a different contract.
+    excluded = bool(extract_input_file_ids(payload.input))
+    try:
+        selection, subscription_owned = (
+            (None, False)
+            if excluded
+            else await _select_responses_model_source_with_continuity(
+                request, payload, context, api_key, raw_model=raw_source_model, require_streaming=True
+            )
+        )
+    except ProxyResponseError as exc:
+        return _logged_error_json_response(request, exc.status_code, exc.payload)
+    if selection is not None:
+        try:
+            source_payload = source_compact_request(payload)
+        except (ClientPayloadError, ValidationError) as exc:
+            error = (
+                openai_client_payload_error(exc)
+                if isinstance(exc, ClientPayloadError)
+                else openai_validation_error(exc)
+            )
+            return _logged_error_json_response(request, 400, error)
+        source_payload.model = selection[1]
+        return await _balanced_source_responses_response(
+            request,
+            source_payload,
+            source=selection[0],
+            original_model=raw_source_model,
+            api_key=api_key,
+            rate_limit_headers=await _rate_limit_headers_for_request(context, api_key),
+            pre_normalization_effort=enforcement.pre_normalization_reasoning_effort,
+            context=context,
+            compact_json=True,
+        )
+    # This request will use an account. Check retained source state even when
+    # a subscription anchor or file pin suppressed source selection.
+    denial = await _source_ownership_miss_denial(request, payload, api_key, raw_model=raw_source_model)
+    if denial is not None:
+        return denial
+    if not excluded and not subscription_owned:
+        denial = await _disabled_model_source_denial(
+            request, payload.model, api_key, route="responses", raw_model=raw_source_model, require_streaming=True
+        )
+        if denial is not None:
+            return denial
+        # Streaming capability filters candidates, not source membership. A
+        # non-streaming source model must not fall through to an account.
+        unavailable_source = await _select_responses_model_source(payload.model, api_key, raw_model=raw_source_model)
+        if unavailable_source is not None:
+            return _logged_error_json_response(
+                request,
+                503,
+                openai_error(
+                    "model_source_busy",
+                    "No permitted model source supports streaming compaction for this model",
+                    error_type="upstream_error",
+                ),
+            )
+        denial = await _disabled_model_source_denial(
+            request, payload.model, api_key, route="responses", raw_model=raw_source_model
+        )
+        if denial is not None:
+            return denial
+    service_tier_was_enforced = enforcement.service_tier_was_enforced
     apply_enforced_service_tier_model_fallback(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,

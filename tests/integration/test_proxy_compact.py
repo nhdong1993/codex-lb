@@ -315,6 +315,23 @@ async def test_proxy_compact_rejects_untrimmable_lite_prelude_before_account_sel
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses/compact", "/backend-api/codex/responses/compact"])
+@pytest.mark.parametrize(
+    "extra",
+    [{"conversation": {"id": "conv_existing"}}, {"text": {"format": {"type": "provider_specific"}}}],
+)
+async def test_subscription_compact_keeps_compact_schema_for_extra_fields(async_client, monkeypatch, path, extra):
+    compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "compact_responses", compact)
+    response = await async_client.post(path, json={"model": "gpt-5.1", "instructions": "hi", "input": [], **extra})
+    assert response.status_code == 200, response.text
+    compact.assert_awaited_once()
+    assert all(compact.call_args.args[0].model_extra[key] == value for key, value in extra.items())
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, monkeypatch):
     email = "compact-tools@example.com"
     raw_account_id = "acc_compact_tools"

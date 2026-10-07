@@ -769,3 +769,211 @@ Direct HTTP Responses routing MUST recognize `internal_chat_message_metadata_pas
 
 - **WHEN** the same input is evaluated for subscription account replay
 - **THEN** the direct-source metadata allowance MUST NOT broaden subscription portability
+
+### Requirement: Responses compaction follows the selected model-source owner
+
+An enabled OpenAI-compatible source that serves the requested public Responses
+model MUST remain eligible for Codex terminal `compaction_trigger` requests and
+standalone compact requests. Selection MUST use the same raw/enforced model,
+source assignment, enablement, alias, streaming capability and durable
+ownership checks as an ordinary Responses request. The source's configured
+credential and upstream model mapping MUST be used for the compact operation.
+
+Recorded subscription ownership, uploaded-file ownership, conflicting retained state or unknown state in a pool, disabled sources/models, and a changed source
+credential or revision MUST retain their existing precedence and MUST NOT fall
+through silently to another credential.
+
+Subscription-owned standalone compact requests MUST retain the compact request
+validation contract. The proxy MUST NOT apply the source Responses schema before
+resolving subscription ownership or determining that no source serves the model.
+
+Before HTTP compact or Responses dispatch to a subscription account, the proxy
+MUST reject retained references recorded for a Model Source in the same API-key
+and public-model scope, including when subscription previous-response ownership,
+compact turn-state ownership or an uploaded-file pin suppresses source selection. It
+MUST return the existing HTTP 409 ownership error before acquiring a usage
+reservation or contacting either upstream. Source ownership lookup failure MUST
+fail closed. The presence of a configured source without a conflicting owned
+reference MUST NOT block valid subscription continuity.
+
+#### Scenario: Codex terminal compaction stays on its Model Source
+
+- **GIVEN** an enabled Responses-capable source owns public model `m`
+- **WHEN** `/backend-api/codex/responses` for `m` ends its input with one
+  terminal `compaction_trigger`
+- **THEN** the request is forwarded to that source with its mapped upstream
+  model and source credential
+- **AND** no subscription account receives the request
+
+#### Scenario: Standalone compact stays on its Model Source
+
+- **GIVEN** an enabled Responses-capable source owns public model `m`
+- **WHEN** `/backend-api/codex/responses/compact` or `/v1/responses/compact`
+  is called for `m`
+- **THEN** the source Responses endpoint receives the retained history and
+  exactly one terminal `compaction_trigger`
+- **AND** the client receives the existing compact JSON contract
+
+#### Scenario: Subscription ownership still wins
+
+- **GIVEN** a request carries retained state recorded for a subscription
+  account
+- **AND** no retained reference is recorded for a Model Source
+- **WHEN** a source also exposes the requested public model
+- **THEN** compaction remains on the recorded subscription owner
+- **AND** the source is not contacted
+
+#### Scenario: Unavailable source ownership fails closed
+
+- **WHEN** retained compaction state has a conflicting or unavailable source owner, or an unknown owner in a pool
+- **THEN** the proxy returns the existing ownership error before source or
+  subscription dispatch
+- **AND** no usage reservation remains held
+
+#### Scenario: Continuation crosses replicas after compact
+
+- **WHEN** compact output from a source is replayed through another replica
+- **THEN** its response, item and encrypted-content references resolve from the shared database to the same source revision
+- **AND** a different local source selection order MUST NOT change that owner
+
+#### Scenario: Trailing slash behavior remains compatible
+
+- **WHEN** either standalone compact endpoint is requested with a trailing slash
+- **THEN** it MUST retain the existing 405 rejection without dispatch or reservation
+- **AND** both HTTP Responses trigger routes MUST retain their supported slash equivalents without redirect
+
+#### Scenario: Subscription compact extras retain their contract
+
+- **GIVEN** a standalone compact request is subscription-owned or has no configured source
+- **AND** it contains extra fields accepted by the compact schema, including an object-valued `conversation`
+- **WHEN** either standalone compact endpoint receives the request
+- **THEN** the existing compact service receives the request without source Responses validation
+- **AND** source ownership and disabled-source denials MUST still run for source-owned requests
+
+#### Scenario: Mixed source and subscription ownership is refused
+
+- **GIVEN** retained compact output is recorded for a Model Source
+- **AND** the request also has a subscription anchor that suppresses source selection (previous-response ownership, compact turn-state ownership or an uploaded-file pin)
+- **WHEN** the client sends standalone compact, a terminal compaction trigger or an ordinary HTTP Responses continuation
+- **THEN** the proxy returns the existing 409 ownership error before dispatch
+- **AND** neither credential receives the state and no new usage reservation is acquired
+
+#### Scenario: Configured source does not conflict with subscription-only state
+
+- **GIVEN** subscription continuity or a file pin owns the request
+- **AND** the same model is configured on a Model Source but no retained reference has a source owner
+- **WHEN** the client sends an HTTP compact or Responses request
+- **THEN** subscription routing retains its existing contract
+
+### Requirement: Standalone source compaction preserves stream contracts
+
+Both standalone compact routes MUST require streaming capability during initial
+source selection and disabled-source probing, including raw-model alias and
+normalized-model fallback. Existing retained-state ownership checks MUST still
+apply before dispatch or reservation.
+If no streaming candidate is available but an enabled or disabled non-streaming
+source claims the model under the same selection policy, compact MUST return
+the existing source-unavailable or disabled error before subscription dispatch
+or reservation. Recorded subscription continuity and file pins MUST retain
+their existing precedence.
+
+The compact collector MUST preserve valid source Responses usage observed at
+the event root or inside a response event when terminal response usage is absent
+or null. The compact JSON, request log and quota settlement MUST use the same
+validated input/output/cached/reasoning counters. Terminal response usage, when
+present, MUST retain precedence and validation; collection MUST remain bounded
+and support events up to the existing compact event size limit.
+
+Schema validation failures while translating upstream terminal errors MUST
+produce HTTP 502 with the existing `invalid_upstream_response` error code and an
+error request log. Existing generic upstream error translations MUST remain
+errors. These failures
+MUST release the reservation and admission, MUST NOT be recorded as client
+cancellation and MUST NOT retry through another source after opening the stream.
+
+#### Scenario: Streaming model fallback remains available for compact
+
+- **GIVEN** a raw model alias has only a non-streaming source and its normalized model has a permitted streaming source
+- **WHEN** either standalone compact endpoint receives a portable request
+- **THEN** it selects the same streaming model/source as the equivalent HTTP terminal-trigger request
+- **AND** it does not return a spurious source-busy error
+
+#### Scenario: Disabled streaming fallback is recognized
+
+- **GIVEN** the raw alias has a non-streaming source and the normalized streaming model is disabled
+- **WHEN** either standalone compact endpoint receives a portable request
+- **THEN** the existing disabled-source denial applies before dispatch or reservation
+
+#### Scenario: Usage outside the terminal response is retained
+
+- **GIVEN** a source supplies valid Responses usage at an SSE event root or in an earlier response event
+- **AND** the terminal response omits usage or reports null usage
+- **WHEN** either standalone compact endpoint completes on a limited API key
+- **THEN** it returns successful compact JSON including the observed usage
+- **AND** its usage reservation finalizes with the observed counters exactly once
+
+#### Scenario: Terminal usage retains precedence
+
+- **GIVEN** earlier SSE usage differs from terminal response usage
+- **WHEN** the compact collector completes
+- **THEN** terminal response usage drives both compact JSON and settlement
+- **AND** malformed terminal usage does not silently reuse earlier usage
+
+#### Scenario: Malformed upstream errors remain upstream failures
+
+- **WHEN** a source terminal error contains fields invalid for the error schema, such as numeric `code`
+- **THEN** either compact endpoint returns HTTP 502 `invalid_upstream_response`
+- **AND** the log records an upstream error, the reservation/admission are released and only one source attempt occurs
+
+### Requirement: Compact terminal usage validation is fail-closed
+
+For source-routed standalone compaction on an API key requiring usage for
+settlement, a non-null usage payload supplied by the terminal
+`response.completed` event at the nested response or, when nested usage is
+absent or null, the event root MUST validate before it can be used for compact
+output, request logging or quota settlement. A malformed or negative terminal payload MUST return the
+existing `usage_unavailable` error even when an earlier stream event supplied
+valid usage. A valid terminal payload MUST retain precedence. An absent or
+null terminal payload MAY fall back to valid usage observed in earlier events.
+Validation MUST reject negative input, output, total, cached or reasoning token
+counters, including counters within usage detail objects.
+
+#### Scenario: Malformed terminal root usage is not replaced
+
+- **GIVEN** an API key requires usage for settlement
+- **AND** an earlier SSE event reports valid usage
+- **AND** the terminal event root reports a non-null malformed or negative
+  usage object
+- **WHEN** either standalone compact route completes
+- **THEN** the proxy returns HTTP 502 with `usage_unavailable`
+- **AND** it releases the reservation without returning compact output
+
+#### Scenario: Negative detail counters fail closed
+
+- **GIVEN** a limited API key and valid earlier SSE usage
+- **AND** terminal usage contains valid input/output but negative total, cached
+  or reasoning counters at either the event root or nested response
+- **WHEN** either compact route completes
+- **THEN** it returns `usage_unavailable` without quota charge or compact output
+
+### Requirement: Compact source requests retain reasoning provenance
+
+When request policy materializes a provider-facing reasoning effort for a
+source-routed compact request, conversion to the source Responses request MUST
+preserve that materialization provenance. Source payload shaping MUST remove
+proxy-added reasoning effort when the policy does not require it, while
+retaining client-provided reasoning controls and policy-required aliases.
+
+#### Scenario: Provider alias survives compact conversion
+
+- **GIVEN** a client supplies a provider reasoning alias without canonical effort
+- **AND** the API key does not enforce or restrict reasoning effort
+- **WHEN** either standalone compact route dispatches to its source
+- **THEN** its reasoning controls match the equivalent terminal-trigger request
+- **AND** no proxy-added canonical effort is sent to the provider
+
+#### Scenario: Explicit or policy-required canonical effort is retained
+
+- **WHEN** a compact request supplies explicit canonical reasoning effort or
+  its API key requires canonical effort
+- **THEN** source forwarding retains that effort under the existing policy

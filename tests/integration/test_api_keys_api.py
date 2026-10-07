@@ -2094,7 +2094,7 @@ async def test_v1_responses_filters_unsupported_model_source_tools(async_client,
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_responses_compaction_trigger_skips_model_source(async_client, monkeypatch):
+async def test_backend_codex_responses_subscription_owned_compaction_skips_model_source(async_client, monkeypatch):
     model = "external-codex-responses-compact"
     await _create_model_source(
         async_client,
@@ -2102,11 +2102,23 @@ async def test_backend_codex_responses_compaction_trigger_skips_model_source(asy
         model=model,
         supports_responses=True,
     )
+    account_id = await _import_account(async_client, "acct-compact-owner", "compact-owner@example.com")
+    async with SessionLocal() as session:
+        await RequestLogsRepository(session).add_log(
+            account_id=account_id,
+            request_id="resp_subscription_compact",
+            model=model,
+            input_tokens=None,
+            output_tokens=None,
+            latency_ms=None,
+            status="success",
+            error_code=None,
+        )
     observed: dict[str, object] = {}
 
     async def fail_source(*args, **kwargs):
         del args, kwargs
-        pytest.fail("compaction triggers must use the Codex compaction path")
+        pytest.fail("subscription-owned compaction must use its owner account")
 
     async def fake_stream_responses(request, payload, context, api_key, **kwargs):
         del request, context, api_key
@@ -2123,6 +2135,7 @@ async def test_backend_codex_responses_compaction_trigger_skips_model_source(asy
         json={
             "model": model,
             "instructions": "compact this turn",
+            "previous_response_id": "resp_subscription_compact",
             "input": [
                 {"role": "user", "content": "hello"},
                 {"type": "compaction_trigger"},

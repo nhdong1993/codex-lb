@@ -1,0 +1,96 @@
+## MODIFIED Requirements
+
+### Requirement: Responses compaction follows the selected model-source owner
+
+An enabled OpenAI-compatible source that serves the requested public Responses
+model MUST remain eligible for Codex terminal `compaction_trigger` requests and
+standalone compact requests. Selection MUST use the same raw/enforced model,
+source assignment, enablement, alias, streaming capability and durable
+ownership checks as an ordinary Responses request. The source's configured
+credential and upstream model mapping MUST be used for the compact operation.
+
+Recorded subscription ownership, uploaded-file ownership, conflicting retained state or unknown state in a pool, disabled sources/models, and a changed source
+credential or revision MUST retain their existing precedence and MUST NOT fall
+through silently to another credential.
+
+Subscription-owned standalone compact requests MUST retain the compact request
+validation contract. The proxy MUST NOT apply the source Responses schema before
+resolving subscription ownership or determining that no source serves the model.
+
+Before HTTP compact or Responses dispatch to a subscription account, the proxy
+MUST reject retained references recorded for a Model Source in the same API-key
+and public-model scope, including when subscription previous-response ownership,
+compact turn-state ownership or an uploaded-file pin suppresses source selection. It
+MUST return the existing HTTP 409 ownership error before acquiring a usage
+reservation or contacting either upstream. Source ownership lookup failure MUST
+fail closed. The presence of a configured source without a conflicting owned
+reference MUST NOT block valid subscription continuity.
+
+#### Scenario: Codex terminal compaction stays on its Model Source
+
+- **GIVEN** an enabled Responses-capable source owns public model `m`
+- **WHEN** `/backend-api/codex/responses` for `m` ends its input with one
+  terminal `compaction_trigger`
+- **THEN** the request is forwarded to that source with its mapped upstream
+  model and source credential
+- **AND** no subscription account receives the request
+
+#### Scenario: Standalone compact stays on its Model Source
+
+- **GIVEN** an enabled Responses-capable source owns public model `m`
+- **WHEN** `/backend-api/codex/responses/compact` or `/v1/responses/compact`
+  is called for `m`
+- **THEN** the source Responses endpoint receives the retained history and
+  exactly one terminal `compaction_trigger`
+- **AND** the client receives the existing compact JSON contract
+
+#### Scenario: Subscription ownership still wins
+
+- **GIVEN** a request carries retained state recorded for a subscription
+  account
+- **AND** no retained reference is recorded for a Model Source
+- **WHEN** a source also exposes the requested public model
+- **THEN** compaction remains on the recorded subscription owner
+- **AND** the source is not contacted
+
+#### Scenario: Unavailable source ownership fails closed
+
+- **WHEN** retained compaction state has a conflicting or unavailable source owner, or an unknown owner in a pool
+- **THEN** the proxy returns the existing ownership error before source or
+  subscription dispatch
+- **AND** no usage reservation remains held
+
+#### Scenario: Continuation crosses replicas after compact
+
+- **WHEN** compact output from a source is replayed through another replica
+- **THEN** its response, item and encrypted-content references resolve from the shared database to the same source revision
+- **AND** a different local source selection order MUST NOT change that owner
+
+#### Scenario: Trailing slash behavior remains compatible
+
+- **WHEN** either standalone compact endpoint is requested with a trailing slash
+- **THEN** it MUST retain the existing 405 rejection without dispatch or reservation
+- **AND** both HTTP Responses trigger routes MUST retain their supported slash equivalents without redirect
+
+#### Scenario: Subscription compact extras retain their contract
+
+- **GIVEN** a standalone compact request is subscription-owned or has no configured source
+- **AND** it contains extra fields accepted by the compact schema, including an object-valued `conversation`
+- **WHEN** either standalone compact endpoint receives the request
+- **THEN** the existing compact service receives the request without source Responses validation
+- **AND** source ownership and disabled-source denials MUST still run for source-owned requests
+
+#### Scenario: Mixed source and subscription ownership is refused
+
+- **GIVEN** retained compact output is recorded for a Model Source
+- **AND** the request also has a subscription anchor that suppresses source selection (previous-response ownership, compact turn-state ownership or an uploaded-file pin)
+- **WHEN** the client sends standalone compact, a terminal compaction trigger or an ordinary HTTP Responses continuation
+- **THEN** the proxy returns the existing 409 ownership error before dispatch
+- **AND** neither credential receives the state and no new usage reservation is acquired
+
+#### Scenario: Configured source does not conflict with subscription-only state
+
+- **GIVEN** subscription continuity or a file pin owns the request
+- **AND** the same model is configured on a Model Source but no retained reference has a source owner
+- **WHEN** the client sends an HTTP compact or Responses request
+- **THEN** subscription routing retains its existing contract
