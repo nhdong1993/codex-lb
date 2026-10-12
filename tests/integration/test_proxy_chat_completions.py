@@ -7,8 +7,11 @@ import pytest
 from sqlalchemy import select
 from starlette.responses import JSONResponse
 
+import app.modules.proxy._service.streaming.helpers as streaming_helpers_module
 import app.modules.proxy.api as proxy_api
 import app.modules.proxy.service as proxy_module
+from app.core.clients.proxy import ProxyResponseError
+from app.core.errors import OpenAIErrorDetail
 from app.db.models import ApiKeyUsageReservation
 from app.db.session import SessionLocal
 
@@ -35,6 +38,151 @@ def _make_auth_json(account_id: str, email: str) -> dict:
             "accountId": account_id,
         },
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses"])
+@pytest.mark.parametrize("failure_kind", ["http", "terminal"])
+@pytest.mark.parametrize("openai_message", [True, False])
+async def test_openai_server_errors_escalate_only_with_recognized_message(
+    async_client, app_instance, monkeypatch, path, failure_kind, openai_message
+):
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json("acc_processing", "processing@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    account_id = imported.json()["accountId"]
+    settings = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert settings.status_code == 200
+    created_key = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "processing-backoff",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 100_000}],
+        },
+    )
+    assert created_key.status_code == 200
+    key_id = created_key.json()["id"]
+    headers = {"Authorization": f"Bearer {created_key.json()['key']}"}
+    original_record_overload = streaming_helpers_module.record_upstream_overload
+    health_writes = 0
+
+    async def record_overload_after_settlement(*args, **kwargs):
+        nonlocal health_writes
+        async with SessionLocal() as session:
+            reservations = (
+                (
+                    await session.execute(
+                        select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert reservations
+            statuses = [reservation.status for reservation in reservations]
+            assert all(status in {"finalized", "released"} for status in statuses), statuses
+        health_writes += 1
+        await original_record_overload(*args, **kwargs)
+
+    monkeypatch.setattr(streaming_helpers_module, "record_upstream_overload", record_overload_after_settlement)
+    message = (
+        "An error occurred while processing your request. You can retry your request, "
+        "or contact us through our help center at help.openai.com if the error persists. "
+        "Please include the request ID upstream-request-123 in your message."
+        if openai_message
+        else "Internal server error"
+    )
+    error: OpenAIErrorDetail = {"code": "server_error", "type": "server_error", "message": message}
+    failing = True
+    upstream_accounts = []
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        upstream_accounts.append(account_id)
+        if failing and failure_kind == "http":
+            raise ProxyResponseError(500, {"error": error})
+        yield 'data: {"type":"response.created","response":{"id":"resp_processing","status":"in_progress"}}\n\n'
+        if failing:
+            event = {
+                "type": "response.failed",
+                "response": {"id": "resp_processing", "status": "failed", "error": error},
+            }
+        else:
+            yield 'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+            event = {"type": "response.completed", "response": {"id": "resp_processing_ok", "status": "completed"}}
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 0)
+    payload = {"model": "gpt-5.2", "stream": failure_kind == "terminal"}
+    if path == "/v1/chat/completions":
+        payload["messages"] = [{"role": "user", "content": "hi"}]
+    else:
+        payload["input"] = "hi"
+    for index in range(9 if openai_message else 3):
+        failing = True
+        response = await async_client.post(path, json=payload, headers=headers)
+        balancer = app_instance.state.proxy_service._load_balancer
+        if failure_kind == "http":
+            assert response.status_code == 500
+            returned_error = response.json()["error"]
+        elif path == "/v1/chat/completions":
+            assert response.status_code == 502
+            returned_error = response.json()["error"]
+        else:
+            assert response.status_code == 200
+            events = [
+                json.loads(line[6:])
+                for line in response.text.splitlines()
+                if line.startswith("data: ") and line != "data: [DONE]"
+            ]
+            returned_error = next(
+                event.get("error") or event["response"]["error"]
+                for event in events
+                if event.get("error") or event.get("response", {}).get("error")
+            )
+        assert returned_error["code"] == "server_error"
+        assert returned_error["message"] == message
+        runtime = balancer._runtime[account_id]
+        expected_level = (index + 1) // 3 if openai_message else 0
+        assert runtime.overload_backoff_level == expected_level
+
+        # Real successful requests reset the generic counter, but must not
+        # discard the recognized failures or prevent the third trip.
+        failing = False
+        recovered = await async_client.post(path, json=payload, headers=headers)
+        assert recovered.status_code == 200
+        assert runtime.error_count == 0
+
+    if openai_message:
+        assert health_writes == 9
+        assert runtime.overload_isolated_until is not None
+        assert runtime.overload_isolated_until > balancer._clock.time()
+        clean = await async_client.post(
+            "/api/accounts/import",
+            files={
+                "auth_json": (
+                    "auth.json",
+                    json.dumps(_make_auth_json("acc_clean", "clean@example.com")),
+                    "application/json",
+                )
+            },
+        )
+        assert clean.status_code == 200
+        response = await async_client.post(path, json=payload, headers=headers)
+        assert response.status_code == 200
+        assert upstream_accounts[-1] == "acc_clean"
+    else:
+        assert health_writes == 0
+        assert not runtime.overload_rejections
+        assert runtime.overload_isolated_until is None
 
 
 @pytest.mark.asyncio

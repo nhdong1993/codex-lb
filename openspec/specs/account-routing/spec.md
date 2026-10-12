@@ -873,27 +873,7 @@ The fork MUST exclude reauthentication-required accounts from request routing, w
 
 ### Requirement: Overload rejections deprioritize the account for fresh selection
 
-When upstream rejects a fresh admission for an account as overloaded
-(`server_is_overloaded` or `overloaded_error`), the proxy MUST record the
-rejection, at the point where account health is written for it, in a
-replica-local per-account window that is independent of the transient error
-count and MUST NOT be reset by later successes on that account. When at least three rejections land inside a 120-second window, the
-proxy MUST deprioritize the account for fresh (unbound) selection for a
-bounded interval that grows exponentially with consecutive trips (60 seconds
-base, capped at 600 seconds, decaying to the base after 30 minutes without a
-trip); the level MUST saturate once the cap is reached so sustained overload
-cannot grow it without bound, and a trip while already deprioritized MUST NOT
-shorten the deadline.
-Deprioritization MUST be soft: selection first runs over the candidates not in
-overload backoff and, when the configured strategy and budget gates select
-none of them, runs again over the full candidate pool exactly as before. It
-MUST apply wherever a NEW account is chosen for a request — unbound selection
-and the sticky path's fresh binding, reallocation, or fallback pick — and MUST
-NOT apply to an established sticky owner, a continuity owner, or a
-hard-affinity owner. The
-proxy MUST log when the backoff engages. The failure classification, the
-failover decision, the existing transient error penalty, and the status and
-body returned to the client MUST remain unchanged.
+When upstream rejects a fresh admission for an account as overloaded (`server_is_overloaded` or `overloaded_error`), or returns a `server_error` matching the OpenAI processing-error signature defined below, the proxy MUST record the rejection, at the point where account health is written for it, in a replica-local per-account window that is independent of the transient error count and MUST NOT be reset by later successes on that account. When at least three rejections land inside a 120-second window, the proxy MUST deprioritize the account for fresh (unbound) selection for a bounded interval that grows exponentially with consecutive trips (60 seconds base, capped at 600 seconds, decaying to the base after 30 minutes without a trip); the level MUST saturate once the cap is reached so sustained overload cannot grow it without bound, and a trip while already deprioritized MUST NOT shorten the deadline. Deprioritization MUST be soft: selection first runs over the candidates not in overload backoff and, when the configured strategy and budget gates select none of them, runs again over the full candidate pool exactly as before. It MUST apply wherever a NEW account is chosen for a request — unbound selection and the sticky path's fresh binding, reallocation, or fallback pick — and MUST also release established soft sticky owners under `sticky-session-operations` once the sustained-overload window trips. It MUST NOT release a required continuity owner or hard-affinity owner. The proxy MUST log when the backoff engages. The failure classification, the failover decision, the existing transient error penalty, and the status and body returned to the client MUST remain unchanged.
 
 #### Scenario: Warm sessions keep masking the generic error counters
 
@@ -926,7 +906,7 @@ body returned to the client MUST remain unchanged.
 - **WHEN** a request carrying a session or prompt-cache key with no established
   owner selects an account
 - **THEN** the new binding is made to account B
-- **AND** a request whose key already maps to account A keeps using account A
+- **AND** an established soft mapping to account A also rebinds to B when B is selectable, without moving required hard owners
 
 #### Scenario: HTTP-status overload rejections keep their code
 
@@ -950,7 +930,7 @@ body returned to the client MUST remain unchanged.
 #### Scenario: Pinned sessions are not denied by overload backoff
 
 - **GIVEN** account A is in overload backoff
-- **WHEN** a request hard-pinned to account A (continuity owner, sticky
+- **WHEN** a request hard-pinned to account A (required continuity owner, hard sticky
   session, or file affinity) selects an account
 - **THEN** the pin is honored exactly as before
 
@@ -964,14 +944,31 @@ body returned to the client MUST remain unchanged.
 
 #### Scenario: Non-overload transient errors do not feed the window
 
-- **GIVEN** account A returns a transient `server_error`
+- **GIVEN** account A returns a transient `server_error` without the recognized OpenAI processing-error signature
 - **WHEN** the proxy records account health
 - **THEN** the generic transient error is recorded as before
 - **AND** the overload window for account A is unchanged
 
+#### Scenario: Recognized OpenAI processing failures count despite successes
+
+- **GIVEN** an upstream error has code `server_error` and a message beginning with “An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.”
+- **WHEN** the proxy records account health for HTTP errors or streamed terminal failures eligible for the existing account-health penalty
+- **THEN** the failure MUST count once in the existing overload window at that health-write point
+- **AND** when an API-key reservation exists, settlement MUST be confirmed before the health write, including terminal-stream closure by a startup probe; unconfirmed settlement MUST suppress the health write
+- **AND** matching MUST ignore letter case and repeated whitespace, accept `https://help.openai.com` with an optional trailing slash, and permit an optional trailing request-ID sentence
+- **AND** intervening successful requests MUST NOT clear this window
+- **AND** the original error code and message returned to the client MUST remain unchanged
+
+#### Scenario: Generic and lookalike messages do not qualify
+
+- **GIVEN** a `server_error` has no message, a generic internal-error message, only a help-center domain mention, or a lookalike help-center domain
+- **WHEN** the proxy records account health
+- **THEN** it MUST NOT add that failure to the overload window
+- **AND** a different error code carrying the processing-error message MUST NOT qualify through this message rule
+
 ### Requirement: Upstream overload rejections back off and then isolate the account
 
-The balancer SHALL keep a replica-local sliding window of upstream overload admission rejections (`server_is_overloaded`, `overloaded_error`) per account that successes do not reset. When the window trips, the account SHALL enter a bounded, exponentially growing **soft backoff** during which fresh unbound selection and fresh sticky bindings prefer other candidates. When the backoff level reaches the isolation trip level, the account SHALL instead be **isolated** for `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS` (default 1800; `0` disables isolation and keeps the soft backoff only). While isolated, established soft sticky owners MAY be released as specified by `sticky-session-operations`. In both stages the account MUST be dropped from a candidate pool only while at least one other candidate remains, and the configured strategy MUST judge eligibility of the remaining pool: when it rejects every overload-free candidate, selection MUST fall back to the full pool exactly as before. The backoff level MUST NOT decay while the account is backed off or isolated; it decays only after a quiet interval measured from the later of the last trip and the backoff deadline. Hard continuity owners MUST NOT be moved by either stage. The balancer MUST emit a warning when isolation engages, naming the account, level and isolation interval.
+The balancer SHALL keep a replica-local sliding window of upstream overload admission rejections (`server_is_overloaded`, `overloaded_error`) and message-qualified OpenAI `server_error` failures per account that successes do not reset. When the window trips, the account SHALL enter a bounded, exponentially growing **soft backoff** during which fresh unbound selection and fresh sticky bindings prefer other candidates. When the backoff level reaches the isolation trip level, the account SHALL instead be **isolated** for `CODEX_LB_PROXY_OVERLOAD_ISOLATION_SECONDS` (default 1800; `0` disables isolation and keeps the soft backoff only). During sustained-overload backoff, including isolation, established soft sticky owners MUST be released when an eligible overload-free sibling is selectable, as specified by `sticky-session-operations`. Burst-only cooldown MUST NOT release established owners. In both stages the account MUST be dropped from a candidate pool only while at least one other candidate remains, and the configured strategy MUST judge eligibility of the remaining pool: when it rejects every overload-free candidate, selection MUST fall back to the full pool exactly as before. The backoff level MUST NOT decay while the account is backed off or isolated; it decays only after a quiet interval measured from the later of the last trip and the backoff deadline. Hard continuity owners MUST NOT be moved by either stage. The balancer MUST emit a warning when isolation engages, naming the account, level and isolation interval.
 
 #### Scenario: Sustained rejection escalates from soft backoff to isolation
 

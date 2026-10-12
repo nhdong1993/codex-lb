@@ -1380,7 +1380,7 @@ forwarded header map.
 
 ### Requirement: Isolated accounts release their soft sticky owners
 
-While an account is in the overload **isolation** stage (see `account-routing`), a `prompt_cache`, `sticky_thread` or `codex_session` mapping pinned to it MUST be treated as a fresh admission: selection MUST evaluate the overload-free candidates with the configured strategy and, when one is selectable, MUST route the request there and rebind the mapping to the selected account so later turns do not return to the isolated owner. When no overload-free candidate is selectable (lone account, every sibling backed off, or the strategy rejects the overload-free pool) the pinned owner MUST be kept. A soft backoff below the isolation stage MUST NOT release an established owner. When the released owner is also above the sticky reallocation budget threshold, the replacement MUST be chosen with the secondary-budget filter applied, as for a budget reallocation. A replacement chosen for a released owner MUST satisfy the per-account concurrency caps even where the owner itself is cap-exempt (bare `codex_session` mapping without cap spillover). A bare `codex_session` owner that is both at its account cap with spillover enabled and isolated MUST be rebound to the spillover target rather than preserving the mapping request-locally. Required owners resolved from hard continuity sources (`previous_response_id`, live or durable bridge ownership, file pins, turn-state rows) MUST NOT be released by this rule. A process-session preference for a brand-new thread MUST be skipped only while the preferred account is in overload backoff and the configured strategy selects an overload-free candidate; when no such candidate is selectable the preference MUST be honored. The service MUST emit an internal `sticky_owner_overload_isolation_reroute` diagnostic for each release without adding it to the stable failure taxonomy; the diagnostic MUST NOT include account identifiers.
+While an account is in sustained-overload **backoff**, including the isolation stage (see `account-routing`), a `prompt_cache`, `sticky_thread` or `codex_session` mapping pinned to it MUST be treated as a fresh admission: selection MUST evaluate the overload-free candidates with the configured strategy and, when one is selectable, MUST route the request there and rebind the mapping to the selected account so later turns do not return to the isolated owner. When no overload-free candidate is selectable (lone account, every sibling backed off, or the strategy rejects the overload-free pool) the pinned owner MUST be kept. The first sustained-overload trip (three qualified failures within 120 seconds) MUST permit this reroute even below the isolation stage. A burst-only cooldown or fewer than three qualified failures MUST NOT release an established owner. When the released owner is also above the sticky reallocation budget threshold, the replacement MUST be chosen with the secondary-budget filter applied, as for a budget reallocation. A replacement chosen for a released owner MUST satisfy the per-account concurrency caps even where the owner itself is cap-exempt (bare `codex_session` mapping without cap spillover). A bare `codex_session` owner that is both at its account cap with spillover enabled and in sustained-overload backoff MUST be rebound to the spillover target rather than preserving the mapping request-locally. Required owners resolved from hard continuity sources (`previous_response_id`, live or durable bridge ownership, file pins, turn-state rows) MUST NOT be released by this rule. A process-session preference for a brand-new thread MUST be skipped only while the preferred account is in overload backoff and the configured strategy selects an overload-free candidate; when no such candidate is selectable the preference MUST be honored. The service MUST emit an internal `sticky_owner_overload_backoff_reroute` diagnostic for each release without adding it to the stable failure taxonomy; the diagnostic MUST NOT include account identifiers.
 
 #### Scenario: Isolated owner is released to an overload-free sibling
 
@@ -1390,11 +1390,12 @@ While an account is in the overload **isolation** stage (see `account-routing`),
 - **THEN** account B is selected and the mapping is rebound to B
 - **AND** the probe reservation pool is the overload-free pool the pick came from
 
-#### Scenario: Soft backoff keeps the warm owner
+#### Scenario: Sustained soft backoff releases the warm owner
 
 - **GIVEN** a session pinned to account A, which is in soft overload backoff below the isolation level
+- **AND** account B is selectable outside the overload window
 - **WHEN** the next request selects an account
-- **THEN** account A keeps the session
+- **THEN** account B serves the request and the soft mapping is rebound to B
 
 #### Scenario: Isolated owner is kept when nothing else is selectable
 
@@ -1413,8 +1414,22 @@ While an account is in the overload **isolation** stage (see `account-routing`),
 
 - **GIVEN** a bare `codex_session` mapping pinned to account A, which is at its stream cap with spillover enabled and is isolated
 - **WHEN** the next request spills to sibling B
-- **THEN** the mapping is rebound to B (a capped-but-not-isolated owner keeps the request-local spillover and preserves the mapping)
+- **THEN** the mapping is rebound to B (a capped owner without sustained-overload backoff keeps the request-local spillover and preserves the mapping)
 
+
+#### Scenario: Repeated qualified failures with intervening successes
+
+- **GIVEN** a soft-affinity HTTP client whose account fails three times within 120 seconds with overload or the qualified OpenAI processing-error message, with successes between failures
+- **AND** another account is selectable
+- **WHEN** the client submits its next independent request with the same soft affinity
+- **THEN** selection rebinds that affinity to the sibling without waiting for isolation
+- **AND** no failed or accepted request is transparently replayed by this change
+
+#### Scenario: Burst cooldown retains the owner
+
+- **GIVEN** an established soft owner with only a code-less 429 burst cooldown
+- **WHEN** the next request selects an account
+- **THEN** the cooldown does not release the owner
 ### Requirement: Direct HTTP stream continuity conflicts surface the conflict code
 
 When a direct HTTP (SSE) stream fails closed because required continuity-owner

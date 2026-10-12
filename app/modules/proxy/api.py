@@ -255,7 +255,10 @@ from app.modules.model_sources.selection import (
     select_responses_model_source,
 )
 from app.modules.model_sources.websocket import MAX_MESSAGE_BYTES, source_ws_error
-from app.modules.model_sources.websocket_capability import source_websocket_capabilities
+from app.modules.model_sources.websocket_capability import (
+    source_only_key_supports_websockets,
+    source_websocket_capabilities,
+)
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
@@ -9667,8 +9670,18 @@ async def _websocket_upstream_transport_denial(*, api_key: ApiKeyData | None = N
         upstream_websocket_transport_recently_failed,
     )
 
+    source_requires_http = False
+    if api_key is not None and api_key.assigned_source_ids and not api_key.assigned_account_ids:
+        try:
+            source_requires_http = not await source_only_key_supports_websockets(api_key)
+        except Exception:
+            logger.warning("source_websocket_handshake_capability_failed")
+            return JSONResponse(
+                status_code=503,
+                content=openai_error("upstream_unavailable", "Unable to check source transport; retry later."),
+            )
     dashboard_settings = await get_settings_cache().get()
-    if configured_upstream_stream_transport(dashboard_settings) != "http":
+    if not source_requires_http and configured_upstream_stream_transport(dashboard_settings) != "http":
         if not upstream_websocket_transport_recently_failed():
             return None
         # A subscription outage must not downgrade a capable source before the

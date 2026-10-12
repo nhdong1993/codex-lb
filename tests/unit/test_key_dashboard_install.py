@@ -201,7 +201,7 @@ def test_installer_refreshes_catalog_without_overriding_assignment_transport(
     )
     native = _entry("native", websockets=True)
     for models in ([native], [native, _entry()], [_entry()]):
-        catalog_server.payload = {"models": models}
+        catalog_server.payload = {"models": [*models]}
         result = _run_lifecycle(script, tmp_path, platform)
         assert result.returncode == 0, result.stdout + result.stderr
         config = tomllib.loads((tmp_path / "config.toml").read_text())

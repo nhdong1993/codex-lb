@@ -71,7 +71,7 @@ from app.db.models import (
     AccountStatus,  # noqa: F401
 )
 from app.modules.proxy._load_balancer.overload_backoff import (
-    UPSTREAM_OVERLOAD_CODES,
+    is_sustained_upstream_failure,
     record_upstream_burst_rejection,
     record_upstream_overload,
 )
@@ -1138,10 +1138,9 @@ async def _handle_stream_error(
             get_request_id(),
             code,
         )
-        if code in UPSTREAM_OVERLOAD_CODES:
-            # Overload is an admission rejection that successes on the same
-            # account's warm sessions keep masking from ``error_count``; feed
-            # the dedicated sliding window so fresh selection can deprioritize.
+        if is_sustained_upstream_failure(code, error.get("message")):
+            # Successes can mask repeated overload/OpenAI processing failures
+            # from error_count; the dedicated window survives those successes.
             await record_upstream_overload(
                 proxy._load_balancer,
                 account,

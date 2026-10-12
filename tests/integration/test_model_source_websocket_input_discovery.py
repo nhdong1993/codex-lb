@@ -18,6 +18,7 @@ from app.modules.proxy.service import ProxyService
 from app.modules.proxy.source_admission import get_source_bulkhead
 from tests.integration.model_source_helpers import _create_model_source, stub_source_upstreams
 from tests.integration.test_model_source_websocket import complete, create_key, create_source, websocket_client
+from tests.integration.test_source_http_only_handshake import handshake
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 ROUTES = ["/v1/responses", "/v1/responses/", "/backend-api/codex/responses", "/backend-api/codex/responses/"]
@@ -234,15 +235,17 @@ async def test_discovery_matches_enforced_alias_routing(
             entry = next(model for model in catalog.json()["models"] if model["slug"] == alias)
             assert entry["prefer_websockets"] is expected
         assert not await _reservations()
-        async with websocket_client(app_instance, path, key["key"]) as ws:
-            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
-            event = await ws.receive()
-            if expected:
+        if expected:
+            async with websocket_client(app_instance, path, key["key"]) as ws:
+                await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+                event = await ws.receive()
                 assert event["type"] == "response.created", event
                 assert (await ws.receive())["type"] == "response.output_text.delta"
                 assert (await ws.receive())["type"] == "response.completed"
-            else:
-                assert event["error"]["code"] == "model_source_requires_http_transport", event
+        else:
+            status, body = await handshake(app_instance, path, key["key"])
+            assert status == 426
+            assert body["error"]["code"] == "websocket_upstream_transport_unavailable"
         assert ws_calls == ([selected] if expected else [])
         if not expected:
             assert not await _reservations()
@@ -358,15 +361,21 @@ async def test_installer_aggregates_only_eligible_responses_models(async_client,
         entry = next(model for model in catalog.json()["models"] if model["slug"] == "source-ws-model")
         assert entry["prefer_websockets"] is True
         assert not await _reservations()
-        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
-            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
-            assert [(await ws.receive())["type"] for _ in range(3)] == [
-                "response.created",
-                "response.output_text.delta",
-                "response.completed",
-            ]
-        assert len(calls) == 1
-        assert [row.status for row in await _reservations()] == ["finalized"]
+        if expected:
+            async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+                await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+                assert [(await ws.receive())["type"] for _ in range(3)] == [
+                    "response.created",
+                    "response.output_text.delta",
+                    "response.completed",
+                ]
+            assert len(calls) == 1
+            assert [row.status for row in await _reservations()] == ["finalized"]
+        else:
+            status, body = await handshake(app_instance, "/v1/responses", key["key"])
+            assert status == 426
+            assert body["error"]["code"] == "websocket_upstream_transport_unavailable"
+            assert not calls and not await _reservations()
         assert get_source_bulkhead().in_flight(sid) == 0
 
 

@@ -27,7 +27,7 @@ class RuntimeState:
     leases: dict[str, AccountLease] | None = None
     stream_key_inflight: dict[str, int] | None = None
     # Upstream-overload soft backoff (see ``_load_balancer/overload_backoff.py``).
-    # Recent ``server_is_overloaded`` rejection times inside the trip window,
+    # Recent overload/OpenAI processing-failure times inside the trip window,
     # the deprioritization deadline once tripped, the exponential level, and
     # when the level last tripped (for decay). Replica-local, never persisted.
     overload_rejections: list[float] | None = None

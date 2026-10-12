@@ -14,16 +14,20 @@ path cannot express:
   ``RuntimeState.error_count`` -- so the generic error backoff and the drain
   tier never latch, and selection keeps feeding the rejected account.
 
+``server_error`` with OpenAI's processing-error/help-center message feeds the
+same window. Generic server errors do not: the code alone does not distinguish
+an upstream processing failure from a local proxy or transport failure.
+
 This module keeps a replica-local sliding window of overload rejections per
 account with two escalation stages:
 
 1. **Soft backoff** (every trip): fresh (unbound) selection and fresh sticky
    bindings *deprioritize* the account for a bounded, exponentially growing
-   interval. Established sticky owners are left alone, so a short burst never
-   churns warm sessions.
+   interval. Movable soft owners rebind only when an overload-free sibling
+   is selectable; isolated failures and burst-only cooldown keep warm sessions.
 2. **Isolation** (the configured trip level, sustained overload): the account
-   is held out for a longer, operator-configured interval and established
-   *soft* sticky owners are rerouted as well. Only a soft sticky mapping is a
+   is held out for a longer, operator-configured interval with the same
+   guarded soft-owner rerouting as the initial backoff. Only a soft sticky mapping is a
    locality hint; every request that re-enters the pinned account is a fresh
    upstream admission, so keeping the owner pinned just replays the rejection
    wait per request. Hard continuity owners (``previous_response_id``, bridge
@@ -53,6 +57,7 @@ the burst path.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -67,6 +72,23 @@ logger = logging.getLogger(__name__)
 # Upstream error codes that mean "admission refused: overloaded". Both spellings
 # reach ``_handle_stream_error`` normalized to ``retryable_transient``.
 UPSTREAM_OVERLOAD_CODES: frozenset[str] = frozenset({"server_is_overloaded", "overloaded_error"})
+
+_OPENAI_PROCESSING_ERROR = re.compile(
+    r"^An error occurred while processing your request\. "
+    r"You can retry your request, or contact us through our help center at "
+    r"(?:https://)?help\.openai\.com/? if the error persists\.(?: |$)",
+    re.IGNORECASE,
+)
+
+
+def is_sustained_upstream_failure(code: str, message: str | None) -> bool:
+    """Recognize overload or OpenAI's specific upstream processing failure."""
+    if code in UPSTREAM_OVERLOAD_CODES:
+        return True
+    if code != "server_error" or not message:
+        return False
+    return _OPENAI_PROCESSING_ERROR.match(" ".join(message.split())) is not None
+
 
 # Trip when this many rejections land inside the window. Three keeps a lone
 # rejection (upstream hiccup) from deprioritizing an account, while a rejected
@@ -130,9 +152,14 @@ def overload_backoff_active(runtime: RuntimeState | None, now: float) -> bool:
     """Whether fresh admissions should avoid the account (soft backoff, isolation or burst cooldown)."""
     if runtime is None:
         return False
-    if runtime.overload_backoff_until is not None and now < runtime.overload_backoff_until:
+    if sustained_overload_backoff_active(runtime, now):
         return True
     return runtime.burst_backoff_until is not None and now < runtime.burst_backoff_until
+
+
+def sustained_overload_backoff_active(runtime: RuntimeState | None, now: float) -> bool:
+    """Whether repeated qualified failures permit releasing movable affinity."""
+    return runtime is not None and runtime.overload_backoff_until is not None and now < runtime.overload_backoff_until
 
 
 def overload_isolation_active(runtime: RuntimeState | None, now: float) -> bool:
@@ -225,7 +252,7 @@ async def record_upstream_overload(
         return
     logger.warning(
         "Account overload backoff engaged account_id=%s level=%d backoff_seconds=%.0f "
-        "(fresh selection deprioritizes the account while another candidate can be selected)",
+        "(fresh selection and movable soft owners prefer another selectable candidate)",
         account_label,
         runtime.overload_backoff_level,
         deadline - now,
@@ -300,7 +327,7 @@ def filter_overload_backoff_candidates(
     return kept
 
 
-def sticky_owner_isolation_reroute_pool(
+def sticky_owner_backoff_reroute_pool(
     states: list[AccountState],
     runtime_by_account_id: Mapping[str, RuntimeState] | None,
     *,
@@ -310,14 +337,14 @@ def sticky_owner_isolation_reroute_pool(
     """Return the overload-free pool a *soft* sticky owner should be rerouted
     into, or ``None`` when the owner keeps its session.
 
-    The owner is released only while it is in the isolation stage (not on a
-    soft backoff) and the pool still holds another candidate outside the
-    overload window; the caller must verify the strategy actually selects
-    from the returned pool before abandoning the owner.
+    The existing sustained-overload trip is sufficient evidence; isolation
+    only lengthens its deadline. A burst-only cooldown keeps the owner.
+    The caller must verify the strategy actually selects from this pool
+    before abandoning the owner.
     """
     if runtime_by_account_id is None:
         return None
-    if not overload_isolation_active(runtime_by_account_id.get(owner_account_id), now):
+    if not sustained_overload_backoff_active(runtime_by_account_id.get(owner_account_id), now):
         return None
     pool = filter_overload_backoff_candidates(states, runtime_by_account_id, now=now)
     if pool is states:

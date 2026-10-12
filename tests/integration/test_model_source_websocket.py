@@ -184,8 +184,15 @@ async def test_source_native_two_turn_connection_and_accounting(async_client, ap
 
 
 async def test_source_native_opt_in_required_before_reservation(async_client, app_instance):
+    # A mixed key cannot be downgraded before its first model frame. Source-only
+    # HTTP keys now receive 426 at upgrade (test_source_http_only_handshake).
+    from tests.integration.test_proxy_transient_retry import _import_account
+
     source_id = await create_source(async_client, "http://127.0.0.1:9/v1", enabled=False)
     key = await create_key(async_client, source_id)
+    account_id = await _import_account(async_client, "mixed-http-only", "mixed-http-only@example.test")
+    response = await async_client.patch(f"/api/api-keys/{key['id']}", json={"assignedAccountIds": [account_id]})
+    assert response.status_code == 200, response.text
     async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
         await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
         assert (await ws.receive())["error"]["code"] == "model_source_requires_http_transport"

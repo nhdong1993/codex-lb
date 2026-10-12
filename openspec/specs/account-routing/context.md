@@ -156,3 +156,7 @@ Failures during model-evidence lookup return a sanitized HTTP 503 `upstream_unav
 Classified account-neutral goal restarts still reach guarded sticky selection when a cached or in-flight legacy owner is model-excluded. For example, an excluded quota-exceeded legacy owner can be replaced while its already accepted request drains. Model exclusion alone does not permit abandonment of an active legacy owner, and file/previous-response dependencies still pin the request to its required account. Persisted status, scope and atomic sticky ownership remain the authority for replacement.
 
 The direct WebSocket connect selector also handles normalized admission errors before any upstream socket exists. It emits the existing structured connect error and settles the unsent request, letting the receive loop accept another turn on the same downstream socket. The route regression restores the real connector and account selector; a mocked connector alone cannot cover this boundary.
+
+## Sustained-overload soft-affinity rerouting
+
+After the existing three qualified failures within 120 seconds establish sustained upstream backoff, movable prompt-cache, sticky-thread and Codex-session owners may rebind to an eligible overload-free sibling. Burst-only cooldown, hard continuity/file owners, cap/budget rejection and lone-pool fallback retain their existing behavior. This is replica-local mitigation; it does not repair provider-wide generation latency or replay accepted work.

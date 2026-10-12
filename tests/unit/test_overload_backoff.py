@@ -27,6 +27,7 @@ from app.modules.proxy._load_balancer.overload_backoff import (
     OVERLOAD_WINDOW_SECONDS,
     OverloadIsolationPolicy,
     filter_overload_backoff_candidates,
+    is_sustained_upstream_failure,
     overload_backoff_active,
     overload_backoff_seconds,
     overload_isolation_active,
@@ -34,7 +35,7 @@ from app.modules.proxy._load_balancer.overload_backoff import (
     record_overload_rejection_locked,
     record_upstream_burst_rejection,
     record_upstream_overload,
-    sticky_owner_isolation_reroute_pool,
+    sticky_owner_backoff_reroute_pool,
 )
 from app.modules.proxy._load_balancer.types import RuntimeState
 from app.modules.proxy._service.streaming.retry import _transient_retry_error_code
@@ -47,7 +48,39 @@ from tests.unit.test_load_balancer_concurrency import (
     _StubUsageRepository,
 )
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.usefixtures("db_setup")]
+
+_OPENAI_SERVER_ERROR_MESSAGE = (
+    "An error occurred while processing your request. You can retry your request, "
+    "or contact us through our help center at help.openai.com if the error persists. "
+    "Please include the request ID upstream-request-123 in your message."
+)
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "expected"),
+    [
+        ("server_is_overloaded", None, True),
+        ("overloaded_error", "busy", True),
+        ("server_error", _OPENAI_SERVER_ERROR_MESSAGE, True),
+        ("server_error", _OPENAI_SERVER_ERROR_MESSAGE.split(" Please include")[0], True),
+        ("server_error", "  " + _OPENAI_SERVER_ERROR_MESSAGE.upper().replace(" ", "\n  "), True),
+        ("server_error", _OPENAI_SERVER_ERROR_MESSAGE.replace("help.openai.com", "https://help.openai.com/"), True),
+        ("server_error", None, False),
+        ("server_error", "", False),
+        ("server_error", "Internal server error", False),
+        ("server_error", "Proxy connection failed; see help.openai.com", False),
+        ("server_error", "An error occurred while processing your request.", False),
+        ("server_error", _OPENAI_SERVER_ERROR_MESSAGE.replace("help.openai.com", "help.openai.com.example.org"), False),
+        ("server_error", "Local proxy error: " + _OPENAI_SERVER_ERROR_MESSAGE, False),
+        ("upstream_unavailable", _OPENAI_SERVER_ERROR_MESSAGE, False),
+        ("stream_incomplete", _OPENAI_SERVER_ERROR_MESSAGE, False),
+    ],
+)
+def test_sustained_upstream_failure_requires_overload_or_openai_message(
+    code: str, message: str | None, expected: bool
+) -> None:
+    assert is_sustained_upstream_failure(code, message) is expected
 
 
 def _make_account(account_id: str) -> Account:
@@ -335,7 +368,7 @@ async def _select_sticky(balancer: LoadBalancer, states: list[AccountState], rep
 
 
 @pytest.mark.asyncio
-async def test_fresh_sticky_binding_avoids_backed_off_account_but_established_owner_is_kept() -> None:
+async def test_fresh_and_established_soft_bindings_avoid_sustained_backoff() -> None:
     clock = VirtualClock(epoch_value=2_000_000_000.0)
     balancer = LoadBalancer(_mock_repo_factory, clock=clock)
     balancer._runtime["hot"] = RuntimeState(overload_backoff_until=clock.time() + OVERLOAD_BACKOFF_BASE_SECONDS)
@@ -347,10 +380,10 @@ async def test_fresh_sticky_binding_avoids_backed_off_account_but_established_ow
         assert fresh.account is not None
         assert fresh.account.account_id == "clean"
 
-    # An established owner is warm-session reuse: the overload window never touches it.
+    # A soft owner also leaves once repeated failures have tripped backoff.
     owned = await _select_sticky(balancer, states, _sticky_repo("hot"))
     assert owned.account is not None
-    assert owned.account.account_id == "hot"
+    assert owned.account.account_id == "clean"
 
     # With no overload-free alternative the fresh binding still lands on the backed-off account.
     alone = await _select_sticky(balancer, [_state("hot")], _sticky_repo(None))
@@ -392,8 +425,8 @@ async def test_fresh_sticky_binding_reports_the_pool_it_selected_from() -> None:
     assert unfiltered.effective_states is None
 
     owned = await _outcome([hot, clean], "hot")
-    assert owned.selection.account is not None and owned.selection.account.account_id == "hot"
-    assert owned.effective_states is None
+    assert owned.selection.account is not None and owned.selection.account.account_id == "clean"
+    assert owned.effective_states == [clean]
 
 
 # --- isolation stage -------------------------------------------------------
@@ -491,21 +524,21 @@ def _isolated_runtime(now: float, *, seconds: float = 1800.0) -> RuntimeState:
     )
 
 
-def test_sticky_owner_reroute_pool_requires_isolation_and_an_overload_free_sibling() -> None:
+def test_sticky_owner_reroute_pool_requires_sustained_backoff_and_an_overload_free_sibling() -> None:
     now = 1000.0
     states = [_state("hot"), _state("clean")]
     soft = {"hot": RuntimeState(overload_backoff_until=now + 60.0)}
-    assert sticky_owner_isolation_reroute_pool(states, soft, owner_account_id="hot", now=now) is None
+    assert sticky_owner_backoff_reroute_pool(states, soft, owner_account_id="hot", now=now) == [states[1]]
     isolated = {"hot": _isolated_runtime(now)}
-    pool = sticky_owner_isolation_reroute_pool(states, isolated, owner_account_id="hot", now=now)
+    pool = sticky_owner_backoff_reroute_pool(states, isolated, owner_account_id="hot", now=now)
     assert pool is not None and [state.account_id for state in pool] == ["clean"]
     # Every sibling isolated too: the owner keeps its session.
     both = {"hot": _isolated_runtime(now), "clean": _isolated_runtime(now)}
-    assert sticky_owner_isolation_reroute_pool(states, both, owner_account_id="hot", now=now) is None
-    assert sticky_owner_isolation_reroute_pool([_state("hot")], isolated, owner_account_id="hot", now=now) is None
-    assert sticky_owner_isolation_reroute_pool(states, None, owner_account_id="hot", now=now) is None
+    assert sticky_owner_backoff_reroute_pool(states, both, owner_account_id="hot", now=now) is None
+    assert sticky_owner_backoff_reroute_pool([_state("hot")], isolated, owner_account_id="hot", now=now) is None
+    assert sticky_owner_backoff_reroute_pool(states, None, owner_account_id="hot", now=now) is None
     # Expired isolation releases nothing.
-    assert sticky_owner_isolation_reroute_pool(states, isolated, owner_account_id="hot", now=now + 1801.0) is None
+    assert sticky_owner_backoff_reroute_pool(states, isolated, owner_account_id="hot", now=now + 1801.0) is None
 
 
 async def _select_sticky_outcome(
@@ -537,10 +570,13 @@ async def _select_sticky_outcome(
     "kind",
     [StickySessionKind.PROMPT_CACHE, StickySessionKind.STICKY_THREAD, StickySessionKind.CODEX_SESSION],
 )
-async def test_isolated_soft_sticky_owner_is_rerouted_and_rebound(kind: StickySessionKind) -> None:
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_isolated_soft_sticky_owner_is_rerouted_and_rebound(kind: StickySessionKind, isolated: bool) -> None:
     clock = VirtualClock(epoch_value=2_000_000_000.0)
     balancer = LoadBalancer(_mock_repo_factory, clock=clock)
     balancer._runtime["hot"] = _isolated_runtime(clock.time())
+    if not isolated:
+        balancer._runtime["hot"].overload_isolated_until = None
 
     outcome = await _select_sticky_outcome(balancer, [_state("hot"), _state("clean")], _sticky_repo("hot"), kind=kind)
     assert outcome.selection.account is not None
@@ -553,7 +589,7 @@ async def test_isolated_soft_sticky_owner_is_rerouted_and_rebound(kind: StickySe
 
 
 @pytest.mark.asyncio
-async def test_soft_backoff_below_isolation_keeps_the_established_owner() -> None:
+async def test_soft_backoff_below_isolation_rebinds_the_established_owner() -> None:
     clock = VirtualClock(epoch_value=2_000_000_000.0)
     balancer = LoadBalancer(_mock_repo_factory, clock=clock)
     balancer._runtime["hot"] = RuntimeState(
@@ -562,15 +598,37 @@ async def test_soft_backoff_below_isolation_keeps_the_established_owner() -> Non
     )
     outcome = await _select_sticky_outcome(balancer, [_state("hot"), _state("clean")], _sticky_repo("hot"))
     assert outcome.selection.account is not None
-    assert outcome.selection.account.account_id == "hot"
-    assert outcome.mutation is None or outcome.mutation.account_id in (None, "hot")
+    assert outcome.selection.account.account_id == "clean"
+    assert outcome.mutation is not None and outcome.mutation.account_id == "clean"
 
 
 @pytest.mark.asyncio
-async def test_isolated_owner_is_kept_when_no_overload_free_sibling_can_be_selected() -> None:
+async def test_required_owner_is_not_released_by_sustained_backoff() -> None:
+    from tests.unit.test_load_balancer_concurrency import _make_cap_spillover_balancer
+
+    balancer, owner, sibling, sticky_repo = _make_cap_spillover_balancer("required-overload")
+    assert sibling is not None
+    balancer._runtime[owner.id] = RuntimeState(overload_backoff_until=balancer._clock.time() + 60.0)
+    selected = await balancer.select_account(
+        required_account_id=owner.id,
+        required_account_is_ownership_constraint=True,
+        required_continuity_owner=True,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+    assert selected.account is not None and selected.account.id == owner.id
+    assert sticky_repo.upserts == []
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_isolated_owner_is_kept_when_no_overload_free_sibling_can_be_selected(isolated: bool) -> None:
     clock = VirtualClock(epoch_value=2_000_000_000.0)
     balancer = LoadBalancer(_mock_repo_factory, clock=clock)
     balancer._runtime["hot"] = _isolated_runtime(clock.time())
+    if not isolated:
+        balancer._runtime["hot"].overload_isolated_until = None
 
     alone = await _select_sticky_outcome(balancer, [_state("hot")], _sticky_repo("hot"))
     assert alone.selection.account is not None and alone.selection.account.account_id == "hot"
@@ -588,10 +646,13 @@ async def test_isolated_owner_is_kept_when_no_overload_free_sibling_can_be_selec
 
 
 @pytest.mark.asyncio
-async def test_expired_isolation_returns_the_owner_to_normal_pinning() -> None:
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_expired_isolation_returns_the_owner_to_normal_pinning(isolated: bool) -> None:
     clock = VirtualClock(epoch_value=2_000_000_000.0)
     balancer = LoadBalancer(_mock_repo_factory, clock=clock)
     balancer._runtime["hot"] = _isolated_runtime(clock.time(), seconds=300.0)
+    if not isolated:
+        balancer._runtime["hot"].overload_isolated_until = None
     clock.advance(301.0)
     outcome = await _select_sticky_outcome(balancer, [_state("hot"), _state("clean")], _sticky_repo("hot"))
     assert outcome.selection.account is not None and outcome.selection.account.account_id == "hot"
@@ -683,7 +744,10 @@ def _isolate(balancer: LoadBalancer, account_id: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_isolated_bare_session_owner_is_kept_when_the_only_sibling_is_at_cap_and_spillover_is_off() -> None:
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_isolated_bare_session_owner_is_kept_when_the_only_sibling_is_at_cap_and_spillover_is_off(
+    isolated: bool,
+) -> None:
     """Request path: with cap spillover disabled the owner keeps its cap
     exemption and the isolation reroute must not pick a saturated sibling
     that lease admission then rejects (``account_stream_cap``) while the
@@ -696,6 +760,8 @@ async def test_isolated_bare_session_owner_is_kept_when_the_only_sibling_is_at_c
     balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("iso-cap-off")
     assert alternate is not None
     _isolate(balancer, owner.id)
+    if not isolated:
+        balancer._runtime[owner.id].overload_isolated_until = None
     saturated = [await balancer.acquire_account_lease(alternate.id, kind="stream") for _ in range(8)]
     raw_session = "bare-session-iso-cap-off"
     sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
@@ -732,7 +798,10 @@ async def test_isolated_bare_session_owner_is_kept_when_the_only_sibling_is_at_c
 
 
 @pytest.mark.asyncio
-async def test_isolated_and_capped_bare_session_owner_is_rebound_instead_of_request_local_spillover() -> None:
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_isolated_and_capped_bare_session_owner_is_rebound_instead_of_request_local_spillover(
+    isolated: bool,
+) -> None:
     """Request path: cap spillover alone preserves the mapping (the session
     returns to its owner when the cap clears); an owner that is also isolated
     is rebound to the sibling so later turns do not bounce across accounts."""
@@ -766,6 +835,8 @@ async def test_isolated_and_capped_bare_session_owner_is_rebound_instead_of_requ
 
     # Capped and isolated: the fallback is rebound to the sibling.
     _isolate(balancer, owner.id)
+    if not isolated:
+        balancer._runtime[owner.id].overload_isolated_until = None
     rebound = await _select()
     assert rebound.account is not None and rebound.account.id == alternate.id
     assert any(account_id == alternate.id for _, account_id, _ in sticky_repo.upserts)
@@ -858,9 +929,9 @@ def test_burst_deadline_activates_backoff_but_not_isolation() -> None:
     assert overload_backoff_active(runtime, now + 4.9)
     assert not overload_backoff_active(runtime, now + 5.0)
     assert not overload_isolation_active(runtime, now)
-    # The soft-owner reroute pool keys on isolation only: a burst keeps the owner.
+    # The soft-owner reroute pool requires sustained failures: a burst keeps the owner.
     states = [_state("hot"), _state("clean")]
-    assert sticky_owner_isolation_reroute_pool(states, {"hot": runtime}, owner_account_id="hot", now=now) is None
+    assert sticky_owner_backoff_reroute_pool(states, {"hot": runtime}, owner_account_id="hot", now=now) is None
     # The candidate filter inherits the burst deadline.
     kept = filter_overload_backoff_candidates(states, {"hot": runtime}, now=now)
     assert [state.account_id for state in kept] == ["clean"]

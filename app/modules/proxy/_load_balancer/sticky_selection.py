@@ -30,8 +30,8 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy._load_balancer.overload_backoff import (
     filter_overload_backoff_candidates,
     overload_backoff_active,
-    overload_isolation_active,
-    sticky_owner_isolation_reroute_pool,
+    sticky_owner_backoff_reroute_pool,
+    sustained_overload_backoff_active,
 )
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._load_balancer.types import (
@@ -516,11 +516,11 @@ async def run_sticky_selection_path(
                 threshold_pct=fair_share_threshold_pct,
                 redact_sensitive_details=redact_sensitive_details,
             )
-            # An isolated soft owner may be released to a sibling by the
-            # overload isolation stage (see ``_run_select_with_stickiness``).
-            owner_overload_isolated = isinstance(sticky_existing_account_id, str) and overload_isolation_active(
-                owner._runtime.get(sticky_existing_account_id), owner._clock.time()
-            )
+            # A sustained-overload soft owner may be released to a sibling
+            # as soon as backoff trips (see ``_run_select_with_stickiness``).
+            owner_overload_backed_off = isinstance(
+                sticky_existing_account_id, str
+            ) and sustained_overload_backoff_active(owner._runtime.get(sticky_existing_account_id), owner._clock.time())
             if hard_sticky:
                 # A resolved hard Codex mapping is an ownership
                 # constraint, not a preference. Scope, exclusions,
@@ -533,7 +533,7 @@ async def run_sticky_selection_path(
                 # soft hint; the authoritative preferred-owner path
                 # normally bypasses it.
                 selection_states = states
-                if owner_overload_isolated:
+                if owner_overload_backed_off:
                     # The owner keeps its cap exemption, but a sibling it
                     # may be released to must pass the caps: otherwise the
                     # reroute could pick a saturated sibling that lease
@@ -573,8 +573,8 @@ async def run_sticky_selection_path(
                 selection_states = response_create_states or selection_states
             # Cap spillover is request-local (the mapping is preserved so the
             # session returns to its owner once the cap clears) -- unless the
-            # owner is also isolated for overload, in which case the fallback
-            # is rebound like any isolation reroute instead of bouncing the
+            # owner is in sustained-overload backoff, in which case the fallback
+            # is rebound like any overload reroute instead of bouncing the
             # session across siblings turn after turn.
             preserve_existing_mapping = (
                 bare_session_key
@@ -582,7 +582,7 @@ async def run_sticky_selection_path(
                 and (
                     (
                         cap_spillover_allowed
-                        and not owner_overload_isolated
+                        and not owner_overload_backed_off
                         and any(state.account_id == sticky_existing_account_id for state in states)
                         and not any(state.account_id == sticky_existing_account_id for state in selection_states)
                     )
@@ -1420,18 +1420,18 @@ async def _select_with_stickiness(
                     )
                     burn_first_reallocate = burn_first.account is not None
 
-            # Isolation stage of the overload backoff: the pinned owner is a
+            # Sustained overload backoff: the pinned owner is a
             # *soft* mapping (hard continuity owners never reach this path)
             # and every request re-entering it is a fresh admission upstream
             # keeps rejecting, so release it while the strategy can still pick
-            # an overload-free sibling. Soft backoff levels below isolation
-            # keep the owner, so a short burst never churns warm sessions.
+            # an overload-free sibling. A burst-only cooldown does not
+            # release warm sessions; this requires repeated qualified failures.
             if sticky_kind in (
                 StickySessionKind.PROMPT_CACHE,
                 StickySessionKind.STICKY_THREAD,
                 StickySessionKind.CODEX_SESSION,
             ):
-                overload_reroute_pool = sticky_owner_isolation_reroute_pool(
+                overload_reroute_pool = sticky_owner_backoff_reroute_pool(
                     states,
                     overload_backoff_runtime,
                     owner_account_id=pinned.account_id,
@@ -1449,10 +1449,10 @@ async def _select_with_stickiness(
                     overload_reroute = candidate
                     # Account identifiers are deliberately omitted: this path
                     # has no privacy flag and private realtime diagnostics
-                    # must not expose them. The isolation-engaged warning
+                    # must not expose them. The backoff-engaged warning
                     # already names the account under the redaction policy.
                     logger.info(
-                        "sticky_owner_overload_isolation_reroute sticky_kind=%s overload_free_candidates=%d",
+                        "sticky_owner_overload_backoff_reroute sticky_kind=%s overload_free_candidates=%d",
                         sticky_kind.value,
                         len(overload_reroute_pool),
                     )

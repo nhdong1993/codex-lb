@@ -78,3 +78,7 @@ that source never enabled WebSocket. An output-item reference uses
 `model_source_owner_unavailable` with the same type. Neither denial starts a
 provider attempt or reserves quota. This preserves the classification of
 unavailable upstream state rather than treating it as malformed client input.
+
+## HTTP-only source fallback
+
+A source-only key whose effective Responses pool is not entirely WebSocket-capable receives the existing HTTP 426 handshake denial before reservation or provider I/O, while HTTP remains available. Capable source-only keys and mixed/unrestricted keys retain their existing handshake policy; mixed keys must use a provider with `supports_websockets=false` when a model-less handshake must force HTTP. Lookup failure returns a sanitized retryable 503.
