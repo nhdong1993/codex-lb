@@ -67,6 +67,39 @@ state while `/wham/usage` still returns `used_percent: 100` for a short period
 afterwards. codex-lb mirrors `/wham/usage` during that window, so the account
 stays `RATE_LIMITED` or `QUOTA_EXCEEDED` until upstream catches up.
 
+## Warm-up enrollment for new accounts
+
+Settings → Advanced → Routing → Warm-up includes **Automatically enable warm-up
+for new accounts** (`limitWarmupAutoEnableNewAccounts`). It defaults to enabled
+and controls the per-account warm-up flag for newly created browser OAuth,
+device-code OAuth, and auth.json-import accounts. Disable it to make future
+accounts require an explicit per-account opt-in. Existing account choices are
+preserved when the setting changes or their credentials are replaced.
+
+The contract is in [the warm-up enrollment requirement](spec.md#requirement-newly-authenticated-accounts-automatically-enroll-in-limit-warm-up).
+The two authentication entry points read the shared dashboard settings cache
+when persisting credentials; the ordinary settings API invalidates that cache
+on changes. Reading at completion lets a login that started earlier use the
+current enrollment policy. A setting change concurrent with persistence follows
+the snapshot read by that request.
+
+The global warm-up switch remains independent and disabled by default. An
+account's enrollment permits background warm-up only when the global switch is
+on and normal account-state, quota, stagger, cooldown, and durable attempt
+checks pass. Login/import itself does not send a warm-up probe. Requests consume
+a small amount of quota, and per-account opt-out remains available.
+
+For example, with enrollment, global warm-up, and staggered idle warm-up enabled
+and max usage set to `1%`, a newly authenticated account can receive idle warm-up
+after a fresh short-window sample reports at least `99%` remaining and its slot
+is due. Turn enrollment off and the next imported account starts with warm-up
+disabled; previously enrolled accounts remain enabled.
+
+The additive migration initializes the new settings value to true on existing
+installations without changing any account flag. During a rolling deployment,
+old replicas retain their previous enrollment behavior until replaced. There is
+no new environment variable or background job.
+
 ## Limit Warm-Up Exhaustion Threshold
 
 Reset-confirmed limit warm-up compares the usage sample from before a refresh

@@ -158,6 +158,7 @@ const SettingsPayloadSchema = z.looseObject({
   totpConfigured: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
   modelPlanRoutingPolicies: ModelPlanRoutingPoliciesSchema.nullable().optional(),
+  limitWarmupAutoEnableNewAccounts: z.boolean().optional(),
   limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
   hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
 });

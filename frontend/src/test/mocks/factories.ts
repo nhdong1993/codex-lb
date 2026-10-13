@@ -551,6 +551,7 @@ export function createDashboardSettings(
 		hideUpstreamQuotaFromApiKeys: false,
 		limitWarmupEnabled: false,
 		modelPlanRoutingPolicies: {},
+		limitWarmupAutoEnableNewAccounts: true,
 		limitWarmupWindows: "both",
 		limitWarmupModel: "auto",
 		limitWarmupPrompt: "Say OK.",

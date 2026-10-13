@@ -1404,6 +1404,8 @@
   "settings.routing.paceSmoothing.description": "Smooth the displayed weekly pace gap over recent quota samples.",
   "settings.routing.limitWarmup.label": "Limit warm-up",
   "settings.routing.limitWarmup.description": "When an opted-in account's quota window is confirmed to have newly reset, send one small probe request to verify the account responds. Probes are real requests using the model and prompt below and consume a small amount of quota.",
+  "settings.routing.limitWarmup.newAccounts.label": "Automatically enable warm-up for new accounts",
+  "settings.routing.limitWarmup.newAccounts.description": "Applies to new OAuth logins and auth.json imports. Existing account choices stay unchanged. Requests still require global warm-up to be enabled.",
   "settings.routing.limitWarmup.ariaLabel": "Enable limit warm-up",
   "settings.routing.limitWarmup.modelAria": "Warm-up model",
   "settings.routing.limitWarmup.cooldownAria": "Warm-up cooldown",

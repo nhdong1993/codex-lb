@@ -30,6 +30,7 @@ from app.core.clients.usage import (
     fetch_usage,
 )
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
@@ -507,6 +508,7 @@ class AccountsService:
         plan_type = coerce_account_plan_type(claims.plan_type, DEFAULT_PLAN)
         last_refresh = to_utc_naive(auth.last_refresh_at) if auth.last_refresh_at else utcnow()
 
+        dashboard_settings = await get_settings_cache().get()
         account = Account(
             id=account_id,
             chatgpt_account_id=raw_account_id,
@@ -521,6 +523,7 @@ class AccountsService:
             last_refresh=last_refresh,
             status=AccountStatus.ACTIVE,
             deactivation_reason=None,
+            limit_warmup_enabled=dashboard_settings.limit_warmup_auto_enable_new_accounts,
         )
 
         saved = await self._repo.upsert_account_slot(account)

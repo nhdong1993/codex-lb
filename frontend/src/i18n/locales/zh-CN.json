@@ -1404,6 +1404,8 @@
   "settings.routing.paceSmoothing.description": "用最近的配额样本平滑显示的周节奏差距。",
   "settings.routing.limitWarmup.label": "额度预热",
   "settings.routing.limitWarmup.description": "当已选择加入的账户的配额窗口被确认刚刚重置时，发送一条小型探测请求以验证账户可正常响应。探测是使用下方模型与提示词的真实请求，会消耗少量配额。",
+  "settings.routing.limitWarmup.newAccounts.label": "自动为新账户启用预热",
+  "settings.routing.limitWarmup.newAccounts.description": "适用于新 OAuth 登录和 auth.json 导入。现有账户的设置保持不变。发送请求仍需启用全局预热。",
   "settings.routing.limitWarmup.ariaLabel": "启用额度预热",
   "settings.routing.limitWarmup.modelAria": "预热模型",
   "settings.routing.limitWarmup.cooldownAria": "预热冷却时间",

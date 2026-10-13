@@ -78,6 +78,7 @@ class DashboardSettingsData:
     api_key_auth_enabled: bool
     hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
+    limit_warmup_auto_enable_new_accounts: bool
     limit_warmup_windows: str
     limit_warmup_model: str
     limit_warmup_prompt: str
@@ -173,6 +174,7 @@ class DashboardSettingsUpdateData:
     api_key_auth_enabled: bool
     hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
+    limit_warmup_auto_enable_new_accounts: bool
     limit_warmup_windows: str
     limit_warmup_model: str
     limit_warmup_prompt: str
@@ -298,6 +300,7 @@ class SettingsService:
             api_key_auth_enabled=payload.api_key_auth_enabled,
             hide_upstream_quota_from_api_keys=payload.hide_upstream_quota_from_api_keys,
             limit_warmup_enabled=payload.limit_warmup_enabled,
+            limit_warmup_auto_enable_new_accounts=payload.limit_warmup_auto_enable_new_accounts,
             limit_warmup_windows=payload.limit_warmup_windows,
             limit_warmup_model=payload.limit_warmup_model,
             limit_warmup_prompt=payload.limit_warmup_prompt,
@@ -476,6 +479,7 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         api_key_auth_enabled=row.api_key_auth_enabled,
         hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
         limit_warmup_enabled=row.limit_warmup_enabled,
+        limit_warmup_auto_enable_new_accounts=row.limit_warmup_auto_enable_new_accounts,
         limit_warmup_windows=row.limit_warmup_windows,
         limit_warmup_model=row.limit_warmup_model,
         limit_warmup_prompt=row.limit_warmup_prompt,
