@@ -597,30 +597,16 @@ class _StreamingMixin(_StreamingRetryMixin):
             iterator = _facade()._stream_iterator_after_capacity_admission(stream)
             try:
                 first = await iterator.__anext__()
-            except StopAsyncIteration:
+            except (StopAsyncIteration, aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 response_create_lease.release()
                 await proxy._load_balancer.release_account_lease(account_response_create_lease)
                 account_response_create_lease = None
                 status = "error"
-                error_code = "stream_incomplete"
-                error_message = "Upstream websocket closed before response.completed"
-                settlement.record_success = False
-                terminal_event_seen = settlement.account_health_error = True
-                settlement.error = {"message": error_message}
-                yield _stream_transport_failure_event_or_raise(
-                    error_code,
-                    error_message,
-                    response_id=request_id,
-                    preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
+                error_code, error_message = (
+                    ("stream_incomplete", "Upstream websocket closed before response.completed")
+                    if isinstance(exc, StopAsyncIteration)
+                    else ("upstream_unavailable", str(exc) or "Request to upstream timed out")
                 )
-                return
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                response_create_lease.release()
-                await proxy._load_balancer.release_account_lease(account_response_create_lease)
-                account_response_create_lease = None
-                status = "error"
-                error_code = "upstream_unavailable"
-                error_message = str(exc) or "Request to upstream timed out"
                 settlement.record_success = False
                 terminal_event_seen = settlement.account_health_error = True
                 settlement.error = {"message": error_message}
