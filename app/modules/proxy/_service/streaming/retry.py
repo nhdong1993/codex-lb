@@ -486,6 +486,9 @@ class _StreamingRetryMixin:
         excluded_account_ids: set[str] = set()
         transient_failed_account_id: str | None = None
         hard_affinity_same_owner_retry_attempted = False
+        # One cross-account replay of an output-free capacity terminal per
+        # request (openspec: retry-http-accepted-overload-on-another-account).
+        capacity_replay_used = False
         # Owner-bound burst 429 same-account retries; reset when the counter's
         # account differs from the one being retried (see the closures below).
         burst_same_account_retries = 0
@@ -2223,6 +2226,13 @@ class _StreamingRetryMixin:
                                 request_id,
                                 allow_retry_flag,
                                 request_started_at=start,
+                                allow_capacity_replay=(
+                                    allow_retry_flag
+                                    and not capacity_replay_used
+                                    and resilience.deterministic_failover_enabled
+                                    and payload.previous_response_id is None
+                                    and not _stream_owner_bound_to(account)
+                                ),
                                 allow_transient_retry=(
                                     transient_retries < _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1
                                     or allow_retry_flag
@@ -2810,6 +2820,15 @@ class _StreamingRetryMixin:
                         continue
                     await _handle_or_defer_keyed_stream_health(account, exc.error, exc.code)
                     last_retryable_stream_error = exc
+                    if exc.capacity_replay:
+                        capacity_replay_used = True
+                        _facade().logger.info(
+                            "http_capacity_replay request_id=%s account_id=%s attempt=%d code=%s",
+                            request_id,
+                            account.id,
+                            attempt + 1,
+                            exc.code,
+                        )
                     if exc.exclude_account:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None

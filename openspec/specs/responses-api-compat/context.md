@@ -102,6 +102,34 @@ and Codex-session ownership still constrain replacement selection; keyed health
 updates wait for reservation settlement. See the normative scenarios in
 [spec.md](spec.md) rather than treating every accepted failure as replayable.
 
+### Direct SSE capacity replay
+
+Direct HTTP/SSE streams (upstream transport HTTP, not the bridge) get the same
+output-free proof through a different mechanism. Instead of rewriting a
+lifecycle the client already saw, a movable stream holds its
+`response.created` / `response.in_progress` prelude until the first other
+upstream event. If that event is an output-free capacity terminal
+(`server_is_overloaded`, `overloaded_error`, `model_at_capacity`, or the
+selected-model capacity message, with no output items and no billed
+output/reasoning tokens), the held frames are discarded and the request is sent
+once more on another account through the normal pre-visible failover; the
+client only sees the replacement's lifecycle. Anything else releases the held
+frames unchanged, so successful turns are byte-identical and only reach the
+client at most one upstream event later; response-create admission is still
+released on the first upstream frame.
+
+Production evidence that motivated it (2026-10-11..13, Plus accounts, peak
+hours): direct HTTP admissions were rejected with `server_is_overloaded` about
+20 % of the time versus about 2 % for WebSocket turns on an open connection, and
+every rejection arrived 2-27 s after dispatch with zero output. One replay per
+request bounds the extra upstream load to a single admission; owner-bound
+requests (`previous_response_id`, file pins, turn-state owners,
+`single_account`) keep the old fail-closed surfacing, and the
+`deterministic_failover_enabled` toggle turns the replay off without a deploy.
+Each attempt keeps its own request-log row, so overload stays visible in the
+dashboard even when the client succeeded; grep `http_capacity_replay` in the
+service log to count replays.
+
 The imported abandoned-operation sweeper also changes persisted bridge states.
 An older replica can deserialize the string `abandoned` but lacks the new
 writer guard that keeps abandoned rows immutable. A rolling deployment with

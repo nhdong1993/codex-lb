@@ -237,6 +237,430 @@ async def test_stream_overload_alias_surfaces_without_replay(async_client, monke
     assert seen_account_ids == [f"acc_{error_code}"]
 
 
+# ===========================================================================
+# Streaming — output-free capacity terminal replay
+# (openspec: retry-http-accepted-overload-on-another-account)
+# ===========================================================================
+
+
+def _created_sse_event(response_id: str) -> str:
+    return _sse_event({"type": "response.created", "response": {"id": response_id, "status": "in_progress"}})
+
+
+def _in_progress_sse_event(response_id: str) -> str:
+    return _sse_event({"type": "response.in_progress", "response": {"id": response_id, "status": "in_progress"}})
+
+
+def _accepted_failed_sse_event(
+    response_id: str,
+    code: str = "server_is_overloaded",
+    message: str = "Our servers are currently overloaded. Please try again later.",
+    usage: dict | None = None,
+) -> str:
+    response: dict = {"id": response_id, "status": "failed", "error": {"code": code, "message": message}}
+    if usage is not None:
+        response["usage"] = usage
+    return _sse_event({"type": "response.failed", "response": response})
+
+
+def _output_item_added_sse_event(response_id: str) -> str:
+    return _sse_event(
+        {
+            "type": "response.output_item.added",
+            "response_id": response_id,
+            "output_index": 0,
+            "item": {"id": "msg_1", "type": "message", "role": "assistant", "content": []},
+        }
+    )
+
+
+def _completed_sse_events(response_id: str) -> list[str]:
+    return [_created_sse_event(response_id), _in_progress_sse_event(response_id), _success_sse_event(response_id)]
+
+
+def _terminal_error_code(event: dict) -> str | None:
+    if event.get("type") == "response.failed":
+        return ((event.get("response") or {}).get("error") or {}).get("code")
+    if event.get("type") == "error":
+        nested = event.get("error")
+        return nested.get("code") if isinstance(nested, dict) else event.get("code")
+    return None
+
+
+def _event_types(lines: list[str]) -> list[str | None]:
+    # The route's own early ``codex.keepalive`` heartbeat is not an upstream frame.
+    return [event.get("type") for event in _extract_events(lines) if event.get("type") != "codex.keepalive"]
+
+
+def _install_scripted_upstream(monkeypatch, attempts: list[list[str]]) -> list[str | None]:
+    """Serve one scripted SSE frame list per upstream POST, in call order."""
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        for line in attempts[len(seen_account_ids) - 1]:
+            yield line
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    return seen_account_ids
+
+
+async def _stream_codex_responses(async_client, payload: dict | None = None, headers: dict | None = None) -> list[str]:
+    body = payload or {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=body, headers=headers) as resp:
+        assert resp.status_code == 200
+        return [line async for line in resp.aiter_lines() if line]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+        ("overloaded_error", "Our servers are currently overloaded. Please try again later."),
+        ("model_at_capacity", "Model is at capacity."),
+        ("invalid_request_error", "Selected model is at capacity. Please try a different model."),
+    ],
+)
+async def test_stream_accepted_capacity_terminal_is_replayed_on_another_account(
+    async_client, monkeypatch, code, message
+):
+    await _import_account(async_client, "acc_cap_replay_a", "cap-replay-a@example.com")
+    await _import_account(async_client, "acc_cap_replay_b", "cap-replay-b@example.com")
+    seen_account_ids = _install_scripted_upstream(
+        monkeypatch,
+        [
+            [
+                _created_sse_event("resp_cap_failed"),
+                _in_progress_sse_event("resp_cap_failed"),
+                _accepted_failed_sse_event("resp_cap_failed", code, message),
+            ],
+            _completed_sse_events("resp_cap_ok"),
+        ],
+    )
+
+    lines = await _stream_codex_responses(async_client)
+
+    assert len(seen_account_ids) == 2
+    assert seen_account_ids[0] != seen_account_ids[1]
+    events = _extract_events(lines)
+    created = [event for event in events if event.get("type") == "response.created"]
+    assert [event["response"]["id"] for event in created] == ["resp_cap_ok"]
+    assert not [event for event in events if _terminal_error_code(event)]
+    assert events[-1]["type"] == "response.completed"
+    assert events[-1]["response"]["id"] == "resp_cap_ok"
+
+
+@pytest.mark.asyncio
+async def test_stream_first_event_overload_is_replayed_on_another_account(async_client, monkeypatch):
+    await _import_account(async_client, "acc_cap_first_a", "cap-first-a@example.com")
+    await _import_account(async_client, "acc_cap_first_b", "cap-first-b@example.com")
+    seen_account_ids = _install_scripted_upstream(
+        monkeypatch,
+        [[_overload_sse_event("server_is_overloaded")], _completed_sse_events("resp_cap_first_ok")],
+    )
+
+    lines = await _stream_codex_responses(async_client)
+
+    assert len(seen_account_ids) == 2
+    assert seen_account_ids[0] != seen_account_ids[1]
+    assert _event_types(lines) == ["response.created", "response.in_progress", "response.completed"]
+
+
+@pytest.mark.asyncio
+async def test_stream_capacity_replay_failure_surfaces_one_terminal_without_a_third_post(async_client, monkeypatch):
+    await _import_account(async_client, "acc_cap_twice_a", "cap-twice-a@example.com")
+    await _import_account(async_client, "acc_cap_twice_b", "cap-twice-b@example.com")
+    await _import_account(async_client, "acc_cap_twice_c", "cap-twice-c@example.com")
+    failed_attempt = [
+        _created_sse_event("resp_cap_twice"),
+        _in_progress_sse_event("resp_cap_twice"),
+        _accepted_failed_sse_event("resp_cap_twice"),
+    ]
+    seen_account_ids = _install_scripted_upstream(
+        monkeypatch, [failed_attempt, failed_attempt, _completed_sse_events("resp_never")]
+    )
+
+    lines = await _stream_codex_responses(async_client)
+
+    assert len(seen_account_ids) == 2
+    events = _extract_events(lines)
+    assert [event["type"] for event in events if event["type"] == "response.created"] == ["response.created"]
+    assert [_terminal_error_code(event) for event in events if _terminal_error_code(event)] == ["server_is_overloaded"]
+
+
+@pytest.mark.asyncio
+async def test_stream_capacity_replay_without_alternate_account_surfaces_the_capacity_code(async_client, monkeypatch):
+    await _import_account(async_client, "acc_cap_single", "cap-single@example.com")
+    seen_account_ids = _install_scripted_upstream(
+        monkeypatch,
+        [
+            [
+                _created_sse_event("resp_cap_single"),
+                _in_progress_sse_event("resp_cap_single"),
+                _accepted_failed_sse_event("resp_cap_single"),
+            ],
+            _completed_sse_events("resp_never"),
+        ],
+    )
+
+    lines = await _stream_codex_responses(async_client)
+
+    assert seen_account_ids == ["acc_cap_single"]
+    events = _extract_events(lines)
+    assert [_terminal_error_code(event) for event in events if _terminal_error_code(event)] == ["server_is_overloaded"]
+    assert "no_accounts" not in json.dumps(events)
+
+
+@pytest.mark.asyncio
+async def test_stream_capacity_replay_records_overload_health_and_excludes_the_account(
+    async_client, app_instance, monkeypatch
+):
+    await _import_account(async_client, "acc_cap_health_a", "cap-health-a@example.com")
+    await _import_account(async_client, "acc_cap_health_b", "cap-health-b@example.com")
+    service = get_proxy_service_for_app(app_instance)
+    original_health = service._handle_stream_error
+    health_writes: list[tuple[str, str]] = []
+
+    async def health(account, error, code, http_status=None, **kwargs):
+        health_writes.append((account.chatgpt_account_id, code))
+        return await original_health(account, error, code, http_status=http_status, **kwargs)
+
+    monkeypatch.setattr(service, "_handle_stream_error", health)
+    seen_account_ids = _install_scripted_upstream(
+        monkeypatch,
+        [
+            [_created_sse_event("resp_cap_health"), _accepted_failed_sse_event("resp_cap_health")],
+            _completed_sse_events("resp_cap_health_ok"),
+        ],
+    )
+
+    await _stream_codex_responses(async_client)
+    assert await service.drain_persistence_tasks(timeout_seconds=5)
+
+    assert health_writes == [(seen_account_ids[0], "server_is_overloaded")]
+    async with SessionLocal() as session:
+        from app.db.models import RequestLog
+
+        logs = list(await session.scalars(select(RequestLog).order_by(RequestLog.id)))
+    assert [(log.status, log.error_code) for log in logs] == [("error", "server_is_overloaded"), ("success", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failed_attempt",
+    [
+        pytest.param(
+            [
+                _created_sse_event("resp_cap_out"),
+                _output_item_added_sse_event("resp_cap_out"),
+                _accepted_failed_sse_event("resp_cap_out"),
+            ],
+            id="output-before-terminal",
+        ),
+        pytest.param(
+            [
+                _created_sse_event("resp_cap_billed"),
+                _accepted_failed_sse_event("resp_cap_billed", usage={"input_tokens": 3, "output_tokens": 2}),
+            ],
+            id="terminal-reports-output-tokens",
+        ),
+        pytest.param(
+            [
+                _created_sse_event("resp_cap_reasoning"),
+                _accepted_failed_sse_event(
+                    "resp_cap_reasoning",
+                    usage={"output_tokens": 0, "output_tokens_details": {"reasoning_tokens": 4}},
+                ),
+            ],
+            id="terminal-reports-reasoning-tokens",
+        ),
+        pytest.param(
+            [
+                _created_sse_event("resp_cap_server_error"),
+                _accepted_failed_sse_event(
+                    "resp_cap_server_error", "server_error", "An error occurred while processing your request."
+                ),
+            ],
+            id="server-error",
+        ),
+        pytest.param(
+            [
+                _created_sse_event("resp_cap_quota"),
+                _accepted_failed_sse_event(
+                    "resp_cap_quota",
+                    "usage_limit_reached",
+                    "Selected model is at capacity. Please try a different model.",
+                ),
+            ],
+            id="quota-code-with-capacity-message",
+        ),
+    ],
+)
+async def test_stream_terminal_without_output_free_capacity_proof_is_not_replayed(
+    async_client, monkeypatch, failed_attempt
+):
+    await _import_account(async_client, "acc_cap_noproof_a", "cap-noproof-a@example.com")
+    await _import_account(async_client, "acc_cap_noproof_b", "cap-noproof-b@example.com")
+    seen_account_ids = _install_scripted_upstream(monkeypatch, [failed_attempt, _completed_sse_events("resp_never")])
+
+    lines = await _stream_codex_responses(async_client)
+
+    # usage_limit_reached keeps its own account-recovery failover; every other
+    # case surfaces the first attempt unchanged, prelude included.
+    if _terminal_error_code(json.loads(failed_attempt[-1][6:])) == "usage_limit_reached":
+        return
+    assert len(seen_account_ids) == 1
+    assert _event_types(lines) == [json.loads(line[6:])["type"] for line in failed_attempt]
+
+
+@pytest.mark.asyncio
+async def test_keyed_capacity_replay_settles_the_reservation_before_the_health_write(
+    async_client, app_instance, monkeypatch
+):
+    await _import_account(async_client, "acc_cap_keyed_a", "cap-keyed-a@example.com")
+    await _import_account(async_client, "acc_cap_keyed_b", "cap-keyed-b@example.com")
+    configured = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert configured.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "capacity-replay-reservation",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000}],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    service = get_proxy_service_for_app(app_instance)
+    original_health = service._handle_stream_error
+    statuses_at_health: list[str] = []
+
+    async def health(account, error, code, http_status=None, **kwargs):
+        if code == "server_is_overloaded":
+            async with SessionLocal() as session:
+                statuses = list(
+                    await session.scalars(
+                        select(ApiKeyUsageReservation.status).where(ApiKeyUsageReservation.api_key_id == key_id)
+                    )
+                )
+            # The replacement attempt succeeded, so the reservation was finalized
+            # (never still ``reserved``) before the deferred capacity health write.
+            assert statuses == ["finalized"]
+            statuses_at_health.extend(statuses)
+        return await original_health(account, error, code, http_status=http_status, **kwargs)
+
+    monkeypatch.setattr(service, "_handle_stream_error", health)
+    seen_account_ids = _install_scripted_upstream(
+        monkeypatch,
+        [
+            [_created_sse_event("resp_cap_keyed"), _accepted_failed_sse_event("resp_cap_keyed")],
+            _completed_sse_events("resp_cap_keyed_ok"),
+        ],
+    )
+
+    lines = await _stream_codex_responses(async_client, headers={"Authorization": f"Bearer {created.json()['key']}"})
+
+    assert len(seen_account_ids) == 2
+    assert _event_types(lines)[-1] == "response.completed"
+    assert await service.drain_persistence_tasks(timeout_seconds=5)
+    assert len(statuses_at_health) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_capacity_terminal_is_not_replayed_when_deterministic_failover_is_disabled(
+    async_client, monkeypatch
+):
+    await _import_account(async_client, "acc_cap_toggle_a", "cap-toggle-a@example.com")
+    await _import_account(async_client, "acc_cap_toggle_b", "cap-toggle-b@example.com")
+    stored = await async_client.put("/api/settings", json={"deterministicFailoverEnabled": False})
+    assert stored.status_code == 200
+    failed_attempt = [_created_sse_event("resp_cap_toggle"), _accepted_failed_sse_event("resp_cap_toggle")]
+    seen_account_ids = _install_scripted_upstream(monkeypatch, [failed_attempt, _completed_sse_events("resp_never")])
+
+    lines = await _stream_codex_responses(async_client)
+
+    assert len(seen_account_ids) == 1
+    assert _event_types(lines) == ["response.created", "response.failed"]
+
+
+@pytest.mark.asyncio
+async def test_stream_capacity_terminal_is_not_replayed_for_owner_bound_requests(async_client, monkeypatch):
+    await _import_account(async_client, "acc_cap_owner_a", "cap-owner-a@example.com")
+    await _import_account(async_client, "acc_cap_owner_b", "cap-owner-b@example.com")
+    failed_attempt = [_created_sse_event("resp_cap_owner"), _accepted_failed_sse_event("resp_cap_owner")]
+    seen_account_ids = _install_scripted_upstream(monkeypatch, [failed_attempt, _completed_sse_events("resp_never")])
+
+    lines = await _stream_codex_responses(
+        async_client, payload=_BURST_OWNER_BOUND_PAYLOAD, headers=_NATIVE_CODEX_HEADERS
+    )
+
+    assert len(seen_account_ids) == 1
+    events = _extract_events(lines)
+    assert [_terminal_error_code(event) for event in events if _terminal_error_code(event)] == ["server_is_overloaded"]
+
+
+@pytest.mark.asyncio
+async def test_stream_successful_turn_is_forwarded_unchanged_through_the_prelude_hold(async_client, monkeypatch):
+    await _import_account(async_client, "acc_cap_ok_a", "cap-ok-a@example.com")
+    await _import_account(async_client, "acc_cap_ok_b", "cap-ok-b@example.com")
+    frames = [
+        _created_sse_event("resp_cap_unchanged"),
+        _in_progress_sse_event("resp_cap_unchanged"),
+        _output_item_added_sse_event("resp_cap_unchanged"),
+        _success_sse_event("resp_cap_unchanged"),
+    ]
+    seen_account_ids = _install_scripted_upstream(monkeypatch, [frames])
+
+    lines = await _stream_codex_responses(async_client)
+
+    assert len(seen_account_ids) == 1
+    assert _event_types(lines) == [json.loads(line[6:])["type"] for line in frames]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_capacity_replay_keeps_the_public_stream_contract(async_client, monkeypatch):
+    await _import_account(async_client, "acc_cap_v1_a", "cap-v1-a@example.com")
+    await _import_account(async_client, "acc_cap_v1_b", "cap-v1-b@example.com")
+    seen_account_ids = _install_scripted_upstream(
+        monkeypatch,
+        [
+            [_created_sse_event("resp_cap_v1_failed"), _accepted_failed_sse_event("resp_cap_v1_failed")],
+            _completed_sse_events("resp_cap_v1_ok"),
+        ],
+    )
+
+    payload = {"model": "gpt-5.1", "input": "hi", "stream": True}
+    async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    assert len(seen_account_ids) == 2
+    types = _event_types(lines)
+    assert types[0] == "response.created"
+    assert types.count("response.created") == 1
+    assert "codex.keepalive" not in types
+    assert types[-1] == "response.completed"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_non_streaming_capacity_replay_returns_the_replacement_result(async_client, monkeypatch):
+    await _import_account(async_client, "acc_cap_v1_collect_a", "cap-v1-collect-a@example.com")
+    await _import_account(async_client, "acc_cap_v1_collect_b", "cap-v1-collect-b@example.com")
+    seen_account_ids = _install_scripted_upstream(
+        monkeypatch,
+        [
+            [_created_sse_event("resp_cap_collect_failed"), _accepted_failed_sse_event("resp_cap_collect_failed")],
+            _completed_sse_events("resp_cap_collect_ok"),
+        ],
+    )
+
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.1", "input": "hi"})
+
+    assert response.status_code == 200
+    assert len(seen_account_ids) == 2
+    assert response.json()["id"] == "resp_cap_collect_ok"
+
+
 @pytest.mark.asyncio
 async def test_stream_timeout_surfaces_without_replay(async_client, monkeypatch):
     """An upstream terminal timeout is not proven pre-dispatch work."""
@@ -299,8 +723,8 @@ async def test_stream_model_capacity_without_response_id_surfaces_without_replay
 
 
 @pytest.mark.asyncio
-async def test_stream_raw_capacity_error_with_proxy_request_id_surfaces_without_replay(async_client, monkeypatch):
-    """A terminal upstream error remains terminal even with a proxy-generated id."""
+async def test_stream_raw_capacity_error_on_a_single_account_surfaces_the_capacity_code(async_client, monkeypatch):
+    """A raw capacity frame with no alternate account surfaces its code, never ``no_accounts``."""
     await _import_account(async_client, "acc_raw_model_capacity_retry", "raw-model-capacity@example.com")
 
     call_count = 0
@@ -327,10 +751,10 @@ async def test_stream_raw_capacity_error_with_proxy_request_id_surfaces_without_
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
 
+    # The output-free capacity terminal is replayable, but the only account is
+    # excluded for the replay, so the capacity error surfaces after one POST.
     events = _extract_events(lines)
-    errors = [event for event in events if event.get("type") == "error"]
-    assert len(errors) == 1
-    assert errors[0]["code"] == "invalid_request_error"
+    assert [_terminal_error_code(event) for event in events if _terminal_error_code(event)] == ["invalid_request_error"]
     assert seen_account_ids == ["acc_raw_model_capacity_retry"]
 
 

@@ -271,6 +271,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.capacity_replay import hold_capacity_replay_prelude, raise_if_capacity_replay
 from app.modules.proxy._service.streaming.helpers import (
     _classify_terminal_stream_error_frame,
     _mark_downstream_stream_cancelled,
@@ -482,6 +483,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         allow_retry: bool,
         *,
         request_started_at: float,
+        allow_capacity_replay: bool = False,
         allow_transient_retry: bool = False,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
@@ -575,15 +577,21 @@ class _StreamingMixin(_StreamingRetryMixin):
             attempt_started_at = clock.monotonic()
             latency_queue_ms = max(0, int((attempt_started_at - request_started_at) * 1000))
             await model_admission.ensure_native_dispatch_allowed(account, model)
-            iterator = _native_stream_iterator(
-                account,
-                payload,
-                headers,
-                access_token,
-                route=route,
-                route_trace=route_trace,
-                upstream_stream_transport=upstream_stream_transport,
-                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            iterator = hold_capacity_replay_prelude(
+                _native_stream_iterator(
+                    account,
+                    payload,
+                    headers,
+                    access_token,
+                    route=route,
+                    route_trace=route_trace,
+                    upstream_stream_transport=upstream_stream_transport,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                ),
+                allow_capacity_replay,
+                proxy._load_balancer,
+                response_create_lease,
+                account_response_create_lease,
             )
             try:
                 first = await iterator.__anext__()
@@ -704,6 +712,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         )
                     if allow_retry and _facade()._should_retry_stream_error(code, error_message):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
+                    raise_if_capacity_replay(iterator, code, upstream_error)
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
                     upstream_error,

@@ -676,11 +676,21 @@ def _request_log_client_fields(
 
 
 class _RetryableStreamError(Exception):
-    def __init__(self, code: str, error: UpstreamError, *, exclude_account: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        error: UpstreamError,
+        *,
+        exclude_account: bool = False,
+        capacity_replay: bool = False,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.error = error
         self.exclude_account = exclude_account
+        # Raised for an output-free capacity terminal on direct SSE; the retry
+        # loop grants a request at most one of these replays.
+        self.capacity_replay = capacity_replay
 
 
 class _WebSocketConnectFailureEmitted(Exception):
