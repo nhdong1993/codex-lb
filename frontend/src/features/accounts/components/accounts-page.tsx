@@ -12,6 +12,7 @@ import { AccountClockProvider } from "@/features/accounts/components/account-sub
 import { Checkbox } from "@/components/ui/checkbox";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { AccountDetail } from "@/features/accounts/components/account-detail";
+import { AccountDistributionCharts } from "@/features/accounts/components/account-distribution-charts";
 import { cn } from "@/lib/utils";
 import {
   AccountList,
@@ -187,6 +188,8 @@ function AccountsPageContent() {
     accountBindingMutation.isPending ||
     testEndpointMutation.isPending;
 
+  // Action errors outrank query errors: a failed background poll keeps its
+  // error while stale data stays usable, and must not mask a later action error.
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
@@ -200,10 +203,11 @@ function AccountsPageContent() {
     getErrorMessageOrNull(subscriptionRefreshMutation.error) ||
     getErrorMessageOrNull(exportAuthMutation.error) ||
     getErrorMessageOrNull(updateMutation.error) ||
-    getErrorMessageOrNull(settingsQuery.error) ||
-    getErrorMessageOrNull(upstreamProxyQuery.error) ||
     getErrorMessageOrNull(accountBindingMutation.error) ||
-    getErrorMessageOrNull(testEndpointMutation.error);
+    getErrorMessageOrNull(testEndpointMutation.error) ||
+    getErrorMessageOrNull(accountsQuery.error) ||
+    getErrorMessageOrNull(settingsQuery.error) ||
+    getErrorMessageOrNull(upstreamProxyQuery.error);
 
   const accountDetail = (
     <AccountDetail
@@ -319,6 +323,8 @@ function AccountsPageContent() {
       {mutationError ? (
         <AlertMessage variant="error">{mutationError}</AlertMessage>
       ) : null}
+
+      {accountsQuery.data ? <AccountDistributionCharts accounts={accounts} /> : null}
 
       {!accountsQuery.data ? (
         <AccountsSkeleton />

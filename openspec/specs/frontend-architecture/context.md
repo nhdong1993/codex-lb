@@ -115,3 +115,13 @@ A small red dot above Reset (N) helps identify credits due to expire within 72 h
 APIs retains the original sidebar/detail layout by default and remembers an optional full-width List view in browser storage. Both modes share search, status/usage filters and sorting. List shows identity, status, lifetime requests, expiry, last use and the existing pooled/limit bars; a row opens the existing detail and management UI in a dialog. Detail queries are enabled only while the inline panel or dialog is visible. The List paginates at 24 keys after filtering and sorting.
 
 Key not used means there is neither a last-used timestamp nor a positive lifetime request count in the current list snapshot. The overview Used/Idle counts use the same rule. For example, a key with an old timestamp but no retained request history remains Used; a new key with no timestamp and zero requests matches Key not used. The status filter can further restrict this to active or disabled keys. A server flush or in-flight request can delay recorded evidence, so this filter reflects recorded usage rather than an instantaneous no-traffic guarantee. It does not mutate keys or fetch additional per-key histories.
+
+## Accounts inventory charts
+
+The charts provide an inventory overview alongside account management. Requirements live in [the frontend specification](spec.md#requirement-accounts-inventory-distribution-charts).
+
+Counts represent local account slots, including separate workspace credentials for the same login. They use the full accounts response, so searching for one account does not change fleet totals. A plan key is trimmed and lowercased before grouping; blank plans and unknown statuses have an explicit Unknown bucket. Re-auth required remains distinct from upstream deactivation.
+
+For example, two Plus accounts (one active, one requiring re-authentication) and one deactivated Pro account show Plus 2/3, Pro 1/3; status groups each show 1/3. The center of both charts reads 3.
+
+These charts summarize inventory, not available routing capacity or remaining quota. They add no network requests, dependencies, settings or stored counters. Loading and error states follow the page, while a successful empty response shows neutral rings and zero. Percentages are rounded for display; exact counts remain visible. Existing themes, languages and reduced-motion preferences apply.

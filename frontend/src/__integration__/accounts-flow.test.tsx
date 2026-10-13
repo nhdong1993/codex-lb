@@ -71,7 +71,8 @@ describe("accounts flow integration", () => {
     renderWithProviders(<App />);
 
     expect(await screen.findByRole("heading", { name: "Accounts" })).toBeInTheDocument();
-    await user.click(await screen.findByRole("button", { name: /primary@example.com/ }));
+    const accountList = within(await screen.findByTestId("accounts-list-panel"));
+    await user.click(await accountList.findByRole("button", { name: /primary@example.com/ }));
     await user.click(await screen.findByRole("button", { name: "Edit alias" }));
     const aliasInput = await screen.findByLabelText("Account alias");
     await user.clear(aliasInput);
@@ -85,7 +86,7 @@ describe("accounts flow integration", () => {
     await user.type(screen.getByPlaceholderText("Search accounts..."), "personal");
     expect(screen.getAllByText("Personal Plus").length).toBeGreaterThan(0);
     expect(screen.queryByText("secondary@example.com")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Personal Plus/ }));
+    await user.click(accountList.getByRole("button", { name: /Personal Plus/ }));
 
     await user.click(await screen.findByRole("button", { name: "Edit alias" }));
     const aliasInputToClear = await screen.findByLabelText("Account alias");

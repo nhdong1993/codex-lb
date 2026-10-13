@@ -15,6 +15,12 @@ The **Request Logs** token cell shows total tokens, with reported cached-input a
 
 The **Reports** page shows the reported reasoning total for the selected date range and filters. Its coverage count states how many requests supplied a reasoning value. The daily breakdown and CSV export include the same reasoning field.
 
+## Account Inventory
+
+The **Accounts** page shows two donut charts: accounts by plan and accounts by status. Each chart includes the total account count and category counts with percentages. Status groups distinguish Active, Paused, Rate limited, Quota exceeded, Re-auth required and Deactivated.
+
+These totals cover all loaded accounts in Detail, List and Grid views, even while the account list is filtered or paginated. For example, two Plus accounts and one Pro account show Plus 2 (66.7%) and Pro 1 (33.3%). Each saved workspace account counts separately. The charts update with account data; they describe inventory rather than available routing capacity.
+
 ## Missing Usage
 
 A reported zero remains `0`. A missing value remains unknown and appears as `—` in the daily report or is omitted from request details. codex-lb does not turn missing usage into zero.
