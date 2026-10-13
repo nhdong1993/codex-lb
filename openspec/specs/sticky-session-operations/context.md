@@ -65,8 +65,8 @@ the request remains fail-closed.
 
 ## Operational Notes
 
-Beta.5 overload isolation may release soft sticky owners to an eligible sibling,
-unlike ordinary soft backoff. For example, an isolated prompt-cache owner A can
+Sustained-overload backoff may release soft sticky owners to an eligible sibling
+from the first trip, without waiting for isolation. For example, a backed-off prompt-cache owner A can
 be rebound to B, but a response/file/turn-state owner cannot. If B is saturated
 or the strategy rejects every alternative, A remains the fallback. Isolation
 state is replica-local and disappears on restart; persisted hard ownership is
@@ -87,7 +87,3 @@ mobile.
 Upstream #2240 is adapted to the fork's dispatch ownership and reservation cleanup. A code-less HTTP 429 before visible output can retry its existing owner three times with 1/2/4-second waits, using Retry-After as a floor capped at 10 seconds and never exceeding the remaining request budget. The startup probe follows consecutive wait markers so native HTTP callers still receive a final real 429 rather than a prematurely committed 200/SSE response.
 
 For example, encrypted reasoning dispatched to A stays on A while fresh movable requests can prefer B. Exhaustion preserves the original error body and upstream Retry-After, or 5 when absent. File pins and single-account routing remain bound; visible output is never replayed. A cancelled wait owns reservation release and performs no replacement dispatch. An exhausted keyed burst queues its terminal penalty behind confirmed settlement or release; retry success never queues a burst penalty. The change preserves the existing non-burst 401 refresh path and needs no migration. See [spec.md](spec.md).
-
-## Sustained-overload owner movement
-
-Soft owners are now released on the first sustained-overload backoff trip when the configured strategy selects an eligible sibling, not only after isolation. The existing cap, budget and hard-owner protections remain authoritative, and a burst-only cooldown does not churn warm sessions.

@@ -3,7 +3,9 @@
 ## Purpose
 
 Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
+
 ## Requirements
+
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
 For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
@@ -10288,6 +10290,7 @@ Genuine budget exhaustion during an upstream connection, token refresh, or strea
 - **WHEN** selection returns `hard_affinity_saturated`
 - **THEN** the existing bounded owner-recovery behavior remains available
 - **AND** the owner is neither rebound nor marked out of scope
+
 ### Requirement: Public Responses preserve tool discovery output
 The public Responses API SHALL preserve tool_search_output items, including their identifiers, execution mode, status, and loaded tool definitions, in output-item events, terminal response output, and collected JSON responses. Existing normalization of unrecognized output types SHALL remain unchanged.
 

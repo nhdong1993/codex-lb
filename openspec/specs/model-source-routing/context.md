@@ -145,6 +145,14 @@ Direct-source ownership and portability now share a classification-only metadata
 
 Unknown fields, boolean or non-finite timestamps, and malformed content-kind lists remain outside this allowance. Valid metadata cannot make reasoning, compaction, assistant output IDs, file references or unowned calls portable. No credential, schema or source configuration change is needed. Roll out to every HA backend and verify a fresh pooled request followed by a tool continuation through another backend; see [spec.md](spec.md).
 
+## Operating a source backed by CLIProxyAPI
+
+When one source delegates to a credential pool, codex-lb observes the proxy credential, not the account selected inside that pool. CLIProxyAPI session affinity can keep a conversation on one healthy credential while weighted selection distributes new conversations. It is a global CLIProxyAPI setting and still permits failover when a binding becomes unavailable; it does not establish ownership or make encrypted history portable. Existing source-reference checks remain governed by [spec.md](spec.md).
+
+A successful HTTP status or a plain-text probe does not establish tool-continuation health. Validate a complete call/result exchange and assert both the terminal event and the expected result. For example, return `DIAGNOSTIC_OK` from a synthetic function or custom tool and verify the next assistant message contains that exact result. A completion with zero input tokens and an unrelated refusal, or EOF during arguments without a terminal event, warrants separate account investigation. Do not classify valid tool-only responses or `generate: false` warmups as blank-response failures.
+
+The 2026-10-01 deployment repair enabled session affinity and quarantined one failing Code Hole credential using its existing zero-weight control. Tokens and ownership records were preserved. Restore a quarantined credential only after full continuation probes succeed; validate the shared proxy and all HA backend health without restarting active backends for a configuration-only repair. HTTP continuation support and downstream WebSocket support must be tested separately from the remote endpoint's WebSocket support.
+
 ## HTTP compaction on Model Sources
 
 HTTP compact operations use the same source assignment, public/enforced model,

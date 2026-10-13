@@ -105,6 +105,23 @@ deterministic strategies or hard continuity. These two upstream settings retain
 working defaults and allow targeted operator diagnosis without changing the
 fork's memory profile or HA topology.
 
+The same window accepts `server_error` only when the upstream message matches
+OpenAI's processing-error/help-center signature. For example, “An error occurred
+while processing your request. You can retry your request, or contact us through
+our help center at help.openai.com if the error persists.” counts, including an
+optional following request ID; “Internal server error” or a bare domain mention
+does not. Matching ignores case/whitespace and accepts the HTTPS help-center URL.
+This narrow signature addresses repeated upstream failures without treating all
+local or transport server errors as isolation evidence. If OpenAI changes the
+wording, unmatched errors retain generic transient handling until the signature
+is updated from observed evidence. Existing health eligibility and API-key
+settlement ordering still apply; errors after visible text are not newly penalized.
+Terminal failures now explicitly await confirmed API-key settlement before their
+health write, including when the chat startup probe closes the stream early.
+Counters remain replica-local, and isolation remains a soft routing preference
+with the existing hard-continuity and single-candidate protections; it does not
+persist an operator PAUSED status. See [spec.md](spec.md).
+
 The integration additionally includes upstream #2078. A new usage sample is not
 proof that quota recovered: applicable windows must actually have capacity.
 For example, a two-hour upstream 429 followed by primary usage at 100% and weekly
@@ -261,6 +278,8 @@ their existing behavior; a configured mapping cannot manufacture entitlement.
 Removing the model key restores ordinary selection after existing settings
 propagation. This documentation does not authorize applying live settings.
 
-## Sustained-overload soft-affinity rerouting
+## Earlier movement of soft affinity after sustained upstream failure
 
-After the existing three qualified failures within 120 seconds establish sustained upstream backoff, movable prompt-cache, sticky-thread and Codex-session owners may rebind to an eligible overload-free sibling. Burst-only cooldown, hard continuity/file owners, cap/budget rejection and lone-pool fallback retain their existing behavior. This is replica-local mitigation; it does not repair provider-wide generation latency or replay accepted work.
+Three qualified overload/processing failures within 120 seconds already establish sustained backoff. Later independently submitted requests may move a soft prompt-cache/thread/session mapping to an eligible sibling at that first trip; waiting for nine failures before isolation caused unnecessary repeated rejection during the October 12 incident. For example, failures interleaved with successes on A still move the next movable request to B when B passes the strategy, quota and cap checks. A lone owner or an all-unavailable alternative pool retains the existing fallback. Required response/file/bridge/turn-state ownership is unchanged; no accepted request is newly replayed. Burst-only cooldown does not release warm owners.
+
+This reduces repeated admissions to failing accounts; it cannot accelerate upstream generation or repair a provider-wide incident. Signals remain replica-local and writes retain settlement ordering. Isolation still controls the longer hold duration, including its existing disable setting.

@@ -1430,6 +1430,7 @@ While an account is in sustained-overload **backoff**, including the isolation s
 - **GIVEN** an established soft owner with only a code-less 429 burst cooldown
 - **WHEN** the next request selects an account
 - **THEN** the cooldown does not release the owner
+
 ### Requirement: Direct HTTP stream continuity conflicts surface the conflict code
 
 When a direct HTTP (SSE) stream fails closed because required continuity-owner
