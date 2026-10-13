@@ -157,6 +157,12 @@ Classified account-neutral goal restarts still reach guarded sticky selection wh
 
 The direct WebSocket connect selector also handles normalized admission errors before any upstream socket exists. It emits the existing structured connect error and settles the unsent request, letting the receive loop accept another turn on the same downstream socket. The route regression restores the real connector and account selector; a mocked connector alone cannot cover this boundary.
 
+## Code-less usage-limit backport (2026-10-02)
+
+Upstream sometimes omits the code from an exhausted-window error. One normalized predicate now supplies HTTP classification, stream retry/health, usage-refresh triggering and direct WebSocket quota replay classification. It accepts only the existing `usage_limit_reached` code or matching upstream-authored wording on normalized `upstream_error`; explicit request, quota, throttling and transient codes retain their own meaning.
+
+For example, a pre-visible code-less usage-limit frame can move an unpinned request from A to B, while a file-owned turn remains subject to the same owner restrictions. Once text has been emitted, no replay occurs, but the exhausted account still receives its health update after keyed settlement. The client retains the upstream terminal envelope. A proven quota error does not use the code-less-429 burst cooldown, and proxy-authored terminal cleanup keeps code-only classification. Narrow OpenAI-processing-error isolation remains unchanged. See [spec.md](spec.md).
+
 ## Sustained-overload soft-affinity rerouting
 
 After the existing three qualified failures within 120 seconds establish sustained upstream backoff, movable prompt-cache, sticky-thread and Codex-session owners may rebind to an eligible overload-free sibling. Burst-only cooldown, hard continuity/file owners, cap/budget rejection and lone-pool fallback retain their existing behavior. This is replica-local mitigation; it does not repair provider-wide generation latency or replay accepted work.

@@ -110,22 +110,20 @@ def _has_credit_override(
     credits_unlimited: bool | None,
     credits_balance: float | None,
 ) -> bool:
-    return _has_usable_credits(
+    return has_usable_credits(
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
     )
 
 
-def _has_usable_credits(
+def has_usable_credits(
     *,
     credits_has: bool | None,
     credits_unlimited: bool | None,
     credits_balance: float | None,
 ) -> bool:
     if credits_unlimited is True:
-        return True
-    if credits_has is True:
         return True
     if credits_balance is None:
         return False

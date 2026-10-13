@@ -7,7 +7,7 @@ from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, 
 from app.core.config import settings as config_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
-from app.core.usage.quota import apply_usage_quota
+from app.core.usage.quota import apply_usage_quota, has_usable_credits
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds, to_utc_naive
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
@@ -386,7 +386,7 @@ def _effective_status_from_usage(
     if account.status == AccountStatus.RATE_LIMITED and status == AccountStatus.ACTIVE:
         if runtime_reset is None and allow_missing_runtime_reset_recovery:
             return status
-        if _has_credit_override(
+        if has_usable_credits(
             credits_has=credits_has,
             credits_unlimited=credits_unlimited,
             credits_balance=credits_balance,
@@ -400,15 +400,6 @@ def _effective_status_from_usage(
             return status
         return account.status
     return status
-
-
-def _has_credit_override(
-    *,
-    credits_has: bool | None,
-    credits_unlimited: bool | None,
-    credits_balance: float | None,
-) -> bool:
-    return credits_unlimited is True or credits_has is True or (credits_balance is not None and credits_balance > 0)
 
 
 def _first_not_none(primary_usage: UsageHistory | None, secondary_usage: UsageHistory | None, field: str):

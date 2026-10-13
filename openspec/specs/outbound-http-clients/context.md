@@ -144,3 +144,9 @@ Every enabled model-scheduler replica warms the existing hourly client-version c
 Subscription routing hints now come from the final normalized model and requested tier, independent of inbound LB API-key credentials or the optional ChatGPT account header. For example, a Fast request emits `model=gpt-5.4;tier=priority`; an actual response reporting another tier still uses that actual tier for bookkeeping. Inbound hints are discarded, custom providers and model-less preconnects receive none, and reused sockets retain their original handshake. HTTP fallback, bridge reconnect, and compaction carry the same trusted intent. See [spec.md](spec.md) for the contracts.
 
 The initial selective backport brought upstream #2174 and #2242 without the beta.6 native transport or settings refactors. The subsequent full beta.6 integration retains those guarantees alongside the new transport and settings behavior.
+
+## Patched native TLS dependency family (2026-10-02)
+
+The selective security backport pins Rustls 0.23.45, rustls-webpki 0.103.15, aws-lc-rs 1.18.1 and aws-lc-sys 0.45.0 together in the lockfile. This excludes the Rustls handshake-level issue tracked by RUSTSEC-2026-0285 without importing release schema or transport refactors. For example, a locked helper build now uses the patched Rustls version while preserving TLS verification and the existing WebSocket/byte-budget protocol described in [spec.md](spec.md).
+
+The helper must be rebuilt during a separately authorized deployment; editing the lockfile alone does not update a running production binary. Validation uses the repository's Rust toolchain in an isolated build and synthetic local wire probes, never production credentials or account quota.

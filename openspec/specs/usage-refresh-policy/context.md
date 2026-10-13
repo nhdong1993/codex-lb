@@ -86,15 +86,15 @@ behavior can set the threshold to `100.0`.
   rate limiter; codex-lb auto-recovers on the next refresh tick after the
   upstream payload changes.
 - The dashboard Force Probe action fires one minimal `responses.create` against
-  the selected account and immediately refreshes its usage. The probe body uses
-  `max_output_tokens=16` (the current Codex token floor); `1` is rejected
-  upstream with HTTP 400 and never wakes the limiter. An accepted 2xx probe
+  the selected account and immediately refreshes its usage. The probe body omits
+  `max_output_tokens`: the Codex endpoint rejects that unsupported field with
+  HTTP 400, including the former value of `16`. An accepted 2xx probe
   also contributes to that replica's probing-health recovery streak; non-2xx
   results do not restore routing health. Settlement reloads and normalizes
   weekly/monthly and zero-primary-capacity usage like ordinary routing and is
   discarded when newer replica-local runtime activity arrives during that
-  snapshot load. This floor is the probe half of
-  [#1895](https://github.com/Soju06/codex-lb/issues/1895); warmup/compact-404
+  snapshot load. This follows the payload correction in
+  [#2496](https://github.com/Soju06/codex-lb/pull/2496); warmup/compact-404
   is a separate path.
 - Do not manually flip the codex-lb account state to `ACTIVE` while
   `/wham/usage` still reports the account as fully used. That only masks the
@@ -154,3 +154,9 @@ First-Free enqueue also checks that shared evidence still contains exactly one F
 Agreeing Free evidence is consumed only after metadata persistence succeeds. Routine token rotation can invalidate the worker's exact-token guard between confirmation and persistence even though the account's identity and check generation remain valid. Keeping the observations lets the remaining attempt reload the rotated credentials and finish within the original budget. For example, with attempt one already consumed, a rotation conflict on attempt two retains two Free observations; attempt three writes Free, clears evidence and completes verification without reauthentication. Actual import/reauthentication still deletes the old evidence/check atomically, and successful priority clearing remains generation-fenced. A conflict on the final attempt still falls back to the existing fleet refresh policy; retaining evidence does not create extra attempts.
 
 Ordinary refreshes have no check generation, so evidence clearing checks the persisted credential generation from the observed account. The database store takes the account-row lock before evaluating this condition, including for an ordinary clear waiting behind replacement on PostgreSQL. For example, reauthentication can replace credentials and install a new first Free observation after an older refresh saved Free; the old clear then leaves the new observation intact. Routine rotation preserves that generation, allowing paid samples to discard contradicted Free evidence and first-Free samples to enqueue verification. Import/reauthentication atomically increments the generation even with identical token values, invalidating stale mutations. The generation also participates in the evidence fingerprint; existing observations/checks with the old fingerprint format are conservatively restarted or completed on their next lookup.
+
+## Spendable credits and code-less limits (2026-10-02)
+
+Credit-aware status uses unlimited credits or a positive spendable balance, not the bare `credits_has` flag. For example, a persisted weekly quota block with `credits_has=true` and `credits_balance=0` stays blocked; a newer positive balance can clear it. Both exhausted windows without usable credits retain the secondary quota/reset guard. Foreground advisory usage rules, disabled accounts, and reset-credit coupons are unchanged.
+
+An upstream code-less message such as "The usage limit has been reached" requests the same tracked, coalesced usage refresh as `usage_limit_reached`. The existing fresh-session ownership, debounce, singleflight and eligibility checks remain responsible for bounded work. Explicit request errors quoting that sentence do not trigger this quota refresh. See [spec.md](spec.md).
