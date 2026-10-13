@@ -64,3 +64,32 @@ After deployment, refresh any local file configured by `model_catalog_json`
 A stale file or active session can continue to send xhigh even after the server
 catalog changes. The native, versioned compatibility, and installer catalogs
 share the same policy; none requires an environment setting or migration.
+
+## GPT-6 Luna bootstrap metadata
+
+The native `gpt-6-luna` fallback mirrors the saved Codex endpoint's 26 plan
+labels, including `edu_plus`, `edu_pro`, `enterprise_cbp_automation`,
+`enterprise_cbp_trial`, and `sci`. Omitting those labels incorrectly excludes
+supported cold-start accounts: the eligibility helper does not alias them to
+other plans. Case and surrounding whitespace normalize for catalog plan
+eligibility. This broad entitlement vocabulary is separate from the narrower
+operator [model Plan restriction vocabulary](../account-routing/context.md#subscription-model-plan-restrictions).
+Catalog availability does not override that additional restriction or grant
+access that an account lacks.
+
+Fast (`priority`, `1.5x speed`) is available but is not the default: the bundled
+Python value is `None`, matching the endpoint's null default. For example,
+`/backend-api/codex/models` and `/v1/models?client_version=0.155.0` expose
+`default_service_tier: null`, while ordinary `/v1/models` omits
+`metadata.default_service_tier`. Both representations retain Fast. Only the
+Codex-client representation promises maximum context, Responses Lite,
+code-mode tools, and available plans; ordinary OpenAI metadata retains its
+existing supported fields rather than acquiring Codex-only fields.
+
+This is a conservative startup/offline fallback, not a complete clone of long
+upstream instruction templates. Fresh persisted or refreshed snapshots retain
+authority under the existing registry contracts, including replacement and
+removal; future endpoint drift may require a new fallback correction. Source
+models remain separate even when names collide. Static catalog metadata does
+not configure the example three-model Free routing policy or alter live CLI
+catalog files.

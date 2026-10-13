@@ -153,6 +153,25 @@ _BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS = frozenset(
     }
 )
 
+# GPT-6 Luna is published by the Codex models endpoint for the same broad
+# subscription surface as the other current Codex models, including Free.
+# Keep the endpoint's additional workspace labels here so the cold-start
+# catalog remains a faithful plan-gating floor until the first live refresh.
+_BOOTSTRAP_GPT6_LUNA_AVAILABLE_IN_PLANS = frozenset(
+    {
+        *_BOOTSTRAP_AVAILABLE_IN_PLANS,
+        "edu_plus",
+        "edu_pro",
+        "ent26",
+        "enterprise_cbp_automation",
+        "enterprise_cbp_trial",
+        "law",
+        "promax",
+        "sci",
+        "self_serve_business_prolite",
+    }
+)
+
 _GPT56_SOL_AVAILABILITY_NUX: dict[str, JsonValue] = {
     "message": (
         "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, "
@@ -265,6 +284,48 @@ def _gpt56_raw(
     }
 
 
+def _gpt6_luna_raw() -> dict[str, JsonValue]:
+    """Codex CLI metadata for the GPT-6 Luna bootstrap entry.
+
+    This mirrors the live ``/codex/models`` entry.  The long instruction
+    template is intentionally left to the live registry, as it is for the
+    GPT-5.6 bootstrap entries.
+    """
+    return {
+        "apply_patch_tool_type": "freeform",
+        "web_search_tool_type": "text_and_image",
+        "supports_image_detail_original": True,
+        "truncation_policy": {"mode": "tokens", "limit": 10_000},
+        "tool_mode": "code_mode_only",
+        "multi_agent_version": "v2",
+        "multi_agent_reasoning_effort": None,
+        "use_responses_lite": True,
+        "supports_reasoning_effort_updates": True,
+        "include_skills_usage_instructions": False,
+        "include_apps_usage_instructions": False,
+        "include_plugin_usage_instructions": False,
+        "node_repl_auto_review_required": False,
+        "node_repl_disabled": False,
+        "requires_sandboxed_review": False,
+        "auto_review_model_override": None,
+        "max_context_window": 872_000,
+        "auto_compact_token_limit": None,
+        "comp_hash": "3000",
+        "reasoning_summary_format": "experimental",
+        "default_reasoning_summary": "none",
+        "availability_nux": None,
+        "upgrade": None,
+        "experimental_supported_tools": ["send_user_message_async", "clock"],
+        "supports_search_tool": True,
+        "supports_experimental_context": False,
+        "default_service_tier": None,
+        "service_tiers": [{"id": "priority", "name": "Fast", "description": "1.5x speed"}],
+        "additional_speed_tiers": ["fast"],
+        "supports_reasoning_summary_parameter": True,
+        "supports_reasoning_summaries": True,
+    }
+
+
 # Static bundled fallback models used before the first upstream registry refresh.
 # This mirrors Codex's model-manager pattern: ship a conservative catalog so
 # startup/offline paths have usable metadata, then treat the live upstream
@@ -313,6 +374,19 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
         priority=3,
         available_in_plans=_BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS,
         raw=_gpt56_raw(multi_agent_version="v1"),
+    ),
+    _bootstrap_model(
+        "gpt-6-luna",
+        "GPT-6-Luna",
+        description="Fast and affordable model for easier tasks.",
+        prefer_websockets=True,
+        minimal_client_version="0.155.0",
+        reasoning_levels=_REASONING_LEVELS_MAX,
+        context_window=272_000,
+        default_reasoning_level="medium",
+        priority=4,
+        available_in_plans=_BOOTSTRAP_GPT6_LUNA_AVAILABLE_IN_PLANS,
+        raw=_gpt6_luna_raw(),
     ),
     _bootstrap_model(
         "gpt-5.5",

@@ -15,6 +15,7 @@ BOOTSTRAP_MODEL_SLUGS = {
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
+    "gpt-6-luna",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
@@ -54,6 +55,7 @@ EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
     "gpt-5.6-sol": "0.144.0",
     "gpt-5.6-terra": "0.144.0",
     "gpt-5.6-luna": "0.144.0",
+    "gpt-6-luna": "0.155.0",
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -274,7 +276,7 @@ async def test_v1_models_uses_bootstrap_models_when_registry_not_populated(async
     # stay on ``context_window`` so OpenAI-compatible clients keep packing to
     # the 272k default instead of the 872k ``max_context_window`` ceiling.
     entries = {item["id"]: item for item in payload["data"]}
-    for slug in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+    for slug in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-luna"):
         entry = entries[slug]
         assert entry["metadata"]["context_window"] == 272_000
         assert entry["metadata"]["input_context_window"] == 272_000
@@ -282,13 +284,22 @@ async def test_v1_models_uses_bootstrap_models_when_registry_not_populated(async
         assert entry["context_length"] == 272_000
         assert entry["contextLength"] == 272_000
 
+    gpt6_luna_metadata = entries["gpt-6-luna"]["metadata"]
+    assert gpt6_luna_metadata["minimal_client_version"] == "0.155.0"
+    assert gpt6_luna_metadata["prefer_websockets"] is True
+    assert gpt6_luna_metadata["default_reasoning_level"] == "medium"
+    assert "default_service_tier" not in gpt6_luna_metadata
+    assert gpt6_luna_metadata["service_tiers"] == [{"id": "priority", "name": "Fast", "description": "1.5x speed"}]
+    assert gpt6_luna_metadata["additional_speed_tiers"] == ["fast"]
 
+
+@pytest.mark.parametrize("path", ["/backend-api/codex/models", "/v1/models?client_version=0.155.0"])
 @pytest.mark.asyncio
-async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_client):
+async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_client, path: str):
     registry = get_model_registry()
     registry._snapshot = None
 
-    resp = await async_client.get("/backend-api/codex/models")
+    resp = await async_client.get(path)
     assert resp.status_code == 200
     entries = {entry["slug"]: entry for entry in resp.json()["models"]}
 
@@ -334,6 +345,30 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
         "xhigh",
         "max",
     }
+
+    gpt6_luna = entries["gpt-6-luna"]
+    assert gpt6_luna["display_name"] == "GPT-6-Luna"
+    assert gpt6_luna["description"] == "Fast and affordable model for easier tasks."
+    assert gpt6_luna["context_window"] == 272_000
+    assert gpt6_luna["max_context_window"] == 872_000
+    assert gpt6_luna["default_reasoning_level"] == "medium"
+    assert {level["effort"] for level in gpt6_luna["supported_reasoning_levels"]} == {
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }
+    assert {"free", "edu_plus", "edu_pro", "enterprise_cbp_automation", "enterprise_cbp_trial", "sci"} <= set(
+        gpt6_luna["available_in_plans"]
+    )
+    assert gpt6_luna["prefer_websockets"] is True
+    assert gpt6_luna["use_responses_lite"] is True
+    assert gpt6_luna["tool_mode"] == "code_mode_only"
+    assert gpt6_luna["default_service_tier"] is None
+    assert gpt6_luna["additional_speed_tiers"] == ["fast"]
+    assert gpt6_luna["multi_agent_version"] == "v2"
+    assert gpt6_luna["service_tiers"] == [{"id": "priority", "name": "Fast", "description": "1.5x speed"}]
 
     # Reproducible upstream catalog evidence:
     # codex-rs/models-manager/models.json at rust-v0.145.0, except

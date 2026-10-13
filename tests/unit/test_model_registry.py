@@ -6,6 +6,8 @@ from dataclasses import replace
 import pytest
 
 from app.core.openai.model_registry import ModelRegistry, ReasoningLevel, UpstreamModel
+from app.db.models import Account
+from app.modules.proxy._load_balancer.model_eligibility import _filter_accounts_for_model
 
 pytestmark = pytest.mark.unit
 
@@ -52,10 +54,41 @@ EXPECTED_GPT56_MODEL_PLANS = {
     "team",
 }
 
+# Saved Codex endpoint GPT-6 Luna plan contract (not derived from bootstrap constants).
+EXPECTED_GPT6_LUNA_MODEL_PLANS = {
+    "business",
+    "edu",
+    "edu_plus",
+    "edu_pro",
+    "education",
+    "ent26",
+    "enterprise",
+    "enterprise_cbp_automation",
+    "enterprise_cbp_trial",
+    "enterprise_cbp_usage_based",
+    "finserv",
+    "free",
+    "free_workspace",
+    "go",
+    "hc",
+    "k12",
+    "law",
+    "plus",
+    "pro",
+    "prolite",
+    "promax",
+    "quorum",
+    "sci",
+    "self_serve_business_prolite",
+    "self_serve_business_usage_based",
+    "team",
+}
+
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
     "gpt-5.6-sol": "0.144.0",
     "gpt-5.6-terra": "0.144.0",
     "gpt-5.6-luna": "0.144.0",
+    "gpt-6-luna": "0.155.0",
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -110,6 +143,23 @@ def test_plan_types_for_model_uses_bootstrap_when_uninitialized():
 
     assert registry.plan_types_for_model("gpt-5.4") == EXPECTED_CORE_MODEL_PLANS
     assert registry.plan_types_for_model("GPT-5.4") == EXPECTED_CORE_MODEL_PLANS
+
+
+@pytest.mark.parametrize("normalized_spelling", [False, True], ids=["canonical", "case-and-whitespace"])
+def test_bootstrap_gpt6_luna_endpoint_plans_remain_eligible(normalized_spelling: bool):
+    registry = ModelRegistry(ttl_seconds=60.0)
+    accounts = [
+        Account(id=plan, plan_type=f" {plan.upper()} " if normalized_spelling else plan)
+        for plan in sorted(EXPECTED_GPT6_LUNA_MODEL_PLANS)
+    ]
+    unsupported = Account(id="unsupported", plan_type="unsupported_plan")
+    model_slug = " GPT-6-LUNA " if normalized_spelling else "gpt-6-luna"
+
+    eligible = _filter_accounts_for_model([*accounts, unsupported], model_slug, registry=registry)
+
+    assert [account.id for account in eligible] == [account.id for account in accounts]
+    assert registry.plan_types_for_model(model_slug) == EXPECTED_GPT6_LUNA_MODEL_PLANS
+    assert registry.get_models_with_fallback()["gpt-6-luna"].available_in_plans == EXPECTED_GPT6_LUNA_MODEL_PLANS
 
 
 @pytest.mark.asyncio
@@ -184,7 +234,7 @@ async def test_metadata_does_not_retain_non_bundled_models():
     assert "workspace-private" not in registry.get_models_for_metadata()
 
 
-@pytest.mark.parametrize("model_slug", ["gpt-5.5", "gpt-5.3-codex-spark"])
+@pytest.mark.parametrize("model_slug", ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-6-luna"])
 @pytest.mark.asyncio
 async def test_plan_types_for_bootstrap_model_uses_live_snapshot_after_refresh(model_slug: str):
     registry = ModelRegistry(ttl_seconds=60.0)
@@ -223,6 +273,7 @@ def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     assert registry.prefers_websockets("gpt-5.6-sol") is True
     assert registry.prefers_websockets("gpt-5.6-terra") is True
     assert registry.prefers_websockets("gpt-5.6-luna") is True
+    assert registry.prefers_websockets("gpt-6-luna") is True
     assert registry.prefers_websockets("gpt-5.4") is True
     assert registry.prefers_websockets("gpt-5.4-2026") is True
     assert registry.prefers_websockets("gpt-5.3-codex") is True
