@@ -106,7 +106,9 @@ def test_h13_inflight_middleware_admission_gate_paths() -> None:
 
     assert "/internal/bridge/responses" in inflight._DRAIN_ALLOWED_HTTP_PATHS
     assert "/internal/bridge/responses" not in inflight._IN_FLIGHT_EXCLUDED_HTTP_PATHS
-    assert inflight._IN_FLIGHT_WEBSOCKET_PATHS == frozenset({"/backend-api/codex/responses", "/v1/responses"})
+    assert inflight._IN_FLIGHT_WEBSOCKET_PATHS == frozenset(
+        {"/backend-api/codex/responses", "/backend-api/codex/responses/", "/v1/responses", "/v1/responses/"}
+    )
 
 
 # ---------------------------------------------------------------- hazard_14
