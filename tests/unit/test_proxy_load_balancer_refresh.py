@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Literal, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -57,18 +58,6 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 pytestmark = pytest.mark.unit
 
 _UNSET = object()
-
-
-@pytest.fixture(autouse=True)
-def _stub_additional_quota_routing_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _load_empty_overrides() -> dict[str, str]:
-        return {}
-
-    monkeypatch.setattr(
-        load_balancer_module,
-        "_load_dashboard_additional_quota_routing_overrides",
-        _load_empty_overrides,
-    )
 
 
 def _make_account(account_id: str, email: str = "a@example.com") -> Account:
@@ -3626,13 +3615,13 @@ async def test_select_account_limits_additional_quota_routing_policy_to_scoped_a
         lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus", "pro"})),
     )
 
-    async def _load_routing_overrides() -> dict[str, str]:
-        return {"codex_spark": "burn_first"}
-
+    routing_settings = SimpleNamespace(
+        model_plan_routing_policies_json="{}",
+        additional_quota_routing_policies_json='{"codex_spark":"burn_first"}',
+    )
     monkeypatch.setattr(
-        load_balancer_module,
-        "_load_dashboard_additional_quota_routing_overrides",
-        _load_routing_overrides,
+        "app.modules.proxy.model_admission.get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=routing_settings)),
     )
 
     balancer = LoadBalancer(

@@ -72,6 +72,7 @@ class SettingsRepository:
             totp_last_verified_step=None,
             sticky_reallocation_primary_budget_threshold_pct=95.0,
             sticky_reallocation_secondary_budget_threshold_pct=100.0,
+            model_plan_routing_policies_json="{}",
             additional_quota_routing_policies_json="{}",
             limit_warmup_enabled=False,
             limit_warmup_windows="both",
@@ -152,6 +153,7 @@ class SettingsRepository:
         sticky_reallocation_budget_threshold_pct: float | None = None,
         sticky_reallocation_primary_budget_threshold_pct: float | None = None,
         sticky_reallocation_secondary_budget_threshold_pct: float | None = None,
+        model_plan_routing_policies_json: str | None = None,
         additional_quota_routing_policies_json: str | None = None,
         warmup_model: str | None = None,
         import_without_overwrite: bool | None = None,
@@ -309,6 +311,8 @@ class SettingsRepository:
             settings.sticky_reallocation_secondary_budget_threshold_pct = (
                 sticky_reallocation_secondary_budget_threshold_pct
             )
+        if model_plan_routing_policies_json is not None:
+            settings.model_plan_routing_policies_json = model_plan_routing_policies_json
         if additional_quota_routing_policies_json is not None:
             settings.additional_quota_routing_policies_json = additional_quota_routing_policies_json
         if warmup_model is not None:

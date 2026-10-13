@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 
+from app.core.model_plan_policy import ModelPlanPolicies
 from app.modules.shared.schemas import DashboardModel
 
 _DEFAULT_WEEKLY_PACE_WORKING_DAYS = "0,1,2,3,4,5,6"
@@ -123,6 +124,7 @@ class DashboardSettingsResponse(DashboardModel):
     usage_history_retention_days: int = Field(ge=0, le=3650)
     request_log_retention_override_days: int | None = Field(default=None, ge=0, le=3650)
     usage_history_retention_override_days: int | None = Field(default=None, ge=0, le=3650)
+    model_plan_routing_policies: ModelPlanPolicies = Field(default_factory=dict)
     additional_quota_routing_policies: dict[str, str] = Field(default_factory=dict)
     additional_quota_policies: list[AdditionalQuotaPolicy] = Field(default_factory=list)
     guest_access_enabled: bool
@@ -215,6 +217,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     sticky_reallocation_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     sticky_reallocation_primary_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     sticky_reallocation_secondary_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    model_plan_routing_policies: ModelPlanPolicies | None = None
     additional_quota_routing_policies: dict[str, str] | None = None
     warmup_model: str | None = Field(default=None, min_length=1)
     import_without_overwrite: bool | None = None

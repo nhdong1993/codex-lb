@@ -557,9 +557,13 @@ async def test_different_limit_names_get_different_cache_entries(monkeypatch: py
 
     cache = AccountSelectionCache(ttl_seconds=5)
     monkeypatch.setattr(
-        "app.modules.proxy.load_balancer.get_settings_cache",
+        "app.modules.proxy.model_admission.get_settings_cache",
         lambda: SimpleNamespace(
-            get=AsyncMock(return_value=SimpleNamespace(additional_quota_routing_policies_json="{}"))
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    model_plan_routing_policies_json="{}", additional_quota_routing_policies_json="{}"
+                )
+            )
         ),
     )
 

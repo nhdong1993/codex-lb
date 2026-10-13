@@ -16,6 +16,7 @@ from app.core.config.inheritable import SettingScalar as SettingScalar
 from app.core.config.inheritable import SettingSource as SettingSource
 from app.core.config.inheritable import resolve_inheritable as resolve_inheritable
 from app.core.config.settings import Settings, get_settings
+from app.core.model_plan_policy import ModelPlanPolicies, parse_model_plan_policies
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
 from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
@@ -68,6 +69,7 @@ class DashboardSettingsData:
     sticky_reallocation_budget_threshold_pct: float
     sticky_reallocation_primary_budget_threshold_pct: float
     sticky_reallocation_secondary_budget_threshold_pct: float
+    model_plan_routing_policies: ModelPlanPolicies
     additional_quota_routing_policies: dict[str, str]
     warmup_model: str
     import_without_overwrite: bool
@@ -163,6 +165,7 @@ class DashboardSettingsUpdateData:
     sticky_reallocation_budget_threshold_pct: float
     sticky_reallocation_primary_budget_threshold_pct: float
     sticky_reallocation_secondary_budget_threshold_pct: float
+    model_plan_routing_policies: ModelPlanPolicies
     additional_quota_routing_policies: dict[str, str]
     warmup_model: str
     import_without_overwrite: bool
@@ -285,6 +288,7 @@ class SettingsService:
             sticky_reallocation_budget_threshold_pct=payload.sticky_reallocation_budget_threshold_pct,
             sticky_reallocation_primary_budget_threshold_pct=payload.sticky_reallocation_primary_budget_threshold_pct,
             sticky_reallocation_secondary_budget_threshold_pct=payload.sticky_reallocation_secondary_budget_threshold_pct,
+            model_plan_routing_policies_json=json.dumps(payload.model_plan_routing_policies, sort_keys=True),
             additional_quota_routing_policies_json=_dump_additional_quota_routing_policies(
                 payload.additional_quota_routing_policies
             ),
@@ -461,6 +465,7 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
         sticky_reallocation_primary_budget_threshold_pct=row.sticky_reallocation_primary_budget_threshold_pct,
         sticky_reallocation_secondary_budget_threshold_pct=row.sticky_reallocation_secondary_budget_threshold_pct,
+        model_plan_routing_policies=_parse_model_plan_routing_policies(row.model_plan_routing_policies_json),
         additional_quota_routing_policies=_parse_additional_quota_routing_policies(
             row.additional_quota_routing_policies_json
         ),
@@ -505,6 +510,30 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         # end C2-1 timeouts
         provenance=resolved,
     )
+
+
+def _parse_model_plan_routing_policies(raw: str | None) -> ModelPlanPolicies:
+    # Native routing fails closed on an invalid stored mapping. Settings show
+    # only its valid entries so they stay readable and a PUT can replace it.
+    if not raw:
+        return {}
+    try:
+        return parse_model_plan_policies(raw)
+    except ValueError:
+        logger.warning("Stored model plan routing policies are invalid; native routing fails closed until replaced")
+    try:
+        stored = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(stored, dict):
+        return {}
+    policies: ModelPlanPolicies = {}
+    for model, plans in stored.items():
+        try:
+            policies.update(parse_model_plan_policies(json.dumps({model: plans})))
+        except ValueError:
+            continue
+    return policies
 
 
 def _parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:

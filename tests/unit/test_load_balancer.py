@@ -4577,15 +4577,19 @@ async def test_load_selection_inputs_sets_burn_first_override_for_additional_quo
             "app.modules.proxy.load_balancer.LoadBalancer._filter_accounts_for_additional_limit",
             _mocked_additional_filter,
         )
+        settings_get = AsyncMock(
+            return_value=SimpleNamespace(
+                model_plan_routing_policies_json="{}",
+                additional_quota_routing_policies_json='{"codex-spark":"burn_first"}',
+            )
+        )
         monkeypatch.setattr(
-            "app.modules.proxy.load_balancer.get_settings_cache",
-            lambda: SimpleNamespace(
-                get=AsyncMock(
-                    return_value=SimpleNamespace(additional_quota_routing_policies_json='{"codex-spark":"burn_first"}')
-                )
-            ),
+            "app.modules.proxy.model_admission.get_settings_cache", lambda: SimpleNamespace(get=settings_get)
         )
         selection_inputs = await balancer._load_selection_inputs(model=None, additional_limit_name="codex-spark")
+
+    # The registry default is also burn_first; the override must come from the routing settings seam.
+    settings_get.assert_awaited()
 
     states, _ = _build_states(
         accounts=selection_inputs.accounts,
@@ -4640,9 +4644,13 @@ async def test_security_work_filter_preserves_additional_quota_metadata():
             _mocked_additional_filter,
         )
         monkeypatch.setattr(
-            "app.modules.proxy.load_balancer.get_settings_cache",
+            "app.modules.proxy.model_admission.get_settings_cache",
             lambda: SimpleNamespace(
-                get=AsyncMock(return_value=SimpleNamespace(additional_quota_routing_policies_json="{}"))
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        model_plan_routing_policies_json="{}", additional_quota_routing_policies_json="{}"
+                    )
+                )
             ),
         )
 
@@ -4692,18 +4700,22 @@ async def test_load_selection_inputs_uses_canonicalized_additional_quota_alias_k
             "app.modules.proxy.load_balancer.LoadBalancer._filter_accounts_for_additional_limit",
             _mocked_additional_filter,
         )
+        settings_get = AsyncMock(
+            return_value=SimpleNamespace(
+                model_plan_routing_policies_json="{}",
+                additional_quota_routing_policies_json='{"codex-spark":"burn_first"}',
+            )
+        )
         monkeypatch.setattr(
-            "app.modules.proxy.load_balancer.get_settings_cache",
-            lambda: SimpleNamespace(
-                get=AsyncMock(
-                    return_value=SimpleNamespace(additional_quota_routing_policies_json='{"codex-spark":"burn_first"}')
-                )
-            ),
+            "app.modules.proxy.model_admission.get_settings_cache", lambda: SimpleNamespace(get=settings_get)
         )
         selection_inputs = await balancer._load_selection_inputs(
             model=None,
             additional_limit_name="gpt-5.3-codex-spark",
         )
+
+    # The registry default is also burn_first; the override must come from the routing settings seam.
+    settings_get.assert_awaited()
 
     states, _ = _build_states(
         accounts=selection_inputs.accounts,
@@ -4758,9 +4770,13 @@ async def test_load_selection_inputs_uses_registry_additional_quota_routing_poli
             _mocked_additional_filter,
         )
         monkeypatch.setattr(
-            "app.modules.proxy.load_balancer.get_settings_cache",
+            "app.modules.proxy.model_admission.get_settings_cache",
             lambda: SimpleNamespace(
-                get=AsyncMock(return_value=SimpleNamespace(additional_quota_routing_policies_json="{}"))
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        model_plan_routing_policies_json="{}", additional_quota_routing_policies_json="{}"
+                    )
+                )
             ),
         )
         selection_inputs = await balancer._load_selection_inputs(model=None, additional_limit_name="codex-spark")
@@ -4817,10 +4833,13 @@ async def test_load_selection_inputs_inherits_account_policy_for_additional_quot
             _mocked_additional_filter,
         )
         monkeypatch.setattr(
-            "app.modules.proxy.load_balancer.get_settings_cache",
+            "app.modules.proxy.model_admission.get_settings_cache",
             lambda: SimpleNamespace(
                 get=AsyncMock(
-                    return_value=SimpleNamespace(additional_quota_routing_policies_json='{"codex-spark":"inherit"}')
+                    return_value=SimpleNamespace(
+                        model_plan_routing_policies_json="{}",
+                        additional_quota_routing_policies_json='{"codex-spark":"inherit"}',
+                    )
                 )
             ),
         )

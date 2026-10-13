@@ -5,6 +5,21 @@ import { DashboardSettingsSchema } from "@/features/settings/schemas";
 import { createDashboardSettings } from "@/test/mocks/factories";
 
 describe("buildSettingsUpdateRequest", () => {
+  it("preserves model plan policies on unrelated settings saves and supports explicit clears", () => {
+    const policies = { "gpt-5.6-terra": ["free"], "gpt-5.6-luna": ["free"], "gpt-6-luna": ["free"] } as const;
+    const settings = DashboardSettingsSchema.parse({
+      ...createDashboardSettings(),
+      modelPlanRoutingPolicies: policies,
+    });
+    expect(buildSettingsUpdateRequest(settings, { apiKeyAuthEnabled: false }).modelPlanRoutingPolicies).toEqual(
+      policies,
+    );
+    expect(buildSettingsUpdateRequest(settings, { modelPlanRoutingPolicies: {} }).modelPlanRoutingPolicies).toEqual({});
+    expect(
+      buildSettingsUpdateRequest(settings, { modelPlanRoutingPolicies: null }).modelPlanRoutingPolicies,
+    ).toBeNull();
+  });
+
   it("carries the loaded settings version as expectedVersion for CAS", () => {
     const settings = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,

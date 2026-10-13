@@ -1138,6 +1138,12 @@ class DashboardSettings(Base):
         server_default=text("100.0"),
         nullable=False,
     )
+    model_plan_routing_policies_json: Mapped[str] = mapped_column(
+        Text,
+        default="{}",
+        server_default=text("'{}'"),
+        nullable=False,
+    )
     additional_quota_routing_policies_json: Mapped[str] = mapped_column(
         Text,
         default="{}",

@@ -61,6 +61,25 @@ const WeeklyPaceSmoothingMinutesSchema = z.union([
   z.literal(240),
 ]);
 
+// Editor option list only. Saved plan values parse as plain strings so a newer
+// backend plan vocabulary neither breaks the settings page nor blocks the
+// round-trip of the mapping on unrelated saves; the backend owns validation.
+export const AccountRoutingPlanSchema = z.enum([
+  "free",
+  "plus",
+  "pro",
+  "prolite",
+  "team",
+  "business",
+  "enterprise",
+  "edu",
+]);
+export const ModelPlanRoutingPoliciesSchema = z.record(
+  z.string().regex(/^\S+$/),
+  z.array(z.string()).min(1),
+);
+export type ModelPlanRoutingPolicies = z.infer<typeof ModelPlanRoutingPoliciesSchema>;
+
 export const DashboardSettingsSchema = z
   .object({
     stickyThreadsEnabled: z.boolean(),
@@ -140,6 +159,7 @@ export const DashboardSettingsSchema = z
     stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
     stickyReallocationPrimaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
     stickyReallocationSecondaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
+    modelPlanRoutingPolicies: ModelPlanRoutingPoliciesSchema.optional().default({}),
     additionalQuotaRoutingPolicies: z
       .record(z.string(), AdditionalQuotaRoutingPolicySchema)
       .optional(),
@@ -263,6 +283,7 @@ export const SettingsUpdateRequestSchema = z
     stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
     stickyReallocationPrimaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
     stickyReallocationSecondaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
+    modelPlanRoutingPolicies: ModelPlanRoutingPoliciesSchema.nullable().optional(),
     additionalQuotaRoutingPolicies: z
       .record(z.string(), AdditionalQuotaRoutingPolicySchema)
       .optional(),

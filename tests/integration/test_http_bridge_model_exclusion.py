@@ -136,11 +136,25 @@ async def test_bridge_unrelated_or_expired_rejection_keeps_reuse(async_client, b
 @pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
 @pytest.mark.parametrize(
     "failure",
-    ["exclusion", "cancel", "database", "pool_timeout", "connection_refused", "connect_timeout", "driver_auth"],
+    [
+        "exclusion",
+        "policy",
+        "plan-change",
+        "cancel",
+        "database",
+        "pool_timeout",
+        "connection_refused",
+        "connect_timeout",
+        "driver_auth",
+    ],
 )
 async def test_bridge_late_exclusion_settles_reservation_and_preserves_sibling(
     async_client, bridge, monkeypatch, failure, path
 ):
+    if failure == "plan-change":
+        assert (
+            await async_client.put("/api/settings", json={"modelPlanRoutingPolicies": {"gpt-5.1": ["plus"]}})
+        ).status_code == 200
     assert (await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})).status_code == 200
     (await proxy_module.get_settings_cache().get()).api_key_auth_enabled = True
     key_response = await async_client.post(
@@ -182,6 +196,15 @@ async def test_bridge_late_exclusion_settles_reservation_and_preserves_sibling(
         states.append(state)
         if len(states) == 2 and failure == "exclusion":
             await plan_checks.request_plan_check(bridge.accounts[0], model=state.model)
+        elif len(states) == 2 and failure == "policy":
+            saved = await async_client.put("/api/settings", json={"modelPlanRoutingPolicies": {state.model: ["free"]}})
+            assert saved.status_code == 200
+        elif len(states) == 2 and failure == "plan-change":
+            async with SessionLocal() as session:
+                await session.execute(
+                    update(Account).where(Account.id == bridge.accounts[0].id).values(plan_type="free")
+                )
+                await session.commit()
 
     monkeypatch.setattr(bridge.first, "send_text", send)
     monkeypatch.setattr(proxy_module.ProxyService, "_acquire_request_state_response_create_admission", admission)
@@ -205,7 +228,7 @@ async def test_bridge_late_exclusion_settles_reservation_and_preserves_sibling(
                 await second
         else:
             result = await asyncio.wait_for(second, 5)
-            if failure == "exclusion":
+            if failure in {"exclusion", "policy", "plan-change"}:
                 assert "previous_response_owner_unavailable" in result.text, result.text
             else:
                 assert result.status_code == 503, result.text

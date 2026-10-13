@@ -550,6 +550,7 @@ export function createDashboardSettings(
 		apiKeyAuthEnabled: true,
 		hideUpstreamQuotaFromApiKeys: false,
 		limitWarmupEnabled: false,
+		modelPlanRoutingPolicies: {},
 		limitWarmupWindows: "both",
 		limitWarmupModel: "auto",
 		limitWarmupPrompt: "Say OK.",

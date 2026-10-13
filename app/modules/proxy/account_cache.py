@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,7 @@ from app.core.cache.invalidation import (
     NAMESPACE_ACCOUNT_SELECTION,
     get_cache_invalidation_poller,
 )
+from app.core.model_plan_policy import ModelPlanPolicies
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal, close_session
 
@@ -22,7 +24,7 @@ if TYPE_CHECKING:
     from app.modules.proxy.load_balancer import SelectionInputs
 
 _AssignedAccountsKey = tuple[str, ...] | None
-_CacheKey = tuple[str | None, str | None, str | None, str, _AssignedAccountsKey]
+_CacheKey = tuple[str | None, str | None, str | None, str, str, _AssignedAccountsKey]
 
 
 @dataclass(slots=True)
@@ -44,11 +46,30 @@ class AccountSelectionCache:
         self._lock = anyio.Lock()
         self._generation: int = 0
 
+    @staticmethod
+    def key_for(
+        model: str | None,
+        service_tier: str | None,
+        additional_limit_name: str | None,
+        additional_quota_policies: dict[str, str],
+        model_plan_policies: ModelPlanPolicies,
+        account_ids: Collection[str] | None,
+    ) -> _CacheKey:
+        """Partition snapshots by all policy evidence, even before invalidation arrives."""
+        return (
+            model,
+            service_tier,
+            additional_limit_name,
+            json.dumps(additional_quota_policies, sort_keys=True, separators=(",", ":")),
+            json.dumps(model_plan_policies, sort_keys=True, separators=(",", ":")),
+            None if account_ids is None else tuple(sorted(set(account_ids))),
+        )
+
     @property
     def generation(self) -> int:
         return self._generation
 
-    async def get(self, key: _CacheKey = (None, None, None, "", None)) -> SelectionInputs | None:
+    async def get(self, key: _CacheKey = (None, None, None, "", "", None)) -> SelectionInputs | None:
         if self._ttl_seconds == 0:
             return None
         entry = self._cache.get(key)
@@ -61,7 +82,7 @@ class AccountSelectionCache:
     async def set(
         self,
         data: SelectionInputs,
-        key: _CacheKey = (None, None, None, "", None),
+        key: _CacheKey = (None, None, None, "", "", None),
         *,
         generation: int | None = None,
     ) -> None:

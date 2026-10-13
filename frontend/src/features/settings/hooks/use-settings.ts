@@ -37,13 +37,16 @@ export function useSettings() {
 
   const updateSettingsMutation = useMutation({
     mutationFn: (payload: SettingsUpdateRequest) => updateSettings(payload),
-    onSuccess: () => {
+    onSuccess: async () => {
       toast.success(t("settings.toasts.saved"));
-      void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
-      void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });
-      void queryClient.invalidateQueries({ queryKey: ["settings", "subscription-overflow-preflight"] });
+      // Keep controls busy until saves can use the refreshed policy and version.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["settings", "detail"] }),
+        queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] }),
+        queryClient.invalidateQueries({ queryKey: ["settings", "subscription-overflow-preflight"] }),
+      ]);
     },
-    onError: (error: Error) => {
+    onError: async (error: Error) => {
       if (error instanceof ApiError && error.code === "subscription_overflow_source_invalid") {
         toast.error(t("settings.routing.subscriptionOverflow.errors.sourceInvalid"));
       } else {
@@ -52,7 +55,7 @@ export function useSettings() {
       if (error instanceof ApiError && error.code === "settings_conflict") {
         // Another writer committed since this form was loaded; refetch so the
         // next save carries the fresh expectedVersion.
-        void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
+        await queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
       }
     },
   });

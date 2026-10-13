@@ -163,6 +163,104 @@ Upstream sometimes omits the code from an exhausted-window error. One normalized
 
 For example, a pre-visible code-less usage-limit frame can move an unpinned request from A to B, while a file-owned turn remains subject to the same owner restrictions. Once text has been emitted, no replay occurs, but the exhausted account still receives its health update after keyed settlement. The client retains the upstream terminal envelope. A proven quota error does not use the code-less-429 burst cooldown, and proxy-authored terminal cleanup keeps code-only classification. Narrow OpenAI-processing-error isolation remains unchanged. See [spec.md](spec.md).
 
+## Subscription model Plan restrictions
+
+
+The requested targets are native subscription models, not OpenAI-compatible
+model sources. An operator restriction therefore belongs in dashboard settings,
+independently of upstream `available_in_plans` capability metadata. The default
+is `{}`: installation and migration do not seed any model-specific restrictions.
+Removing an entry restores that model's existing selection behavior.
+
+The restriction is an intersection, not a preference: exhausted, unavailable,
+out-of-scope, or unentitled Free accounts produce the existing routing error
+instead of spending paid capacity. Upstream entitlement, health, quota, key
+scope, single-account selection, and ranking still apply. Ownership is resolved
+before routing eligibility; filtering cannot invent a unique conversation owner
+or move file-/conversation-bound work to another account.
+
+### Identity and representation
+
+Keys match exact effective native model IDs after existing alias/API-key handling.
+They are case-sensitive and cannot contain whitespace. API configuration does
+not require current catalog membership. The UI selects native non-image entries
+and retains saved absent IDs for editing/removal; it does not offer source-only
+or image-only entries as native choices. A source resolved by existing dispatch
+is unaffected even when its slug collides with a configured native slug.
+
+Recognized operator plans are `free`, `plus`, `pro`, `prolite`, `team`, `business`,
+`enterprise`, and `edu`. Case and surrounding whitespace are normalized and
+lists are deduplicated. Equality is strict: `prolite` does not satisfy `pro`.
+Catalog plan labels can be broader than this operator-setting vocabulary;
+adding a catalog entitlement does not automatically add a configurable plan.
+
+### Constraints and failure modes
+
+- Omitted or null `modelPlanRoutingPolicies` preserves the mapping; only `{}`
+  clears it. Invalid updates fail atomically. Existing authorization, audit,
+  version conflicts, and settings propagation apply.
+- One non-null JSON-text settings column avoids a second policy source of truth.
+  Historical rows receive `{}`. Upgrade is idempotent; downgrade discards this
+  mapping, so re-upgrade starts empty while unrelated settings are preserved.
+- Policy cache fingerprints distinguish selection pools. Propagation uses the
+  existing five-second settings cache and cross-replica invalidation, not
+  instantaneous cluster-wide linearizability.
+- Warm bridge/WebSocket admission reads current persisted account plans in an
+  owned database session outside the bridge registry lock. It rechecks after
+  admission waits. Policy rejection is local unsent work: accepted siblings,
+  task ownership, reservation settlement, and strict owners remain protected.
+- Direct native streaming/compact sends and same-account retries also need the
+  effective policy and persisted-plan check after admission waits or backoff.
+  A previously eligible selection is not durable permission to send; late
+  rejection releases unsent resources without account-health penalties.
+- Malformed stored JSON or unavailable policy evidence fails closed with a
+  sanitized local admission error, not an upstream health penalty. Restriction
+  changes do not terminate already accepted work.
+- An invalid stored mapping (manual SQL edit, or a saved plan that is no
+  longer recognized) keeps native routing failing closed, but settings stay
+  readable: `GET /api/settings` shows only the still-valid entries and logs a
+  warning. Every settings save writes the mapping it carries, and an omitted
+  field carries that displayed mapping, so a PUT of `{}` or a corrected mapping
+  repairs the stored value. For example, stored
+  `{"gpt-6-luna": ["free"], "retired-model": ["retired-plan"]}` reads as
+  `{"gpt-6-luna": ["free"]}` while native requests return 503 until a save.
+- The final direct-send recheck applies only to configured models and reads
+  only the persisted account plan. Unconfigured models dispatch as before;
+  plan-check rejections recorded by concurrent requests stay selection-time
+  evidence that fails over normally.
+- Same-account retries after an upstream 5xx or 401 pass the final recheck
+  before resending. A confirmed pre-dispatch connect failure instead moves a
+  movable stream through fresh selection, which admits only the currently
+  effective pool; if that pool is empty, the existing exhausted-retry error
+  surfaces. An upstream 401 on an allowed first send keeps its existing health
+  penalty; only the admission denial itself is health-neutral.
+- Mutation and refetch keep UI controls busy. A conflict refreshes mapping and
+  version and resets stale drafts; an ordinary failure leaves a retryable draft.
+
+### Configuration example
+
+After a separately authorized deployment, use `PUT /api/settings` with the
+mapping below, including `expectedVersion` from a fresh `GET /api/settings`
+when using optimistic concurrency:
+
+```json
+{
+  "modelPlanRoutingPolicies": {
+    "gpt-5.6-terra": ["free"],
+    "gpt-5.6-luna": ["free"],
+    "gpt-6-luna": ["free"]
+  }
+}
+```
+
+This is an unapplied example, not an installation or migration default. If no
+otherwise eligible Free account remains, `gpt-6-luna` fails rather than using a
+paid account. A paid file/conversation owner cannot move to Free to satisfy the
+restriction. Unconfigured native models and source-dispatched requests retain
+their existing behavior; a configured mapping cannot manufacture entitlement.
+Removing the model key restores ordinary selection after existing settings
+propagation. This documentation does not authorize applying live settings.
+
 ## Sustained-overload soft-affinity rerouting
 
 After the existing three qualified failures within 120 seconds establish sustained upstream backoff, movable prompt-cache, sticky-thread and Codex-session owners may rebind to an eligible overload-free sibling. Burst-only cooldown, hard continuity/file owners, cap/budget rejection and lone-pool fallback retain their existing behavior. This is replica-local mitigation; it does not repair provider-wide generation latency or replay accepted work.

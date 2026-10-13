@@ -100,6 +100,7 @@ from app.modules.proxy.helpers import (
     is_upstream_model_capacity_error,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.model_admission import NativeModelAdmissionError
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 
@@ -1095,6 +1096,8 @@ class _StreamingRetryMixin:
                     )
                     return
                 except ProxyResponseError as exc:
+                    if isinstance(exc, NativeModelAdmissionError):
+                        raise
                     if _must_abort_native_transport_failure(
                         exc,
                         downstream_visible=settlement.downstream_visible,
@@ -2287,6 +2290,8 @@ class _StreamingRetryMixin:
                                 await _finalize_terminal_settlement_after_downstream_close(settlement, account)
                             raise
                         except (_TransientStreamError, ProxyResponseError) as tex:
+                            if isinstance(tex, NativeModelAdmissionError):
+                                raise
                             if isinstance(tex, ProxyResponseError) and _must_abort_native_transport_failure(
                                 tex,
                                 downstream_visible=settlement.downstream_visible,
@@ -2831,6 +2836,8 @@ class _StreamingRetryMixin:
                             )
                     return
                 except ProxyResponseError as exc:
+                    if isinstance(exc, NativeModelAdmissionError):
+                        raise
                     if _must_abort_native_transport_failure(
                         exc,
                         downstream_visible=settlement.downstream_visible,
@@ -3119,6 +3126,8 @@ class _StreamingRetryMixin:
                                 if close_cancellation is not None:
                                     raise close_cancellation
                         except ProxyResponseError as retry_exc:
+                            if isinstance(retry_exc, NativeModelAdmissionError):
+                                raise
                             if _must_abort_native_transport_failure(
                                 retry_exc,
                                 downstream_visible=settlement.downstream_visible,
@@ -3627,6 +3636,20 @@ class _StreamingRetryMixin:
                     conversation_id=conversation_id,
                     client_ip=client_ip,
                 )
+        except NativeModelAdmissionError as exc:
+            # Admission owns no upstream health signal or account failover. The
+            # terminal cleanup still settles reservations before earlier penalties.
+            await _drain_pending_post_refresh_penalty_on_terminal(settlement)
+            if propagate_http_errors:
+                raise
+            error = _parse_openai_error(exc.payload)
+            yield format_sse_event(
+                response_failed_event(
+                    error.code if error and error.code else "upstream_unavailable",
+                    error.message if error and error.message else "Account is unavailable for this model; retry later.",
+                    response_id=request_id,
+                )
+            )
         finally:
             if not upstream_transport_metric_recorded:
                 _record_upstream_transport_metric_once(upstream_transport_metric_status or "error")

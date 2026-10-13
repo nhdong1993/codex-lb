@@ -53,6 +53,8 @@ import {
   type UpstreamProxyAdmin,
 } from "@/test/mocks/factories";
 
+import { ModelPlanRoutingPoliciesSchema } from "@/features/settings/schemas";
+
 const MODEL_OPTION_DELIMITER = ":::";
 const STATUS_ORDER = ["ok", "cancelled", "rate_limit", "quota", "error"] as const;
 
@@ -155,6 +157,7 @@ const SettingsPayloadSchema = z.looseObject({
   totpRequiredOnLogin: z.boolean().optional(),
   totpConfigured: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
+  modelPlanRoutingPolicies: ModelPlanRoutingPoliciesSchema.nullable().optional(),
   limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
   hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
 });
@@ -1584,6 +1587,7 @@ export const handlers = [
     state.settings = createDashboardSettings({
       ...state.settings,
       ...payload,
+      modelPlanRoutingPolicies: payload.modelPlanRoutingPolicies ?? state.settings.modelPlanRoutingPolicies,
     });
     if (
       payload.upstreamProxyRoutingEnabled !== undefined ||

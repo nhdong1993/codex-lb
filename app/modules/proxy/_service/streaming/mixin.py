@@ -60,6 +60,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyUsageReservationData,
 )
+from app.modules.proxy import model_admission
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -274,6 +275,7 @@ from app.modules.proxy._service.streaming.helpers import (
     _classify_terminal_stream_error_frame,
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
+    _native_stream_iterator,
     _observe_terminal_stream_error_frame,
     _openai_error_fields,
     _rewrite_malformed_stream_error_event,
@@ -405,7 +407,6 @@ from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
 from app.modules.proxy.helpers import (
-    _header_account_id,
     _normalize_error_code,
     _parse_openai_error,
     _upstream_error_from_openai,
@@ -502,7 +503,6 @@ class _StreamingMixin(_StreamingRetryMixin):
         preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(headers)
         account_id_value = account.id
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
-        account_id = _header_account_id(account.chatgpt_account_id)
         model = payload.model
         requested_service_tier = payload.service_tier
         service_tier = requested_service_tier
@@ -574,28 +574,17 @@ class _StreamingMixin(_StreamingRetryMixin):
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
             attempt_started_at = clock.monotonic()
             latency_queue_ms = max(0, int((attempt_started_at - request_started_at) * 1000))
-            stream_optional_kwargs: dict[str, object] = {
-                "route": route,
-                "allow_direct_egress": route is None,
-                "route_trace": route_trace,
-                "codex_installation_id": account.codex_installation_id,
-                "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
-                "codex_lb_account_id": account.id,
-                # Selected subscription Account, independent of optional legacy header.
-                "synthesize_routing_hint": True,
-            }
-            if upstream_stream_transport is not None:
-                stream_optional_kwargs["upstream_stream_transport_override"] = upstream_stream_transport
-            stream = _facade()._call_stream_with_supported_optional_kwargs(
-                _facade().core_stream_responses,
+            await model_admission.ensure_native_dispatch_allowed(account, model)
+            iterator = _native_stream_iterator(
+                account,
                 payload,
                 headers,
                 access_token,
-                account_id,
-                optional_kwargs=stream_optional_kwargs,
-                raise_for_status=True,
+                route=route,
+                route_trace=route_trace,
+                upstream_stream_transport=upstream_stream_transport,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             )
-            iterator = _facade()._stream_iterator_after_capacity_admission(stream)
             try:
                 first = await iterator.__anext__()
             except (StopAsyncIteration, aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -951,6 +940,12 @@ class _StreamingMixin(_StreamingRetryMixin):
             response_create_lease.release()
             failure_metadata = _facade()._request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
+            if isinstance(exc, model_admission.NativeModelAdmissionError):
+                status = "error"
+                error_code = error.code if error else None
+                error_message = error.message if error else None
+                settlement.record_success = settlement.account_health_error = False
+                raise
             rewritten_error = _facade()._rewrite_previous_response_stream_error(
                 previous_response_id=payload.previous_response_id,
                 preferred_account_id=preferred_account_id,

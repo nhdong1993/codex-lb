@@ -54,6 +54,7 @@ from app.core.metrics.prometheus import (
     stream_pool_capacity,
     stream_pool_inflight,
 )
+from app.core.model_plan_policy import model_plan_allowed
 from app.core.openai.model_registry import get_model_registry
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
@@ -1172,20 +1173,14 @@ class LoadBalancer:
     ) -> _SelectionInputs:
         mapped_limit_name = _gated_limit_name_for_model(model)
         effective_limit_name = additional_limit_name or mapped_limit_name
-        additional_quota_routing_policies: dict[str, str] = {}
-        if effective_limit_name is not None:
-            additional_quota_routing_policies = await _load_dashboard_additional_quota_routing_overrides()
-        additional_quota_routing_policies_cache_key = json.dumps(
-            additional_quota_routing_policies,
-            sort_keys=True,
-            separators=(",", ":"),
+        dashboard_settings, model_plan_policies = await model_admission.routing_policy_snapshot()
+        additional_quota_policies = (
+            _parse_additional_quota_routing_policies(dashboard_settings.additional_quota_routing_policies_json)
+            if effective_limit_name is not None
+            else {}
         )
-        cache_key = (
-            model,
-            service_tier,
-            additional_limit_name,
-            additional_quota_routing_policies_cache_key,
-            None if account_ids is None else tuple(sorted(set(account_ids))),
+        cache_key = self._selection_inputs_cache.key_for(
+            model, service_tier, additional_limit_name, additional_quota_policies, model_plan_policies, account_ids
         )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
@@ -1213,7 +1208,7 @@ class LoadBalancer:
             ignore_standard_quota_status = effective_limit_name is not None
             routing_policy_override = _additional_quota_routing_policy_override(
                 effective_limit_name,
-                additional_quota_routing_policies,
+                additional_quota_policies,
             )
             scoped_accounts = all_accounts
             if account_ids is not None:
@@ -1322,6 +1317,10 @@ class LoadBalancer:
                 )
                 return selection_inputs
 
+            # Owner discovery and sticky mutation authority above must not shrink
+            # with operator policy. Quota reauth fallback below can restore only
+            # this restricted pool, never an excluded paid plan.
+            accounts = [a for a in accounts if model_plan_allowed(model_plan_policies, model, a.plan_type)]
             if effective_limit_name:
                 additional_quota_candidates = accounts
                 additional_filter = await self._filter_accounts_for_additional_limit(
@@ -2226,11 +2225,6 @@ def _normalize_account_routing_policy(value: str | None) -> str:
     if value in _ACCOUNT_ROUTING_POLICIES:
         return value
     return _ROUTING_POLICY_NORMAL
-
-
-async def _load_dashboard_additional_quota_routing_overrides() -> dict[str, str]:
-    dashboard_settings = await get_settings_cache().get()
-    return _parse_additional_quota_routing_policies(dashboard_settings.additional_quota_routing_policies_json)
 
 
 def _additional_quota_routing_policy_override(limit_name: str | None, policies: dict[str, str]) -> str | None:

@@ -408,6 +408,7 @@ from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
 from app.modules.proxy.helpers import (
+    _header_account_id,
     _normalize_error_code,
     classify_upstream_failure,
     is_model_scoped_upstream_rejection,
@@ -427,6 +428,42 @@ from app.modules.usage.updater import UsageUpdater
 
 def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
+
+
+def _native_stream_iterator(
+    account: Account,
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+    access_token: str,
+    *,
+    route: ResolvedUpstreamRoute | None,
+    route_trace: UpstreamProxyRouteTrace,
+    upstream_stream_transport: str | None,
+    enforce_openai_sdk_contract: bool,
+) -> AsyncIterator[str]:
+    """Construct the native transport iterator with subscription routing provenance."""
+    optional_kwargs: dict[str, object] = {
+        "route": route,
+        "allow_direct_egress": route is None,
+        "route_trace": route_trace,
+        "codex_installation_id": account.codex_installation_id,
+        "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
+        "codex_lb_account_id": account.id,
+        # Selected subscription Account, independent of optional legacy header.
+        "synthesize_routing_hint": True,
+    }
+    if upstream_stream_transport is not None:
+        optional_kwargs["upstream_stream_transport_override"] = upstream_stream_transport
+    stream = _facade()._call_stream_with_supported_optional_kwargs(
+        _facade().core_stream_responses,
+        payload,
+        headers,
+        access_token,
+        _header_account_id(account.chatgpt_account_id),
+        optional_kwargs=optional_kwargs,
+        raise_for_status=True,
+    )
+    return _facade()._stream_iterator_after_capacity_admission(stream)
 
 
 def _canonical_background_ack(

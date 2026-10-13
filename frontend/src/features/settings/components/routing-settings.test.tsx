@@ -20,6 +20,10 @@ if (!HTMLElement.prototype.scrollIntoView) {
   HTMLElement.prototype.scrollIntoView = () => undefined;
 }
 
+vi.mock("@/features/api-keys/hooks/use-models", () => ({
+  useModels: () => ({ data: [], isLoading: false, isError: false }),
+}));
+
 const LIMIT_WARMUP_DEFAULTS = {
   limitWarmupEnabled: false,
   limitWarmupWindows: "both" as const,

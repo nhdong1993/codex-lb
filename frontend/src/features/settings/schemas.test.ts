@@ -737,3 +737,51 @@ describe("subscription overflow fields", () => {
     });
   });
 });
+
+describe("model plan routing policy contracts", () => {
+  it("defaults missing policies to empty without hard-coding example model restrictions", () => {
+    const legacy = { ...createDashboardSettings(), modelPlanRoutingPolicies: undefined };
+    expect(DashboardSettingsSchema.parse(legacy).modelPlanRoutingPolicies).toEqual({});
+  });
+
+  it("accepts saved absent model IDs and recognized nonempty plans", () => {
+    const policies = { "catalog-missing": ["free", "plus", "pro", "prolite", "team", "business", "enterprise", "edu"] };
+    expect(
+      DashboardSettingsSchema.parse({ ...createDashboardSettings(), modelPlanRoutingPolicies: policies })
+        .modelPlanRoutingPolicies,
+    ).toEqual(policies);
+    expect(SettingsUpdateRequestSchema.parse({ modelPlanRoutingPolicies: policies }).modelPlanRoutingPolicies).toEqual(
+      policies,
+    );
+  });
+
+  it.each([{}, { modelPlanRoutingPolicies: null }, { modelPlanRoutingPolicies: {} }])(
+    "accepts omit/null/clear semantics: %j",
+    (payload) => {
+      expect(SettingsUpdateRequestSchema.safeParse(payload).success).toBe(true);
+    },
+  );
+
+  it("parses and round-trips plan values the editor does not offer", () => {
+    // A newer backend plan must not fail the whole settings page, and unrelated
+    // saves resend the saved mapping unchanged.
+    const policies = { "gpt-future": ["free", "future_plan"] };
+    expect(
+      DashboardSettingsSchema.parse({ ...createDashboardSettings(), modelPlanRoutingPolicies: policies })
+        .modelPlanRoutingPolicies,
+    ).toEqual(policies);
+    expect(SettingsUpdateRequestSchema.parse({ modelPlanRoutingPolicies: policies }).modelPlanRoutingPolicies).toEqual(
+      policies,
+    );
+  });
+
+  it.each([{ model: [] }, { "": ["free"] }, { "bad id": ["free"] }])(
+    "rejects malformed policy %j",
+    (policies) => {
+      expect(SettingsUpdateRequestSchema.safeParse({ modelPlanRoutingPolicies: policies }).success).toBe(false);
+      expect(
+        DashboardSettingsSchema.safeParse({ ...createDashboardSettings(), modelPlanRoutingPolicies: policies }).success,
+      ).toBe(false);
+    },
+  );
+});

@@ -16,6 +16,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import type { ModelSource } from "@/features/model-sources/schemas";
+import { ModelPlanRoutingSettings } from "@/features/settings/components/model-plan-routing-settings";
 import { InheritBadge } from "@/features/settings/components/inherit-badge";
 import { SubscriptionOverflowSettings } from "@/features/settings/components/subscription-overflow-settings";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
@@ -657,6 +658,15 @@ export function RoutingSettings({
             </div>
             <p className="text-xs text-muted-foreground">{t("settings.routing.strategy.safetyNote")}</p>
           </div>
+
+          <ModelPlanRoutingSettings
+            key={JSON.stringify(settings.modelPlanRoutingPolicies)}
+            policies={settings.modelPlanRoutingPolicies}
+            busy={busy}
+            onSave={(modelPlanRoutingPolicies) =>
+              onSave(buildSettingsUpdateRequest(settings, { modelPlanRoutingPolicies }))
+            }
+          />
 
           <div className="space-y-3 p-3">
             <div>

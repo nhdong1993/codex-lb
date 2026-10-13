@@ -13,7 +13,7 @@ from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrad
 pytestmark = pytest.mark.integration
 
 PARENT = "20260910_010000_merge_beta6_and_key_groups"
-HEAD = "20261002_010000_add_credential_generation"
+HEAD = "20261011_020000_add_model_plan_routing_policies"
 
 
 def test_reset_credit_migration_preserves_legacy_pins(tmp_path: Path) -> None:

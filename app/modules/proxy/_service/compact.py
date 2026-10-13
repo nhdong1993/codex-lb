@@ -42,6 +42,7 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
+from app.modules.proxy import model_admission
 from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import (
     _affinity_with_payload_continuity,
@@ -1148,6 +1149,7 @@ class _CompactMixin:
                         )
                     create_lease = await proxy._get_work_admission().acquire_response_create(compact=True)
                     route = await proxy._resolve_upstream_route_for_account(target, operation="compact")
+                    await model_admission.ensure_native_dispatch_allowed(target, payload.model)
                     remaining_budget = _remaining_budget_seconds(deadline)
                     if remaining_budget <= 0:
                         logger.warning(
@@ -1703,7 +1705,10 @@ class _CompactMixin:
                         log_status = "success"
                         return response
                     except ProxyResponseError as exc:
-                        if exc.failure_phase == "usage_settlement":
+                        if (
+                            isinstance(exc, model_admission.NativeModelAdmissionError)
+                            or exc.failure_phase == "usage_settlement"
+                        ):
                             raise
                         compact_continuity_error = _compact_previous_response_not_found_error(exc)
                         if compact_continuity_error is not None:

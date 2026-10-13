@@ -22,6 +22,11 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
+# Non-null dashboard_settings columns added after the merge, with server defaults.
+_POST_MERGE_SETTINGS_DEFAULTS: dict[str, Any] = {
+    "limit_warmup_auto_enable_new_accounts": 1,
+    "model_plan_routing_policies_json": "{}",
+}
 
 
 @dataclass
@@ -182,14 +187,15 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     assert result.current_revision == head
     assert _revisions(database.engine) == (head,)
     merged = _state(database.engine)
-    # Revisions after the merge add nullable dashboard_settings columns (for
-    # example the resilience toggles); they must start NULL and are compared
-    # separately so this test keeps covering the two original branches.
+    # Revisions after the merge add dashboard_settings columns (for example
+    # the nullable resilience toggles); they must start NULL or at their server
+    # default and are compared separately so this test keeps covering the two
+    # original branches.
     merged_settings = [dict(row) for row in merged["settings"]]
     added_columns = set(merged_settings[0]) - set(expected_settings[0])
     for row in merged_settings:
         for column in added_columns:
-            assert row.pop(column) is None
+            assert row.pop(column) == _POST_MERGE_SETTINGS_DEFAULTS.get(column), column
     assert merged_settings == expected_settings
     assert [row["upstream_stream_transport"] for row in merged["settings"]] == ["auto", "http", "websocket", "auto"]
     assert merged["pins"] == (before["pins"] if before["pins"] is not None else [])

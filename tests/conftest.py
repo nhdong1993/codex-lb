@@ -218,13 +218,26 @@ def _scope_priority_plan_checks(request, monkeypatch):
     # Pure unit tests use stub accounts; shared database behavior is exercised
     # by integration tests against migrated real repositories.
     if "/tests/unit/" in request.path.as_posix():
+        from types import SimpleNamespace
         from unittest.mock import AsyncMock
 
+        from app.modules.proxy import model_admission
         from app.modules.usage import plan_checks
 
         monkeypatch.setattr(plan_checks, "request_plan_check", AsyncMock())
         monkeypatch.setattr(plan_checks, "pending_plan_check_ids", AsyncMock(return_value=set()))
         monkeypatch.setattr(plan_checks, "rejected_model_account_ids", AsyncMock(return_value=set()))
+        # Routing reads its policy snapshot from the settings cache; stub
+        # repositories have no settings table. Tests that exercise policies
+        # patch ``model_admission.get_settings_cache`` again.
+        empty_policies = SimpleNamespace(
+            model_plan_routing_policies_json="{}", additional_quota_routing_policies_json="{}"
+        )
+        monkeypatch.setattr(
+            model_admission,
+            "get_settings_cache",
+            lambda: SimpleNamespace(get=AsyncMock(return_value=empty_policies)),
+        )
 
 
 @pytest.fixture(autouse=True)

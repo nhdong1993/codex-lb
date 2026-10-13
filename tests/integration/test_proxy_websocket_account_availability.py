@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from concurrent.futures import CancelledError as FutureCancelledError
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -14,13 +15,16 @@ from sqlalchemy.exc import OperationalError
 
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountPlanCheck, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyUsageReservationData
+from app.modules.proxy import model_admission
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.account_cache import RoutingAvailabilityCache
+from app.modules.settings.repository import SettingsRepository
 from app.modules.usage import plan_checks
 from tests.integration.test_http_bridge_model_exclusion import fail_driver_connect
 from tests.integration.test_proxy_websocket_responses import (
@@ -95,7 +99,7 @@ def route(monkeypatch):
             if request_state.preferred_account_id is not None:
                 query = query.where(Account.id == request_state.preferred_account_id)
             candidates = list((await session.execute(query)).scalars())
-        excluded = await plan_checks.rejected_model_account_ids(candidates, model)
+        excluded = await model_admission.rejected_model_account_ids(candidates, model)
         account = next((candidate for candidate in candidates if candidate.id not in excluded), None)
         if account is None:
             message = "Previous response owner account is unavailable; retry later."
@@ -393,16 +397,41 @@ def test_model_evidence_failure_preserves_accepted_sibling(
     assert not route.health_writes
 
 
-def test_model_rejection_preserves_accepted_sibling(app_instance, route):
+async def set_plan_policy(plans):
+    async with SessionLocal() as session:
+        settings = await SettingsRepository(session).get_or_create()
+        settings.model_plan_routing_policies_json = json.dumps({"gpt-5.4": plans})
+        await session.commit()
+    await get_settings_cache().invalidate()
+
+
+async def reject_for_cause(cause):
+    if cause == "model":
+        await reject_model()
+    elif cause == "policy":
+        async with SessionLocal() as session:
+            await session.execute(update(Account).where(Account.id == "account_b").values(plan_type="free"))
+            await session.commit()
+        await set_plan_policy(["free"])
+    else:
+        async with SessionLocal() as session:
+            await session.execute(update(Account).where(Account.id == "account_a").values(plan_type="free"))
+            await session.commit()
+
+
+@pytest.mark.parametrize("cause", ["model", "policy", "plan-change"])
+def test_model_rejection_preserves_accepted_sibling(app_instance, route, cause):
     route.first._deferred_message_batches.clear()
     route.first._deferred_message_batches.append(_websocket_response_batch("resp_a", completed=False))
     with TestClient(app_instance) as client:
         assert client.portal is not None
         client.portal.call(route.seed)
+        if cause == "plan-change":
+            client.portal.call(set_plan_policy, ["plus"])
         with client.websocket_connect("/v1/responses") as websocket:
             websocket.send_json(_websocket_response_create("accepted"))
             assert websocket.receive_json()["type"] == "response.created"
-            client.portal.call(reject_model)
+            client.portal.call(reject_for_cause, cause)
             websocket.send_json(_websocket_response_create("excluded"))
             assert websocket.receive_json()["response"]["error"]["code"] == "upstream_unavailable"
             assert not route.first.closed
@@ -440,7 +469,8 @@ def test_unrelated_or_expired_model_rejection_keeps_socket_reusable(app_instance
     assert not route.health_writes
 
 
-def test_model_rejection_during_create_lease_wait_releases_unsent_turn(app_instance, route, monkeypatch):
+@pytest.mark.parametrize("cause", ["model", "policy", "plan-change"])
+def test_model_rejection_during_create_lease_wait_releases_unsent_turn(app_instance, route, monkeypatch, cause):
     acquire_original = proxy_module.ProxyService._acquire_account_response_create_lease_or_overload
     calls = 0
 
@@ -449,13 +479,15 @@ def test_model_rejection_during_create_lease_wait_releases_unsent_turn(app_insta
         calls += 1
         lease = await acquire_original(self, **kwargs)
         if calls == 2:
-            await reject_model()
+            await reject_for_cause(cause)
         return lease
 
     monkeypatch.setattr(proxy_module.ProxyService, "_acquire_account_response_create_lease_or_overload", acquire)
     with TestClient(app_instance) as client:
         assert client.portal is not None
         client.portal.call(route.seed)
+        if cause == "plan-change":
+            client.portal.call(set_plan_policy, ["plus"])
         with client.websocket_connect("/v1/responses") as websocket:
             complete_turn(websocket, "first")
             websocket.send_json(_websocket_response_create("excluded during admission"))

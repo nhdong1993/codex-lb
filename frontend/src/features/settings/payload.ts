@@ -31,6 +31,7 @@ export function buildSettingsUpdateRequest(
     stickyReallocationBudgetThresholdPct: settings.stickyReallocationBudgetThresholdPct,
     stickyReallocationPrimaryBudgetThresholdPct: settings.stickyReallocationPrimaryBudgetThresholdPct,
     stickyReallocationSecondaryBudgetThresholdPct: settings.stickyReallocationSecondaryBudgetThresholdPct,
+    modelPlanRoutingPolicies: settings.modelPlanRoutingPolicies,
     additionalQuotaRoutingPolicies: settings.additionalQuotaRoutingPolicies ?? {},
     importWithoutOverwrite: settings.importWithoutOverwrite,
     totpRequiredOnLogin: settings.totpRequiredOnLogin,
