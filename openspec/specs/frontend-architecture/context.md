@@ -109,3 +109,9 @@ List places Status and Reset in separate desktop columns. Reset (N) includes zer
 ### Reset expiry marker in List
 
 A small red dot above Reset (N) helps identify credits due to expire within 72 hours. It uses the nearest expiry already in the summary and the shared Accounts minute clock. This is independent of the reset-action countdown setting; hiding reset-count badges also hides the dot. A zero or unknown count, an invalid deadline, and expired snapshots show no dot. For example, a Reset (3) count with two days left gets the marker, while four days left does not. The dot stays inside the row without changing its height or intercepting the row action.
+
+## APIs List and unused keys
+
+APIs retains the original sidebar/detail layout by default and remembers an optional full-width List view in browser storage. Both modes share search, status/usage filters and sorting. List shows identity, status, lifetime requests, expiry, last use and the existing pooled/limit bars; a row opens the existing detail and management UI in a dialog. Detail queries are enabled only while the inline panel or dialog is visible. The List paginates at 24 keys after filtering and sorting.
+
+Key not used means there is neither a last-used timestamp nor a positive lifetime request count in the current list snapshot. The overview Used/Idle counts use the same rule. For example, a key with an old timestamp but no retained request history remains Used; a new key with no timestamp and zero requests matches Key not used. The status filter can further restrict this to active or disabled keys. A server flush or in-flight request can delay recorded evidence, so this filter reflects recorded usage rather than an instantaneous no-traffic guarantee. It does not mutate keys or fetch additional per-key histories.
