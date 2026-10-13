@@ -10883,6 +10883,7 @@ and MUST NOT replay through a different source credential.
 A direct HTTP/SSE Responses stream is a downstream HTTP request whose upstream transport is HTTP, not the HTTP responses bridge. Such a stream is movable when all of the following hold:
 
 - the request carries no `previous_response_id`
+- its payload is account-neutral: it carries no account-bound items (for example encrypted reasoning) that pin it to the account it is dispatched to
 - it references no account-scoped uploaded file
 - it resolves to no turn-state or other hard continuity owner
 - it is not required to stay on a preferred account
@@ -10972,9 +10973,9 @@ A stream that is not movable MUST NOT hold the prelude and MUST surface a capaci
 
 #### Scenario: Streams that cannot move keep the existing contract
 
-- **WHEN** a direct HTTP/SSE stream carries `previous_response_id`, an account-scoped file reference, a turn-state or hard continuity owner, or a required preferred account, or the routing strategy is `single_account`
+- **WHEN** a direct HTTP/SSE stream carries `previous_response_id`, an account-bound payload item such as encrypted reasoning, an account-scoped file reference, a turn-state or hard continuity owner, or a required preferred account, or the routing strategy is `single_account`
 - **THEN** the proxy forwards `response.created` without holding it
-- **AND** an output-free capacity terminal is surfaced unchanged without a replay
+- **AND** an output-free capacity terminal is surfaced unchanged without a replay, excluding no account and recording a single request-log row for the attempt
 
 #### Scenario: Successful turns are forwarded unchanged
 

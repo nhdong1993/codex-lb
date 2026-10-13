@@ -2226,9 +2226,13 @@ class _StreamingRetryMixin:
                                 request_id,
                                 allow_retry_flag,
                                 request_started_at=start,
+                                # An account-bound payload (``register_payload_owner``,
+                                # e.g. encrypted reasoning items) is pinned to this
+                                # account once dispatched, so it can never move.
                                 allow_capacity_replay=(
                                     allow_retry_flag
                                     and not capacity_replay_used
+                                    and not register_payload_owner
                                     and resilience.deterministic_failover_enabled
                                     and payload.previous_response_id is None
                                     and not _stream_owner_bound_to(account)

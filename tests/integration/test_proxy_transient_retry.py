@@ -584,19 +584,35 @@ async def test_stream_capacity_terminal_is_not_replayed_when_deterministic_failo
 
 
 @pytest.mark.asyncio
-async def test_stream_capacity_terminal_is_not_replayed_for_owner_bound_requests(async_client, monkeypatch):
+@pytest.mark.parametrize("native_headers", [False, True], ids=["public", "native-codex"])
+async def test_stream_capacity_terminal_is_not_replayed_for_account_bound_payloads(
+    async_client, monkeypatch, native_headers
+):
+    """Encrypted reasoning pins the payload to the account it was dispatched to.
+
+    Production Codex HTTP turns carry such items, so they must keep the old
+    surfacing: no prelude hold, no exclusion, and no second (account-less)
+    request-log row from a replay that could never move.
+    """
     await _import_account(async_client, "acc_cap_owner_a", "cap-owner-a@example.com")
     await _import_account(async_client, "acc_cap_owner_b", "cap-owner-b@example.com")
     failed_attempt = [_created_sse_event("resp_cap_owner"), _accepted_failed_sse_event("resp_cap_owner")]
     seen_account_ids = _install_scripted_upstream(monkeypatch, [failed_attempt, _completed_sse_events("resp_never")])
 
     lines = await _stream_codex_responses(
-        async_client, payload=_BURST_OWNER_BOUND_PAYLOAD, headers=_NATIVE_CODEX_HEADERS
+        async_client,
+        payload=_BURST_OWNER_BOUND_PAYLOAD,
+        headers=_NATIVE_CODEX_HEADERS if native_headers else None,
     )
 
     assert len(seen_account_ids) == 1
     events = _extract_events(lines)
     assert [_terminal_error_code(event) for event in events if _terminal_error_code(event)] == ["server_is_overloaded"]
+    async with SessionLocal() as session:
+        from app.db.models import RequestLog
+
+        logs = list(await session.scalars(select(RequestLog)))
+    assert [(log.account_id is not None, log.error_code) for log in logs] == [(True, "server_is_overloaded")]
 
 
 @pytest.mark.asyncio

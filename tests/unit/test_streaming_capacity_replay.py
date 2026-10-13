@@ -55,6 +55,10 @@ class _Upstream:
         self._lines = list(lines)
         self._error = error
         self.reads = 0
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
 
     def __aiter__(self) -> _Upstream:
         return self
@@ -132,6 +136,25 @@ async def test_output_free_capacity_terminal_drops_the_prelude(code: str, messag
         raise_if_capacity_replay(iterator, code, {"message": message})
     assert exc_info.value.capacity_replay is True
     assert exc_info.value.exclude_account is True
+
+
+@pytest.mark.asyncio
+async def test_capacity_terminal_closes_upstream_before_failover() -> None:
+    upstream = _Upstream([_created(), _failed(), _line({"type": "codex.trailing"})])
+    iterator = _prelude(upstream)
+
+    assert await iterator.__anext__() == _failed()
+    assert upstream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_flushed_prelude_leaves_upstream_open() -> None:
+    upstream = _Upstream([_created(), _output_item_added()])
+    iterator = _prelude(upstream)
+
+    await iterator.__anext__()
+
+    assert upstream.closed is False
 
 
 @pytest.mark.asyncio

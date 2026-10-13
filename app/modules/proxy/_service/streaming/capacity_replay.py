@@ -111,6 +111,11 @@ class CapacityReplayPrelude:
             raise error
         return await self._upstream.__anext__()
 
+    async def _close_upstream(self) -> None:
+        close = getattr(self._upstream, "aclose", None)
+        if close is not None:
+            await close()
+
     async def _resolve_prelude(self) -> None:
         held: list[str] = []
         while True:
@@ -139,6 +144,10 @@ class CapacityReplayPrelude:
             if is_output_free_capacity_terminal(event_type, payload):
                 self.capacity_terminal = True
                 self._ready = [line]
+                # ``_stream_once`` hands this terminal to the failover and never
+                # reads again; close upstream now so its teardown runs here
+                # instead of in the async-generator finalizer.
+                await self._close_upstream()
                 return
             self._ready = [*held, line]
             return

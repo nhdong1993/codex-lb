@@ -124,7 +124,12 @@ hours): direct HTTP admissions were rejected with `server_is_overloaded` about
 every rejection arrived 2-27 s after dispatch with zero output. One replay per
 request bounds the extra upstream load to a single admission; owner-bound
 requests (`previous_response_id`, file pins, turn-state owners,
-`single_account`) keep the old fail-closed surfacing, and the
+`single_account`) and account-bound payloads keep the old fail-closed
+surfacing. Most native Codex HTTP turns resend encrypted reasoning items,
+which pin the payload to the account it is first dispatched to, so the
+replay mainly covers account-neutral requests (first turns, plain API
+clients); the first production rollout replayed bound payloads and only
+produced a second, account-less request-log row before this was fixed. The
 `deterministic_failover_enabled` toggle turns the replay off without a deploy.
 Each attempt keeps its own request-log row, so overload stays visible in the
 dashboard even when the client succeeded; grep `http_capacity_replay` in the
