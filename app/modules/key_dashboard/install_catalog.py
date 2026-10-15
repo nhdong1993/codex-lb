@@ -2,6 +2,7 @@
 
 UNIX_CATALOG_SETUP = r"""
 import json
+import re
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -56,9 +57,17 @@ for entry in catalog["models"]:
         models.append(entry)
 if not models:
     sys.exit("No usable Codex models for this key; ask the administrator to enable a streaming Responses model.")
-model = setup["model"] or models[0]["slug"]
-if model not in {entry["slug"] for entry in models}:
-    sys.exit("The configured model is unavailable; export a new installer after checking the key's model access.")
+listed = {entry["slug"] for entry in models}
+model = models[0]["slug"]
+skipped = []
+for name in setup["preferred_models"]:
+    if name in listed:
+        model = name
+        break
+    skipped.append(name)
+if skipped:
+    print("Skipped models not in this key's catalog: " + ", ".join(json.dumps(name) for name in skipped)
+          + "; using " + json.dumps(model) + ".", file=sys.stderr)
 
 catalog_path = codex_dir / "codex-lb-models.json"
 (backup_dir / "catalog.new").write_text(
@@ -70,6 +79,16 @@ config = (
     + "model_catalog_json = " + toml_string(str(catalog_path)) + "\n"
     + config_path.read_text(encoding="utf-8")
 )
+if setup["keep_login"]:
+    # Keep the client's credential store so its existing login stays visible to Codex.
+    previous = backup_dir / "config.toml"
+    for line in previous.read_text(encoding="utf-8", errors="replace").splitlines() if previous.is_file() else ():
+        if line.lstrip().startswith("["):
+            break
+        store = re.fullmatch(r'\s*cli_auth_credentials_store\s*=\s*"(file|keyring|auto)"\s*(?:#.*)?', line)
+        if store:
+            config = 'cli_auth_credentials_store = "' + store.group(1) + '"\n' + config
+            break
 config_path.write_text(config, encoding="utf-8")
 (backup_dir / "setup.json").unlink()
 """
@@ -107,9 +126,17 @@ foreach ($entry in $catalog.models) {
 if ($models.Count -eq 0) {
     throw 'No usable Codex models for this key; ask the administrator to enable a streaming Responses model.'
 }
-$model = if ($setup.model) { $setup.model } else { $models[0].slug }
-if ($model -cnotin @($models | ForEach-Object { $_.slug })) {
-    throw "The configured model is unavailable; export a new installer after checking the key's model access."
+$listed = @($models | ForEach-Object { $_.slug })
+$model = $models[0].slug
+$skipped = @()
+foreach ($name in @($setup.preferred_models | Where-Object { $_ -is [string] })) {
+    if ($name -cin $listed) { $model = $name; break }
+    $skipped += $name
+}
+if ($skipped.Count -gt 0) {
+    $skippedJson = @($skipped | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress }) -join ', '
+    [Console]::Error.WriteLine("Skipped models not in this key's catalog: $skippedJson; using " +
+        (ConvertTo-Json -InputObject $model -Compress) + '.')
 }
 $catalogPath = Join-Path $codexDir 'codex-lb-models.json'
 $catalogJson = ConvertTo-Json -InputObject @{ models = @($models) } -Depth 100
@@ -117,4 +144,17 @@ $catalogJson = ConvertTo-Json -InputObject @{ models = @($models) } -Depth 100
 $modelJson = ConvertTo-Json -InputObject $model -Compress
 $pathJson = ConvertTo-Json -InputObject $catalogPath -Compress
 $config = "model = $modelJson`nmodel_catalog_json = $pathJson`n" + $config
+if ($setup.keep_login) {
+    # Keep the client's credential store so its existing login stays visible to Codex.
+    $previousConfig = Join-Path $backupDir 'config.toml'
+    $previousLines = @()
+    if (Test-Path -LiteralPath $previousConfig) { $previousLines = [IO.File]::ReadAllLines($previousConfig) }
+    foreach ($line in $previousLines) {
+        if ($line.TrimStart().StartsWith('[')) { break }
+        if ($line -cmatch '\A\s*cli_auth_credentials_store\s*=\s*"(file|keyring|auto)"\s*(#.*)?\z') {
+            $config = 'cli_auth_credentials_store = "' + $Matches[1] + '"' + "`n" + $config
+            break
+        }
+    }
+}
 """

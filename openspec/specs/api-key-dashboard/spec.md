@@ -147,7 +147,7 @@ The page SHALL provide accessible Overview and Install tabs, refresh, pagination
 
 The Install tab SHALL offer macOS and Linux Bash scripts and a Windows PowerShell script to configure the shared Codex home used by Codex App, CLI, and IDE extension. It MUST offer script copying, installer file download, and a direct curl setup command. The UI MUST explain that setup configures already-installed clients, uses the current key, backs up and replaces existing configuration, authentication, and model catalog, and requires restarting clients. It MUST state that macOS/Linux setup requires Python 3. It MUST explain that WSL or remote extensions require setup in their own environment.
 
-The system SHALL expose `GET /api/key-dashboard/install-script?platform=macos|linux|windows`, require an active unexpired Bearer API key regardless of global proxy authentication settings, and return only that caller's personalized text installer with no-store caching headers. The installer MUST use the dashboard origin's `/backend-api/codex` endpoint and the enforced model or first allowed model; unrestricted keys MUST select the first visible API model in the downloaded catalog. An exported enforced or first allowed model that is absent from the catalog MUST stop setup with an actionable error. Unsupported platforms MUST be rejected. The script MUST NOT disclose account identities or other keys.
+The system SHALL expose `GET /api/key-dashboard/install-script?platform=macos|linux|windows`, require an active unexpired Bearer API key regardless of global proxy authentication settings, and return only that caller's personalized text installer with no-store caching headers. The installer MUST use the dashboard origin's `/backend-api/codex` endpoint. It MUST export ordered model preferences: the enforced model when one is set, otherwise every allowed model in configured order, otherwise none. On each run it MUST skip preferences absent from the retained catalog and configure the first remaining preference; when no preference remains, including for unrestricted keys, it MUST configure the first retained catalog model. When preferences are skipped, setup MUST report the skipped names and the configured model on standard error without printing the credential. Unsupported platforms MUST be rejected. The script MUST NOT disclose account identities or other keys.
 
 Generated scripts MUST configure `config.toml` and file-backed `auth.json` in `CODEX_HOME` when set, otherwise the user's `.codex` directory, and MUST back up existing files before replacing them. They MUST safely encode credential, endpoint, and model values as data rather than executable input, MUST NOT print the credential, and MUST restrict credential-file access to the current user. Failure to back up existing files MUST stop setup before replacement.
 
@@ -165,6 +165,20 @@ Generated scripts MUST configure `config.toml` and file-backed `auth.json` in `C
 - **THEN** the old files remain recoverable in a unique private backup directory
 - **AND** the new files select codex-lb and authenticate with the exported key
 
+#### Scenario: Skip preferred models missing from the catalog
+
+- **GIVEN** a key allows `codex-auto-review`, `gpt-5.4-mini` and `gpt-5.6-luna` in that order
+- **AND** its retained catalog lists `gpt-5.6-luna` but not the hidden or retired first two models
+- **WHEN** an exported installer runs
+- **THEN** setup succeeds and configures `gpt-5.6-luna`
+- **AND** standard error names the skipped models and the configured model
+
+#### Scenario: Fall back when no preferred model is cataloged
+
+- **GIVEN** none of an exported installer's preferred models is in the retained catalog and the catalog is nonempty
+- **WHEN** the installer runs
+- **THEN** setup configures the first retained catalog model
+
 #### Scenario: Reject invalid installer credentials
 
 - **WHEN** a missing, invalid, inactive, or expired credential requests an installer
@@ -175,7 +189,6 @@ Generated scripts MUST configure `config.toml` and file-backed `auth.json` in `C
 
 - **WHEN** the platform changes, the user disconnects, or the Install tab unmounts during an installer fetch
 - **THEN** a late response MUST NOT restore obsolete script or credential state
-
 ### Requirement: Clear and responsive installer presentation
 
 The Install tab SHALL visually distinguish platform selection, the direct terminal command, and file export actions. It SHALL display the selected shell and installer filename and group prerequisite, replacement, restart, remote-environment, and credential-export guidance separately from executable previews. Existing Overview content and installer authentication and export behavior MUST remain unchanged.
@@ -325,7 +338,7 @@ Every execution of an exported installer MUST fetch `/api/key-dashboard/models` 
 
 The catalog endpoint MUST require an active unexpired Bearer API key regardless of global proxy authentication settings, reuse native catalog serialization and key/source scoping, and return private no-store responses without consuming inference limits.
 
-For a key assigned model sources and no subscription accounts, the exported provider SHALL enable WebSockets only when its nonempty eligible Responses source set is entirely streaming and native-WebSocket capable and runtime/global policy permits source WebSocket. Otherwise that source-only provider MUST use HTTP Responses. Mixed, account-only and unassigned key providers SHALL retain WebSocket support. Export MUST determine this policy from authenticated assignments and capabilities without exposing them. The installer MUST back up and protect the catalog alongside configuration and authentication. Failed downloads, redirects, invalid or empty catalogs, unavailable selected models, unsafe target paths, and backup failures MUST stop setup before replacement and MUST NOT print the credential or response body.
+For a key assigned model sources and no subscription accounts, the exported provider SHALL enable WebSockets only when its nonempty eligible Responses source set is entirely streaming and native-WebSocket capable and runtime/global policy permits source WebSocket. Otherwise that source-only provider MUST use HTTP Responses. Mixed, account-only and unassigned key providers SHALL retain WebSocket support. Export MUST determine this policy from authenticated assignments and capabilities without exposing them. The installer MUST back up and protect the catalog alongside configuration and authentication. Failed downloads, redirects, invalid or empty catalogs, unsafe target paths, and backup failures MUST stop setup before replacement and MUST NOT print the credential or response body.
 
 Eligibility MUST be evaluated before streaming/WebSocket filtering. Eligibility MUST use the effective routed model after key model enforcement, alias resolution and fast-mode prohibition, while preserving exact source alias precedence, model permissions and source assignment scope. The provider WebSocket flag MUST be fixed at export. Re-running an existing export MUST refresh its catalog without changing that embedded flag; a new export MUST evaluate current assignment, capability and global transport policy.
 
@@ -404,7 +417,6 @@ An allowlisted name with no eligible enabled Responses source after effective mo
 - **WHEN** an installer downloads its catalog
 - **THEN** the endpoint still validates the supplied key and scopes the catalog to its model/source policy
 - **AND** missing, invalid, expired or inactive keys are rejected with 401
-
 ### Requirement: Client setup redirects the built-in provider
 
 Generated installers MUST write root `openai_base_url` with the same endpoint as the configured `codex-lb` provider. File-backed authentication MUST use the current exported key. Setup MUST preserve session/history files and project configuration, and MUST NOT change machine or user environment variables. The UI MUST explain restarting clients and the remaining scope of explicit profile/CLI overrides.
@@ -484,3 +496,33 @@ Every generated platform installer MUST use the explicit `codex-lb-installer/1.0
 - **WHEN** catalog download returns HTTP 403 with a response body containing sensitive content
 - **THEN** setup stops with HTTPS and proxy or firewall guidance and the existing client files remain unchanged
 - **AND** neither the body nor the credential appears in output
+
+### Requirement: Installer can keep the Codex login session
+
+`GET /api/key-dashboard/install-script` SHALL accept `keep_login=true`. Such an installer MUST configure the `codex-lb` provider with `requires_openai_auth = true` and `http_headers` sending the exported key as `x-codex-lb-api-key`, MUST carry over only a top-level `cli_auth_credentials_store` value of `file`, `keyring` or `auto` from the previous configuration and otherwise leave it unset, and MUST neither create nor replace `auth.json`, while still downloading the catalog with the exported key and writing configuration and catalog with existing backup and protection. It MUST state that `auth.json` was not changed without printing the key. A first install recorded by a keep-login installer MUST mark `auth.json` as unmanaged so the offline uninstaller neither restores nor deletes it; a later installer that replaces `auth.json` MUST make that run's pre-replacement copy (or its absence) the restore point. Installers exported without the option MUST keep the API-key `auth.json` behavior.
+
+The Install tab SHALL offer a "keep login session" checkbox checked by default. While checked it MUST show a visually highlighted Vietnamese warning that Codex sends its login access token to the codex-lb server on every request, MUST export installers and commands with `keep_login=true`, and MUST require confirming a Vietnamese warning dialog before copying the command or script or downloading the script. Unchecking MUST export the API-key installer without the dialog.
+
+#### Scenario: Keep an existing ChatGPT login
+
+- **GIVEN** a Codex home whose `auth.json` holds a ChatGPT login
+- **WHEN** a `keep_login` installer runs successfully
+- **THEN** `auth.json` is byte-for-byte unchanged
+- **AND** the provider sends the API key in `x-codex-lb-api-key`
+
+#### Scenario: No login yet
+
+- **GIVEN** a Codex home without `auth.json`
+- **WHEN** a `keep_login` installer runs
+- **THEN** no `auth.json` is created and the user is told to sign in to Codex
+
+#### Scenario: Uninstall keeps the client login
+
+- **GIVEN** a keep-login install after which the user signed in or Codex renewed its login
+- **WHEN** the offline uninstaller runs
+- **THEN** `auth.json` keeps the current login while configuration and catalog are restored
+
+#### Scenario: Confirm before exporting a keep-login installer
+
+- **WHEN** a user copies the command or script, or downloads the script, with the checkbox checked
+- **THEN** a Vietnamese warning dialog appears and the export happens only after confirmation

@@ -11,6 +11,11 @@ import { renderWithProviders } from "@/test/utils";
 
 const TEST_KEY = "sk-clb-key-dashboard-secret";
 
+async function confirmKeepLoginExport(user: ReturnType<typeof userEvent.setup>) {
+  const dialog = await screen.findByRole("alertdialog", { name: "Xác nhận gửi access token lên server" });
+  await user.click(within(dialog).getByRole("button", { name: "Tôi hiểu, tiếp tục" }));
+}
+
 const safeLog = {
   requestedAt: "2026-09-03T12:00:00Z",
   requestId: "req-key-dashboard-1",
@@ -347,6 +352,8 @@ describe("API key dashboard integration", () => {
     expect(windows).toBeChecked();
     expect(await screen.findByText("codex-lb-windows.ps1", { exact: true })).toBeInTheDocument();
     await user.tab();
+    expect(screen.getByRole("checkbox", { name: "Keep Codex account login session" })).toHaveFocus();
+    await user.tab();
     expect(screen.getByRole("button", { name: "Copy command" })).toHaveFocus();
     const guidance = screen.getByRole("complementary", { name: "Before you run" });
     expect(within(guidance).getByText(/Install the Codex client first/)).toBeVisible();
@@ -376,6 +383,7 @@ describe("API key dashboard integration", () => {
       expect(request.cache).toBe("no-store");
       expect(request.url).not.toContain(TEST_KEY);
       expect(new URL(request.url).searchParams.get("scheme")).toBe(protocol === "https:" ? "https" : null);
+      expect(new URL(request.url).searchParams.get("keep_login")).toBeNull();
       const platform = new URL(request.url).searchParams.get("platform");
       requests.push(platform!);
       return HttpResponse.text(`# ${platform}\n${TEST_KEY}\n`);
@@ -395,6 +403,8 @@ describe("API key dashboard integration", () => {
     expect(requests).toHaveLength(0);
     await user.click(screen.getByRole("tab", { name: "Install" }));
     expect(screen.queryByRole("heading", { name: "Recent requests" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "Keep Codex account login session" }));
+    expect(screen.queryByText(/CẢNH BÁO/)).not.toBeInTheDocument();
     for (const [platform, label] of [["macos", "macOS"], ["linux", "Linux"], ["windows", "Windows"]]) {
       await user.click(screen.getByRole("radio", { name: label }));
       await user.click(await screen.findByRole("button", { name: "Copy script" }));
@@ -427,6 +437,47 @@ describe("API key dashboard integration", () => {
     await user.click(screen.getByRole("tab", { name: "Overview" }));
     expect(await screen.findByRole("heading", { name: "Production client" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Copy script" })).not.toBeInTheDocument();
+  });
+
+  it("defaults to keep-login exports behind a highlighted Vietnamese confirmation", async () => {
+    mockDashboard();
+    const keepLogin: (string | null)[] = [];
+    server.use(http.get("/api/key-dashboard/install-script", ({ request }) => {
+      keepLogin.push(new URL(request.url).searchParams.get("keep_login"));
+      return HttpResponse.text(`# keep-login\n${TEST_KEY}\n`);
+    }));
+    const user = userEvent.setup();
+    const clipboard = vi.spyOn(navigator.clipboard, "writeText");
+    vi.stubGlobal("isSecureContext", true);
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL = vi.fn(() => "blob:installer");
+      static revokeObjectURL = vi.fn();
+    });
+    renderWithProviders(<App />);
+    await connect(user);
+    await user.click(screen.getByRole("tab", { name: "Install" }));
+
+    expect(screen.getByRole("checkbox", { name: "Keep Codex account login session" })).toBeChecked();
+    expect(screen.getByRole("note")).toHaveTextContent("CẢNH BÁO: Access token đăng nhập sẽ được gửi lên server");
+    await user.click(await screen.findByRole("button", { name: "Copy script" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Xác nhận gửi access token lên server" });
+    expect(within(dialog).getByText(/gửi kèm access token đăng nhập lên server codex-lb/)).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(clipboard).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Copy command" }));
+    await confirmKeepLoginExport(user);
+    await waitFor(() => expect(clipboard).toHaveBeenCalledTimes(1));
+    expect(clipboard.mock.calls[0][0]).toContain("keep_login=true");
+
+    await user.click(screen.getByRole("button", { name: "Download script" }));
+    expect(anchorClick).not.toHaveBeenCalled();
+    await confirmKeepLoginExport(user);
+    await waitFor(() => expect(anchorClick).toHaveBeenCalledTimes(1));
+    expect(keepLogin.every((value) => value === "true")).toBe(true);
+    expect(document.body.textContent).not.toContain(TEST_KEY);
   });
 
   it("handles installer failures and invalid credentials without administrator authentication", async () => {
@@ -468,14 +519,16 @@ describe("API key dashboard integration", () => {
     await user.click(screen.getByRole("tab", { name: "Install" }));
     await user.click(screen.getByRole("radio", { name: "Linux" }));
     await user.click(await screen.findByRole("button", { name: "Copy script" }));
-    expect(clipboard).toHaveBeenLastCalledWith(`# linux\n${TEST_KEY}\n`);
+    await confirmKeepLoginExport(user);
+    await waitFor(() => expect(clipboard).toHaveBeenLastCalledWith(`# linux\n${TEST_KEY}\n`));
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
     release();
     await connect(user, "sk-clb-new-key");
     expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
     await user.click(screen.getByRole("tab", { name: "Install" }));
     await user.click(await screen.findByRole("button", { name: "Copy script" }));
-    expect(clipboard).toHaveBeenLastCalledWith("# macos\nsk-clb-new-key\n");
+    await confirmKeepLoginExport(user);
+    await waitFor(() => expect(clipboard).toHaveBeenLastCalledWith("# macos\nsk-clb-new-key\n"));
     expect(document.body.textContent).not.toContain(TEST_KEY);
   });
 

@@ -18,7 +18,7 @@ export type ConfirmDialogProps = {
   confirmDisabled?: boolean;
   keepOpenOnConfirm?: boolean;
   cancelLabel?: string;
-  onConfirm: () => void;
+  onConfirm: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onOpenChange: (open: boolean) => void;
   children?: React.ReactNode;
 };
@@ -51,7 +51,7 @@ export function ConfirmDialog({
               if (keepOpenOnConfirm) {
                 event.preventDefault();
               }
-              onConfirm();
+              onConfirm(event);
             }}
           >
             {confirmLabel}

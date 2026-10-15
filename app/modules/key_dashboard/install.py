@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Literal
 
+from app.core.clients.proxy import CODEX_LB_API_KEY_HEADER
 from app.modules.key_dashboard.install_catalog import UNIX_CATALOG_SETUP, WINDOWS_CATALOG_SETUP
 from app.modules.key_dashboard.install_restore import UNIX_RECORD_STATE, UNIX_UNINSTALL_SCRIPT
 from app.modules.key_dashboard.install_restore_windows import (
@@ -29,30 +30,47 @@ def build_install_script(
     platform: InstallPlatform,
     api_key: str,
     base_url: str,
-    model: str | None,
+    preferred_models: list[str],
     supports_websockets: bool = True,
+    keep_login: bool = False,
 ) -> str:
-    """Render credentials as inert file contents, never as interpolated shell code."""
+    """Render credentials as inert file contents, never as interpolated shell code.
+
+    ``keep_login`` leaves the client's own login (auth.json and its storage choice) untouched and
+    sends the key in a dedicated header, so Authorization may carry the client's login token.
+    """
     config = (
         f"openai_base_url = {_toml_string(base_url)}\n"
         'model_provider = "codex-lb"\n'
-        'cli_auth_credentials_store = "file"\n\n'
-        "[model_providers.codex-lb]\n"
+        + ("" if keep_login else 'cli_auth_credentials_store = "file"\n')
+        + "\n[model_providers.codex-lb]\n"
         'name = "openai"\n'
         f"base_url = {_toml_string(base_url)}\n"
         'wire_api = "responses"\n'
         "requires_openai_auth = true\n"
         f"supports_websockets = {str(supports_websockets).lower()}\n"
     )
+    if keep_login:
+        config += f"http_headers = {{ {_toml_string(CODEX_LB_API_KEY_HEADER)} = {_toml_string(api_key)} }}\n"
     auth = json.dumps({"OPENAI_API_KEY": api_key}, indent=2) + "\n"
     catalog_url = base_url.removesuffix("/backend-api/codex") + "/api/key-dashboard/models"
-    setup = json.dumps({"catalog_url": catalog_url, "model": model}, indent=2) + "\n"
+    # Ordered defaults; each run configures the first one present in the fetched catalog.
+    setup = (
+        json.dumps(
+            {"catalog_url": catalog_url, "preferred_models": preferred_models, "keep_login": keep_login}, indent=2
+        )
+        + "\n"
+    )
     if platform == "windows":
-        return _powershell_script(config, auth, setup)
-    return _bash_script(config, auth, setup)
+        return _powershell_script(config, auth, setup, keep_login=keep_login)
+    return _bash_script(config, auth, setup, keep_login=keep_login)
 
 
-def _bash_script(config: str, auth: str, setup: str) -> str:
+def _bash_script(config: str, auth: str, setup: str, *, keep_login: bool) -> str:
+    # auth.new only authenticates the catalog download when the client keeps its own login.
+    install_auth = (
+        'rm -f "$backup_dir/auth.new"\n' if keep_login else 'mv -f "$backup_dir/auth.new" "$codex_dir/auth.json"\n'
+    )
     return (
         """#!/usr/bin/env bash
 # Configure installed Codex clients. Contains a private API key; do not share.
@@ -89,7 +107,9 @@ python3 - "$codex_dir" "$backup_dir" <<'CODEX_LB_CATALOG'
 """
         + UNIX_CATALOG_SETUP
         + """CODEX_LB_CATALOG
-python3 - "$codex_dir" "$backup_dir" <<'CODEX_LB_STATE'
+python3 - "$codex_dir" "$backup_dir" """
+        + ("keep-login" if keep_login else "replace-auth")
+        + """ <<'CODEX_LB_STATE'
 """
         + UNIX_RECORD_STATE
         + """CODEX_LB_STATE
@@ -104,14 +124,23 @@ mv -f "$backup_dir/state.new" "$codex_dir/.codex-lb-install-state.json"
 mv -f "$backup_dir/uninstall.new" "$codex_dir/codex-lb-uninstall.sh"
 mv -f "$backup_dir/catalog.new" "$codex_dir/codex-lb-models.json"
 mv -f "$backup_dir/config.new" "$codex_dir/config.toml"
-mv -f "$backup_dir/auth.new" "$codex_dir/auth.json"
-printf 'Codex configured. Restart your App, CLI or extension. Backup: %s\\n' "$backup_dir"
+"""
+        + install_auth
+        + (_KEEP_LOGIN_NOTICE_BASH if keep_login else "")
+        + """printf 'Codex configured. Restart your App, CLI or extension. Backup: %s\\n' "$backup_dir"
 printf 'Uninstall offline: bash %q\\n' "$codex_dir/codex-lb-uninstall.sh"
 """
     )
 
 
-def _powershell_script(config: str, auth: str, setup: str) -> str:
+_KEEP_LOGIN_NOTICE = (
+    "auth.json was not changed, so Codex keeps its current sign-in. If Codex is signed out or uses an API key, "
+    "sign in with your account to keep a login session."
+)
+_KEEP_LOGIN_NOTICE_BASH = f"printf '%s\\n' '{_KEEP_LOGIN_NOTICE}'\n"
+
+
+def _powershell_script(config: str, auth: str, setup: str, *, keep_login: bool) -> str:
     return (
         """# Configure installed Codex clients. Contains a private API key; do not share.
 $ErrorActionPreference = 'Stop'
@@ -139,29 +168,42 @@ $config = @'
         + WINDOWS_CATALOG_SETUP
         + """$utf8 = [Text.UTF8Encoding]::new($false)
 """
+        + f"$keepLogin = ${str(keep_login).lower()}\n"
         + WINDOWS_RECORD_STATE
         + "$uninstall = @'\n"
         + WINDOWS_UNINSTALL_SCRIPT
         + "'@\n"
         + """[IO.File]::WriteAllText((Join-Path $backupDir 'uninstall.new'), $uninstall, $utf8)
 [IO.File]::WriteAllText((Join-Path $backupDir 'config.new'), $config, $utf8)
-[IO.File]::WriteAllText((Join-Path $backupDir 'auth.new'), $auth, $utf8)
-[IO.File]::WriteAllText((Join-Path $backupDir 'catalog.new'), $catalogJson, $utf8)
+"""
+        + ("" if keep_login else "[IO.File]::WriteAllText((Join-Path $backupDir 'auth.new'), $auth, $utf8)\n")
+        + """[IO.File]::WriteAllText((Join-Path $backupDir 'catalog.new'), $catalogJson, $utf8)
 # Protect the new files explicitly; keep unrelated Codex files and ACLs unchanged.
 $fileAcl = [Security.AccessControl.FileSecurity]::new()
 $fileAcl.SetOwner($sid)
 $fileAcl.SetAccessRuleProtection($true, $false)
 $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow'))
-foreach ($name in @('config', 'auth', 'catalog', 'state', 'uninstall')) {
-    Set-Acl -LiteralPath (Join-Path $backupDir ($name + '.new')) -AclObject $fileAcl
+"""
+        + (
+            "foreach ($name in @('config', 'catalog', 'state', 'uninstall')) {\n"
+            if keep_login
+            else "foreach ($name in @('config', 'auth', 'catalog', 'state', 'uninstall')) {\n"
+        )
+        + """    Set-Acl -LiteralPath (Join-Path $backupDir ($name + '.new')) -AclObject $fileAcl
 }
 Move-Item -Force -LiteralPath (Join-Path $backupDir 'state.new') -Destination $statePath
 Move-Item -Force -LiteralPath (Join-Path $backupDir 'uninstall.new') `
     -Destination (Join-Path $codexDir 'codex-lb-uninstall.ps1')
 Move-Item -Force -LiteralPath (Join-Path $backupDir 'catalog.new') -Destination $catalogPath
 Move-Item -Force -LiteralPath (Join-Path $backupDir 'config.new') -Destination (Join-Path $codexDir 'config.toml')
-Move-Item -Force -LiteralPath (Join-Path $backupDir 'auth.new') -Destination (Join-Path $codexDir 'auth.json')
-Write-Output "Codex configured. Restart your App, CLI or extension. Backup: $backupDir"
+"""
+        + (
+            f"Write-Output '{_KEEP_LOGIN_NOTICE}'\n"
+            if keep_login
+            else "Move-Item -Force -LiteralPath (Join-Path $backupDir 'auth.new') "
+            "-Destination (Join-Path $codexDir 'auth.json')\n"
+        )
+        + """Write-Output "Codex configured. Restart your App, CLI or extension. Backup: $backupDir"
 $uninstallPath = (Join-Path $codexDir 'codex-lb-uninstall.ps1').Replace("'", "''")
 Write-Output "Uninstall offline: powershell -NoProfile -ExecutionPolicy Bypass -File '$uninstallPath'"
 """

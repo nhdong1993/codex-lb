@@ -90,7 +90,9 @@ def test_installer_writes_safe_private_files_and_recoverable_backups(
     endpoint = catalog_server.base_url
     entry = _entry(model or "cd/gpt-6-astra")
     catalog_server.payload = {"models": [entry, {**_entry("denied"), "visibility": "hide"}]}
-    script = build_install_script(platform=platform, api_key=key, base_url=endpoint, model=model)
+    script = build_install_script(
+        platform=platform, api_key=key, base_url=endpoint, preferred_models=[model] if model else []
+    )
     env = {**os.environ, "CODEX_HOME": str(codex_dir)}
 
     for _ in range(2):
@@ -129,7 +131,9 @@ def test_installer_writes_safe_private_files_and_recoverable_backups(
 def test_installer_defaults_to_user_codex_home(tmp_path: Path, catalog_server: _CatalogServer) -> None:
     env = {name: value for name, value in os.environ.items() if name != "CODEX_HOME"}
     env["HOME"] = str(tmp_path)
-    script = build_install_script(platform="linux", api_key="own-key", base_url=catalog_server.base_url, model=None)
+    script = build_install_script(
+        platform="linux", api_key="own-key", base_url=catalog_server.base_url, preferred_models=[]
+    )
     subprocess.run(["bash"], input=script, text=True, capture_output=True, env=env, check=True)
     assert json.loads((tmp_path / ".codex/auth.json").read_text()) == {"OPENAI_API_KEY": "own-key"}
 
@@ -146,7 +150,7 @@ def test_installer_stops_without_replacing_existing_files(tmp_path: Path, obstru
         auth.mkdir()
     else:
         auth.write_text("original-auth", encoding="utf-8")
-    script = build_install_script(platform="linux", api_key="own-key", base_url="http://localhost", model=None)
+    script = build_install_script(platform="linux", api_key="own-key", base_url="http://localhost", preferred_models=[])
     if obstruction == "backup_failure":
         script = "function cp() { return 1; }\n" + script
     result = subprocess.run(
@@ -160,13 +164,13 @@ def test_installer_stops_without_replacing_existing_files(tmp_path: Path, obstru
 
 def test_powershell_script_has_literal_data_utf8_output_and_private_acl() -> None:
     script = build_install_script(
-        platform="windows", api_key="sk-own-key", base_url="https://test", model="model\n'@\n😀"
+        platform="windows", api_key="sk-own-key", base_url="https://test", preferred_models=["model\n'@\n😀"]
     )
     script.encode("ascii")
     config = script.split("$config = @'\n", 1)[1].split("\n'@", 1)[0]
     auth = script.split("$auth = @'\n", 1)[1].split("\n'@", 1)[0]
     setup = script.split("$setupJson = @'\n", 1)[1].split("\n'@", 1)[0]
-    assert json.loads(setup)["model"] == "model\n'@\n😀"
+    assert json.loads(setup)["preferred_models"] == ["model\n'@\n😀"]
     assert tomllib.loads(config)["model_provider"] == "codex-lb"
     assert json.loads(auth) == {"OPENAI_API_KEY": "sk-own-key"}
     assert "[Text.UTF8Encoding]::new($false)" in script
@@ -196,7 +200,7 @@ def test_installer_refreshes_catalog_without_overriding_assignment_transport(
         platform=platform,
         api_key="own-key",
         base_url=catalog_server.base_url,
-        model=None,
+        preferred_models=[],
         supports_websockets=supports_websockets,
     )
     native = _entry("native", websockets=True)
@@ -211,7 +215,7 @@ def test_installer_refreshes_catalog_without_overriding_assignment_transport(
 
 @pytest.mark.parametrize(
     "failure",
-    ["unauthorized", "forbidden", "redirect", "shape", "entry", "empty", "hidden", "unsupported", "removed", "bad_key"],
+    ["unauthorized", "forbidden", "redirect", "shape", "entry", "empty", "hidden", "unsupported", "bad_key"],
 )
 def test_catalog_failure_keeps_all_client_files(tmp_path: Path, catalog_server: _CatalogServer, failure: str) -> None:
     for name in ("config.toml", "auth.json", "codex-lb-models.json"):
@@ -238,7 +242,7 @@ def test_catalog_failure_keeps_all_client_files(tmp_path: Path, catalog_server: 
         platform="linux",
         api_key=key,
         base_url=catalog_server.base_url,
-        model="removed" if failure == "removed" else None,
+        preferred_models=[],
     )
     result = subprocess.run(
         ["bash"],
@@ -263,7 +267,7 @@ def test_catalog_failure_keeps_all_client_files(tmp_path: Path, catalog_server: 
 
 
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell runtime is unavailable")
-@pytest.mark.parametrize("failure", [None, "unauthorized", "forbidden", "redirect", "empty", "removed"])
+@pytest.mark.parametrize("failure", [None, "unauthorized", "forbidden", "redirect", "empty", "skipped"])
 def test_powershell_catalog_program(tmp_path: Path, catalog_server: _CatalogServer, failure: str | None) -> None:
     model = "custom/'quote' $variable 😀"
     native = _entry("native", websockets=True)
@@ -276,10 +280,9 @@ def test_powershell_catalog_program(tmp_path: Path, catalog_server: _CatalogServ
         catalog_server.status = 302
     elif failure == "empty":
         catalog_server.payload = {"models": []}
-    elif failure == "removed":
-        model = "removed"
+    preferred = ["denied", "removed", model] if failure == "skipped" else [model]
     script = build_install_script(
-        platform="windows", api_key="sk-own-key", base_url=catalog_server.base_url, model=model
+        platform="windows", api_key="sk-own-key", base_url=catalog_server.base_url, preferred_models=preferred
     )
     script_path = tmp_path / "install.ps1"
     script_path.write_text(script)
@@ -315,7 +318,7 @@ def test_powershell_catalog_program(tmp_path: Path, catalog_server: _CatalogServ
     )
     assert "sk-own-key" not in result.stdout + result.stderr
     assert "sensitive-edge-response" not in result.stdout + result.stderr
-    if failure:
+    if failure and failure != "skipped":
         assert result.returncode != 0
         if failure == "forbidden":
             assert "HTTP 403" in result.stderr
@@ -326,6 +329,8 @@ def test_powershell_catalog_program(tmp_path: Path, catalog_server: _CatalogServ
             assert len(catalog_server.requests) == 1
         return
     assert result.returncode == 0, result.stderr
+    if failure == "skipped":
+        assert '"denied", "removed"' in result.stderr
     output = json.loads(result.stdout)
     config = tomllib.loads(output["config"])
     assert config["model"] == model
@@ -366,6 +371,40 @@ LIFECYCLE_PLATFORMS = [
 
 
 @pytest.mark.parametrize("platform", LIFECYCLE_PLATFORMS)
+@pytest.mark.parametrize(
+    ("preferred", "expected", "skipped"),
+    [
+        (["codex-auto-review", "gpt-5.4-mini", "gpt-5.6-luna"], "gpt-5.6-luna", ["codex-auto-review", "gpt-5.4-mini"]),
+        (["gpt-5.6-luna", "retired"], "gpt-5.6-luna", []),
+        (["retired"], "cd/gpt-6-astra", ["retired"]),
+    ],
+)
+def test_installer_skips_preferred_models_missing_from_catalog(
+    tmp_path: Path,
+    catalog_server: _CatalogServer,
+    platform: InstallPlatform,
+    preferred: list[str],
+    expected: str,
+    skipped: list[str],
+) -> None:
+    hidden = {**_entry("codex-auto-review"), "visibility": "hide"}
+    catalog_server.payload = {"models": [_entry(), hidden, _entry("gpt-5.6-luna")]}
+    script = build_install_script(
+        platform=platform, api_key="own-key", base_url=catalog_server.base_url, preferred_models=preferred
+    )
+    result = _run_lifecycle(script, tmp_path, platform)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert tomllib.loads((tmp_path / "config.toml").read_text())["model"] == expected
+    notice = "Skipped models not in this key's catalog: "
+    if skipped:
+        names = ", ".join(json.dumps(name) for name in skipped)
+        assert f"{notice}{names}; using {json.dumps(expected)}." in result.stderr
+    else:
+        assert notice not in result.stderr
+    assert "own-key" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("platform", LIFECYCLE_PLATFORMS)
 @pytest.mark.parametrize("has_original", [True, False])
 def test_offline_uninstall_restores_baseline_after_reinstall(
     tmp_path: Path, catalog_server: _CatalogServer, platform: InstallPlatform, has_original: bool
@@ -388,7 +427,9 @@ def test_offline_uninstall_restores_baseline_after_reinstall(
     state_path = home / ".codex-lb-install-state.json"
     baseline = None
     for key in ("first-key", "second-key"):
-        script = build_install_script(platform=platform, api_key=key, base_url=catalog_server.base_url, model=None)
+        script = build_install_script(
+            platform=platform, api_key=key, base_url=catalog_server.base_url, preferred_models=[]
+        )
         result = _run_lifecycle(script, home, platform)
         assert result.returncode == 0, result.stdout + result.stderr
         assert "Uninstall offline:" in result.stdout
@@ -433,7 +474,9 @@ def test_damaged_restore_state_blocks_install_and_uninstall(
     tmp_path: Path, catalog_server: _CatalogServer, platform: InstallPlatform, damage: str
 ) -> None:
     (tmp_path / "config.toml").write_text("original config")
-    script = build_install_script(platform=platform, api_key="first-key", base_url=catalog_server.base_url, model=None)
+    script = build_install_script(
+        platform=platform, api_key="first-key", base_url=catalog_server.base_url, preferred_models=[]
+    )
     result = _run_lifecycle(script, tmp_path, platform)
     assert result.returncode == 0, result.stderr
     suffix = "ps1" if platform == "windows" else "sh"
@@ -476,7 +519,9 @@ def test_damaged_restore_state_blocks_install_and_uninstall(
 def test_uninstall_backup_failure_preserves_current_files_and_state(
     tmp_path: Path, catalog_server: _CatalogServer, platform: InstallPlatform
 ) -> None:
-    script = build_install_script(platform=platform, api_key="own-key", base_url=catalog_server.base_url, model=None)
+    script = build_install_script(
+        platform=platform, api_key="own-key", base_url=catalog_server.base_url, preferred_models=[]
+    )
     result = _run_lifecycle(script, tmp_path, platform)
     assert result.returncode == 0, result.stderr
     suffix = "ps1" if platform == "windows" else "sh"
@@ -495,3 +540,129 @@ def test_uninstall_backup_failure_preserves_current_files_and_state(
     assert result.returncode != 0
     for name, content in before.items():
         assert (tmp_path / name).read_bytes() == content
+
+
+_LOGIN_AUTH = json.dumps(
+    {"OPENAI_API_KEY": None, "tokens": {"access_token": "login-access-token", "refresh_token": "rt"}},
+    indent=1,
+)
+
+
+@pytest.mark.parametrize("platform", LIFECYCLE_PLATFORMS)
+@pytest.mark.parametrize("auth", ["login", "api_key", "missing"])
+def test_keep_login_installer_never_touches_auth_json(
+    tmp_path: Path, catalog_server: _CatalogServer, platform: InstallPlatform, auth: str
+) -> None:
+    original = {"login": _LOGIN_AUTH, "api_key": '{"OPENAI_API_KEY": "sk-old"}'}.get(auth)
+    if original is not None:
+        (tmp_path / "auth.json").write_text(original)
+    script = build_install_script(
+        platform=platform, api_key="own-key", base_url=catalog_server.base_url, preferred_models=[], keep_login=True
+    )
+    result = _run_lifecycle(script, tmp_path, platform)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "own-key" not in result.stdout + result.stderr
+    assert "auth.json was not changed" in result.stdout
+    if original is None:
+        assert not (tmp_path / "auth.json").exists()
+    else:
+        assert (tmp_path / "auth.json").read_text() == original
+    assert not list(tmp_path.glob("backup-codex-lb-*/auth.new"))
+    config = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert "cli_auth_credentials_store" not in config
+    provider = config["model_providers"]["codex-lb"]
+    assert provider["requires_openai_auth"] is True
+    assert provider["http_headers"] == {"x-codex-lb-api-key": "own-key"}
+    assert stat.S_IMODE((tmp_path / "config.toml").stat().st_mode) == 0o600
+    assert catalog_server.requests == [("/api/key-dashboard/models", "Bearer own-key")]
+
+
+def test_keep_login_header_value_is_inert_toml_data(tmp_path: Path, catalog_server: _CatalogServer) -> None:
+    key = 'sk-clb-"quote" } $(touch injected)'
+    script = build_install_script(
+        platform="linux", api_key=key, base_url=catalog_server.base_url, preferred_models=[], keep_login=True
+    )
+    result = _run_lifecycle(script, tmp_path, "linux")
+    assert result.returncode == 0, result.stderr
+    config = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert config["model_providers"]["codex-lb"]["http_headers"] == {"x-codex-lb-api-key": key}
+    assert not (tmp_path / "injected").exists()
+
+
+def _uninstaller(home: Path, platform: InstallPlatform) -> str:
+    return (home / f"codex-lb-uninstall.{'ps1' if platform == 'windows' else 'sh'}").read_text()
+
+
+@pytest.mark.parametrize("platform", LIFECYCLE_PLATFORMS)
+@pytest.mark.parametrize("had_auth", [False, True])
+def test_keep_login_uninstall_leaves_the_client_login(
+    tmp_path: Path, catalog_server: _CatalogServer, platform: InstallPlatform, had_auth: bool
+) -> None:
+    (tmp_path / "config.toml").write_text('model = "old"\n')
+    if had_auth:
+        (tmp_path / "auth.json").write_text(_LOGIN_AUTH)
+    script = build_install_script(
+        platform=platform, api_key="own-key", base_url=catalog_server.base_url, preferred_models=[], keep_login=True
+    )
+    result = _run_lifecycle(script, tmp_path, platform)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads((tmp_path / ".codex-lb-install-state.json").read_text())["files"]["auth.json"] == "unmanaged"
+    # The user signs in, or Codex refreshes its login, after setup.
+    renewed = '{"tokens": {"access_token": "renewed-login"}}'
+    (tmp_path / "auth.json").write_text(renewed)
+    result = _run_lifecycle(_uninstaller(tmp_path, platform), tmp_path, platform, uninstall=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "auth.json").read_text() == renewed
+    assert (tmp_path / "config.toml").read_text() == 'model = "old"\n'
+    assert not (tmp_path / ".codex-lb-install-state.json").exists()
+
+
+@pytest.mark.parametrize("platform", LIFECYCLE_PLATFORMS)
+def test_api_key_install_after_keep_login_restores_that_login_on_uninstall(
+    tmp_path: Path, catalog_server: _CatalogServer, platform: InstallPlatform
+) -> None:
+    (tmp_path / "auth.json").write_text(_LOGIN_AUTH)
+    for keep_login in (True, False):
+        if not keep_login:
+            (tmp_path / "auth.json").write_text('{"tokens": {"access_token": "renewed-login"}}')
+        script = build_install_script(
+            platform=platform,
+            api_key="own-key",
+            base_url=catalog_server.base_url,
+            preferred_models=[],
+            keep_login=keep_login,
+        )
+        result = _run_lifecycle(script, tmp_path, platform)
+        assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads((tmp_path / "auth.json").read_text()) == {"OPENAI_API_KEY": "own-key"}
+    result = _run_lifecycle(_uninstaller(tmp_path, platform), tmp_path, platform, uninstall=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "auth.json").read_text() == '{"tokens": {"access_token": "renewed-login"}}'
+
+
+@pytest.mark.parametrize("platform", LIFECYCLE_PLATFORMS)
+@pytest.mark.parametrize(
+    ("previous", "expected"),
+    [
+        ('cli_auth_credentials_store = "keyring"  # login lives in the OS keyring\nmodel = "x"\n', "keyring"),
+        ('model = "x"\n[profiles.work]\ncli_auth_credentials_store = "keyring"\n', None),
+        (None, None),
+    ],
+)
+def test_keep_login_preserves_the_top_level_credential_store(
+    tmp_path: Path,
+    catalog_server: _CatalogServer,
+    platform: InstallPlatform,
+    previous: str | None,
+    expected: str | None,
+) -> None:
+    if previous is not None:
+        (tmp_path / "config.toml").write_text(previous)
+    script = build_install_script(
+        platform=platform, api_key="own-key", base_url=catalog_server.base_url, preferred_models=[], keep_login=True
+    )
+    result = _run_lifecycle(script, tmp_path, platform)
+    assert result.returncode == 0, result.stdout + result.stderr
+    config = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert config.get("cli_auth_credentials_store") == expected
+    assert config["model_providers"]["codex-lb"]["http_headers"] == {"x-codex-lb-api-key": "own-key"}

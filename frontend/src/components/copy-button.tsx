@@ -10,9 +10,11 @@ export type CopyButtonProps = {
   value: string;
   label?: string;
   iconOnly?: boolean;
+  /** Resolves with the confirming dialog element (or null) to copy, or false to cancel. */
+  confirm?: () => Promise<HTMLElement | null | false>;
 };
 
-export function CopyButton({ value, label, iconOnly = false }: CopyButtonProps) {
+export function CopyButton({ value, label, iconOnly = false, confirm }: CopyButtonProps) {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const mountedRef = useRef(false);
@@ -31,7 +33,17 @@ export function CopyButton({ value, label, iconOnly = false }: CopyButtonProps) 
 
   const handleCopy = async (event: MouseEvent<HTMLButtonElement>) => {
     const trigger = event.currentTarget;
-    const dialogContainer = trigger.closest("[role='dialog']");
+    let dialogContainer = trigger.closest("[role='dialog']");
+    if (confirm) {
+      const confirmed = await confirm();
+      if (confirmed === false || !mountedRef.current) {
+        return;
+      }
+      // Copy inside a still-open confirmation so its focus trap keeps the fallback selection.
+      if (confirmed?.isConnected) {
+        dialogContainer = confirmed;
+      }
+    }
 
     try {
       const copiedToClipboard = await copyToClipboard(value, {

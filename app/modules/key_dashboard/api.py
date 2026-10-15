@@ -39,11 +39,12 @@ async def get_key_dashboard_install_script(
     request: Request,
     platform: InstallPlatform = Query(),
     scheme: Literal["https"] | None = Query(default=None),
+    keep_login: bool = Query(default=False),
     api_key: ApiKeyData = Security(validate_usage_api_key),
 ) -> PlainTextResponse:
     # Validation above authenticates this exact header; never accept a key selector.
     credential = request.headers["authorization"].partition(" ")[2]
-    model = api_key.enforced_model or (api_key.allowed_models[0] if api_key.allowed_models else None)
+    preferred_models = [api_key.enforced_model] if api_key.enforced_model else list(api_key.allowed_models or ())
     # A browser can preserve public HTTPS across an HTTP ingress without changing
     # the credential destination or broadening the application's proxy trust.
     base_url = request.base_url.replace(scheme="https") if scheme == "https" else request.base_url
@@ -51,7 +52,8 @@ async def get_key_dashboard_install_script(
         platform=platform,
         api_key=credential,
         base_url=f"{str(base_url).rstrip('/')}/backend-api/codex",
-        model=model,
+        keep_login=keep_login,
+        preferred_models=preferred_models,
         supports_websockets=await source_only_key_supports_websockets(api_key),
     )
     extension = "ps1" if platform == "windows" else "sh"

@@ -34,6 +34,8 @@ function Read-InstallState {
         $path = Join-Path $original $name
         Assert-RegularFile $path
         $expected = $value.files.$name
+        # Keep-login installs never replace auth.json, so uninstall leaves the client's login alone.
+        if ($name -ceq 'auth.json' -and $expected -ceq 'unmanaged') { continue }
         if ($null -eq $expected) { $valid = -not (Test-Path -LiteralPath $path) } else {
             $valid = $expected -is [string] -and $expected -cmatch '\A[a-f0-9]{64}\z' `
                 -and (Test-Path -LiteralPath $path) -and (Get-Digest $path) -ceq $expected
@@ -67,7 +69,19 @@ if ($null -eq $state) {
         $path = Join-Path $backupDir $name
         $files[$name] = if (Test-Path -LiteralPath $path) { Get-Digest $path } else { $null }
     }
+    if ($keepLogin) { $files['auth.json'] = 'unmanaged' }
     $state = [ordered]@{ version = 1; backup = $backupName; files = $files }
+} elseif (-not $keepLogin -and $state.files.'auth.json' -ceq 'unmanaged') {
+    # This run replaces auth.json for the first time; its current copy becomes the restore point.
+    $originalAuth = Join-Path (Join-Path $codexDir $state.backup) 'auth.json'
+    $currentAuth = Join-Path $backupDir 'auth.json'
+    if (Test-Path -LiteralPath $currentAuth) {
+        Copy-Item -Force -LiteralPath $currentAuth -Destination $originalAuth
+        $state.files.'auth.json' = Get-Digest $originalAuth
+    } else {
+        if (Test-Path -LiteralPath $originalAuth) { Remove-Item -Force -LiteralPath $originalAuth }
+        $state.files.'auth.json' = $null
+    }
 }
 [IO.File]::WriteAllText((Join-Path $backupDir 'state.new'), ($state | ConvertTo-Json -Depth 5), $utf8)
 """
@@ -89,12 +103,13 @@ foreach ($name in @($names) + @('.codex-lb-install-state.json')) {
     if (Test-Path -LiteralPath $path) { Copy-Item -LiteralPath $path -Destination (Join-Path $backupDir $name) }
 }
 $original = Join-Path $codexDir $state.backup
-foreach ($name in $names) {
+$managed = @($names | Where-Object { $state.files.$_ -cne 'unmanaged' })
+foreach ($name in $managed) {
     if ($null -ne $state.files.$name) {
         Copy-Item -LiteralPath (Join-Path $original $name) -Destination (Join-Path $backupDir ($name + '.restore'))
     }
 }
-foreach ($name in $names) {
+foreach ($name in $managed) {
     $target = Join-Path $codexDir $name
     if ($null -eq $state.files.$name) {
         if (Test-Path -LiteralPath $target) { Remove-Item -Force -LiteralPath $target }

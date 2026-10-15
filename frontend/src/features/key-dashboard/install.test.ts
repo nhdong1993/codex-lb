@@ -9,7 +9,7 @@ import { installCommand } from "@/features/key-dashboard/install";
 describe("installer commands", () => {
   it.skipIf(process.platform === "win32")("quotes credentials as data and executes a successfully downloaded script", () => {
     const key = "sk-clb-quote' $(printf INJECTED)";
-    const command = installCommand("linux", key, "https://example.test");
+    const command = installCommand("linux", key, "https://example.test", false);
     const output = execFileSync("bash", ["-c", `
       curl() {
         printf '%s\\n' "$@";
@@ -23,7 +23,7 @@ describe("installer commands", () => {
   });
 
   it.skipIf(process.platform === "win32")("does not execute a partial or failed download", () => {
-    const command = installCommand("macos", "test-key", "https://example.test");
+    const command = installCommand("macos", "test-key", "https://example.test", false);
     const result = spawnSync("bash", ["-c", `
       curl() { printf 'printf SHOULD_NOT_RUN' > "\${!#}"; printf '%s' "\${!#}" >&2; return 22; }
       ${command}
@@ -34,17 +34,23 @@ describe("installer commands", () => {
   });
 
   it("uses literal PowerShell quoting and checks curl.exe before execution", () => {
-    const command = installCommand("windows", "sk-quote' $variable", "https://example.test");
+    const command = installCommand("windows", "sk-quote' $variable", "https://example.test", false);
     expect(command).toContain("'Authorization: Bearer sk-quote'' $variable'");
     expect(command.indexOf("$LASTEXITCODE -ne 0")).toBeLessThan(command.indexOf("[ScriptBlock]::Create"));
     expect(command).toContain('($script -join "`n")');
   });
 
   it.each(["macos", "linux", "windows"] as const)("preserves the public protocol for %s exports", (platform) => {
-    const secure = installCommand(platform, "test-key", "https://example.test:8443");
+    const secure = installCommand(platform, "test-key", "https://example.test:8443", false);
     expect(secure).toContain(`https://example.test:8443/api/key-dashboard/install-script?platform=${platform}&scheme=https`);
-    const local = installCommand(platform, "test-key", "http://localhost:2455");
+    const local = installCommand(platform, "test-key", "http://localhost:2455", false);
     expect(local).toContain(`http://localhost:2455/api/key-dashboard/install-script?platform=${platform}`);
     expect(local).not.toContain("scheme=");
+    expect(local).not.toContain("keep_login");
+  });
+
+  it.each(["macos", "linux", "windows"] as const)("requests a keep-login installer for %s when opted in", (platform) => {
+    const command = installCommand(platform, "test-key", "https://example.test", true);
+    expect(command).toContain(`/api/key-dashboard/install-script?platform=${platform}&scheme=https&keep_login=true`);
   });
 });

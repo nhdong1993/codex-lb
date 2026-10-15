@@ -33,7 +33,7 @@ requires_openai_auth = true # required for codex app
 
 ### Setup scripts and restoring previous configuration
 
-API key holders can open `/key-dashboard` → **Install** to configure their installed Codex clients and download their authorized models and aliases. Setup writes both the custom provider endpoint and root `openai_base_url`, so chats using the built-in OpenAI provider can resume with the new endpoint and file-backed API key. Restart clients after setup; explicit profiles or CLI overrides may still select other settings.
+API key holders can open `/key-dashboard` → **Install** to configure their installed Codex clients and download their authorized models and aliases. Setup writes both the custom provider endpoint and root `openai_base_url`, so chats using the built-in OpenAI provider can resume with the new endpoint and file-backed API key. Restart clients after setup; explicit profiles or CLI overrides may still select other settings. The installer selects the key's enforced model, otherwise the first allowed model still in the key's catalog; hidden or retired models are skipped and reported. With **Keep Codex account login session** checked (the default), setup leaves `auth.json` and the client's ChatGPT login untouched and sends the API key in the `x-codex-lb-api-key` provider header instead; Codex still sends its login token to codex-lb, which ignores it. See the [API key dashboard context](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/api-key-dashboard/context.md#keeping-the-codex-login-session).
 
 Setup saves an offline uninstaller in the same Codex home. The Install tab and installer output show its command. On macOS/Linux:
 

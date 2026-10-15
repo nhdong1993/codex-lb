@@ -45,6 +45,9 @@ def load_state():
         path = original / name
         regular(path)
         expected = state["files"][name]
+        if name == "auth.json" and expected == "unmanaged":
+            # Keep-login installs never replace auth.json, so uninstall leaves the client's login alone.
+            continue
         if expected is None:
             valid = not path.exists()
         else:
@@ -64,12 +67,24 @@ UNIX_RECORD_STATE = (
 for name in names:
     regular(codex_dir / name)
 backup_dir = Path(sys.argv[2])
+keep_login = sys.argv[3] == "keep-login"
 if state is None:
     state = {
         "version": 1,
         "backup": backup_dir.name,
         "files": {name: digest(backup_dir / name) if (backup_dir / name).is_file() else None for name in names},
     }
+    if keep_login:
+        state["files"]["auth.json"] = "unmanaged"
+elif not keep_login and state["files"]["auth.json"] == "unmanaged":
+    # This run replaces auth.json for the first time; its current copy becomes the restore point.
+    original_auth = codex_dir / state["backup"] / "auth.json"
+    if (backup_dir / "auth.json").is_file():
+        shutil.copy2(backup_dir / "auth.json", original_auth)
+        state["files"]["auth.json"] = digest(original_auth)
+    else:
+        original_auth.unlink(missing_ok=True)
+        state["files"]["auth.json"] = None
 (backup_dir / "state.new").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 """
 )
@@ -96,11 +111,12 @@ for name in (*names, state_path.name):
     if path.is_file():
         shutil.copy2(path, backup_dir / name)
 original = codex_dir / state["backup"]
+managed = [name for name in names if state["files"][name] != "unmanaged"]
 # Stage every original before the first replacement. Keep state on any failure.
-for name in names:
+for name in managed:
     if state["files"][name] is not None:
         shutil.copy2(original / name, backup_dir / (name + ".restore"))
-for name in names:
+for name in managed:
     target = codex_dir / name
     if state["files"][name] is None:
         if target.exists():

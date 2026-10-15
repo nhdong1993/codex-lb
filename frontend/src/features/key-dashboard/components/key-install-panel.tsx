@@ -1,10 +1,12 @@
-import { Check, Code2, Download, FileCode2, FolderSync, Globe2, KeyRound, Monitor, PanelsTopLeft, RotateCw, ShieldCheck, Terminal } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Check, Code2, Download, FileCode2, FolderSync, Globe2, KeyRound, Monitor, PanelsTopLeft, RotateCw, ShieldCheck, Terminal, TriangleAlert } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { CopyButton } from "@/components/copy-button";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { SpinnerBlock } from "@/components/ui/spinner";
 import { getInstallScript, type InstallPlatform } from "@/features/key-dashboard/api";
 import { downloadInstallScript, installCommand, uninstallCommand } from "@/features/key-dashboard/install";
@@ -30,6 +32,7 @@ const GUIDANCE = [
 export function KeyInstallPanel({ apiKey, onUnauthorized }: KeyInstallPanelProps) {
   const { t } = useTranslation();
   const [platform, setPlatform] = useState<InstallPlatform>("macos");
+  const [keepLogin, setKeepLogin] = useState(true);
 
   return (
     <section className="space-y-6" aria-labelledby="key-install-heading">
@@ -82,8 +85,24 @@ export function KeyInstallPanel({ apiKey, onUnauthorized }: KeyInstallPanelProps
                 ))}
               </div>
             </fieldset>
+            <div className="mt-5 space-y-4 border-t pt-5">
+              <div className="flex items-start gap-3">
+                <Checkbox
+                  id="install-keep-login"
+                  className="mt-0.5"
+                  checked={keepLogin}
+                  aria-describedby="install-keep-login-description"
+                  onCheckedChange={(checked) => setKeepLogin(checked === true)}
+                />
+                <div className="space-y-1">
+                  <label htmlFor="install-keep-login" className="cursor-pointer text-sm font-semibold">{t("keyDashboard.install.keepLogin")}</label>
+                  <p id="install-keep-login-description" className="text-xs leading-relaxed text-muted-foreground">{t("keyDashboard.install.keepLoginDescription")}</p>
+                </div>
+              </div>
+              {keepLogin ? <KeepLoginWarning /> : null}
+            </div>
           </div>
-          <InstallerActions key={platform} platform={platform} apiKey={apiKey} onUnauthorized={onUnauthorized} />
+          <InstallerActions key={`${platform}-${keepLogin}`} platform={platform} keepLogin={keepLogin} apiKey={apiKey} onUnauthorized={onUnauthorized} />
           <div className="space-y-3 rounded-xl border bg-card p-5 sm:p-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h3 className="text-sm font-semibold">{t("keyDashboard.install.uninstallTitle")}</h3>
@@ -123,15 +142,37 @@ export function KeyInstallPanel({ apiKey, onUnauthorized }: KeyInstallPanelProps
   );
 }
 
-function InstallerActions({ platform, apiKey, onUnauthorized }: KeyInstallPanelProps & { platform: InstallPlatform }) {
+function KeepLoginWarning() {
+  const { t } = useTranslation();
+  return (
+    <div role="note" className="rounded-lg border-2 border-red-500/60 bg-red-500/10 p-4 text-red-900 dark:text-red-200">
+      <p className="flex items-center gap-2 text-sm font-bold">
+        <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
+        {t("keyDashboard.install.keepLoginWarningTitle")}
+      </p>
+      <p className="mt-2 text-sm leading-relaxed">{t("keyDashboard.install.keepLoginWarning")}</p>
+    </div>
+  );
+}
+
+type ExportConfirmation = (result: HTMLElement | null | false) => void;
+
+function InstallerActions({
+  platform,
+  keepLogin,
+  apiKey,
+  onUnauthorized,
+}: KeyInstallPanelProps & { platform: InstallPlatform; keepLogin: boolean }) {
   const { t } = useTranslation();
   const [script, setScript] = useState<string | null>(null);
   const [error, setError] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [confirming, setConfirming] = useState(false);
+  const pendingConfirmation = useRef<ExportConfirmation | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
-    void getInstallScript(apiKey, platform, controller.signal).then((result) => {
+    void getInstallScript(apiKey, platform, keepLogin, controller.signal).then((result) => {
       if (!controller.signal.aborted) setScript(result);
     }).catch((caught: unknown) => {
       if (controller.signal.aborted) return;
@@ -142,7 +183,7 @@ function InstallerActions({ platform, apiKey, onUnauthorized }: KeyInstallPanelP
       }
     });
     return () => controller.abort();
-  }, [apiKey, platform, onUnauthorized, attempt]);
+  }, [apiKey, platform, keepLogin, onUnauthorized, attempt]);
 
   if (error) {
     return (
@@ -156,8 +197,26 @@ function InstallerActions({ platform, apiKey, onUnauthorized }: KeyInstallPanelP
   }
   if (script === null) return <SpinnerBlock />;
 
-  const command = installCommand(platform, apiKey, window.location.origin);
-  const preview = installCommand(platform, "YOUR_API_KEY", window.location.origin);
+  const command = installCommand(platform, apiKey, window.location.origin, keepLogin);
+  const preview = installCommand(platform, "YOUR_API_KEY", window.location.origin, keepLogin);
+  const settleConfirmation = (result: HTMLElement | null | false) => {
+    pendingConfirmation.current?.(result);
+    pendingConfirmation.current = null;
+    setConfirming(false);
+  };
+  // Exports that send the login access token require an explicit, warned confirmation.
+  const confirmExport = keepLogin
+    ? () => new Promise<HTMLElement | null | false>((resolve) => {
+        // A newer export request cancels any still-pending one instead of leaving it unresolved.
+        pendingConfirmation.current?.(false);
+        pendingConfirmation.current = resolve;
+        setConfirming(true);
+      })
+    : undefined;
+  const download = async () => {
+    if (confirmExport && (await confirmExport()) === false) return;
+    downloadInstallScript(script, platform);
+  };
   const shell = platform === "windows" ? "PowerShell" : "Bash";
   const filename = `codex-lb-${platform}.${platform === "windows" ? "ps1" : "sh"}`;
   return (
@@ -169,7 +228,7 @@ function InstallerActions({ platform, apiKey, onUnauthorized }: KeyInstallPanelP
             {t("keyDashboard.install.directCommand")}
           </h3>
           <div className="max-sm:w-full [&_button]:h-9 [&_button]:border-sky-700 [&_button]:bg-sky-700 [&_button]:text-white [&_button]:max-sm:w-full [&_button]:dark:bg-sky-700 [&_button:hover]:bg-sky-800 [&_button:hover]:dark:bg-sky-800">
-            <CopyButton value={command} label={t("keyDashboard.install.copyCommand")} />
+            <CopyButton value={command} label={t("keyDashboard.install.copyCommand")} confirm={confirmExport} />
           </div>
         </div>
         <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950 text-slate-200">
@@ -195,8 +254,8 @@ function InstallerActions({ platform, apiKey, onUnauthorized }: KeyInstallPanelP
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <CopyButton value={script} label={t("keyDashboard.install.copyScript")} />
-            <Button variant="outline" size="sm" onClick={() => downloadInstallScript(script, platform)}>
+            <CopyButton value={script} label={t("keyDashboard.install.copyScript")} confirm={confirmExport} />
+            <Button variant="outline" size="sm" onClick={() => void download()}>
               <Download className="size-4" aria-hidden="true" />
               {t("keyDashboard.install.downloadScript")}
             </Button>
@@ -213,6 +272,18 @@ function InstallerActions({ platform, apiKey, onUnauthorized }: KeyInstallPanelP
           <pre tabIndex={0} aria-label={t("keyDashboard.install.previewScript")} className="max-h-80 overflow-auto border-t bg-muted/30 p-4 leading-relaxed focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"><code>{script.replaceAll(apiKey, "YOUR_API_KEY")}</code></pre>
         </details>
       </div>
+      <ConfirmDialog
+        open={confirming}
+        title={t("keyDashboard.install.keepLoginConfirmTitle")}
+        description={t("keyDashboard.install.keepLoginConfirmDescription")}
+        confirmLabel={t("keyDashboard.install.keepLoginConfirmAction")}
+        onConfirm={(event) => settleConfirmation(event.currentTarget.closest<HTMLElement>("[role='alertdialog']"))}
+        onOpenChange={(open) => {
+          if (!open) settleConfirmation(false);
+        }}
+      >
+        <KeepLoginWarning />
+      </ConfirmDialog>
     </div>
   );
 }
