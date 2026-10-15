@@ -61,6 +61,7 @@ from app.core.clients.proxy import (
     _find_sse_separator,
     _is_native_codex_request,
     _safe_retry_after_header,
+    proxy_api_authorization,
 )
 from app.core.clients.proxy_websocket import (
     REALTIME_LIVE_CALL_ID_ROUTE_REGEX,
@@ -9559,10 +9560,10 @@ async def _validate_proxy_websocket_request(
     capability_header_values = _required_capability_values(websocket.headers)
     try:
         if require_api_key or capability_header_values:
-            api_key = await validate_required_proxy_api_key_authorization(websocket.headers.get("authorization"))
+            api_key = await validate_required_proxy_api_key_authorization(proxy_api_authorization(websocket.headers))
         else:
             api_key = await _validate_proxy_api_key_authorization_for_connection(
-                websocket.headers.get("authorization"),
+                proxy_api_authorization(websocket.headers),
                 websocket,
             )
     except ProxyAuthError as exc:
@@ -9620,7 +9621,7 @@ async def _required_capability_http_transport_denial(
     if not _required_capability_values(request.headers) and not _required_capability_metadata_values(payload):
         return None
     if api_key is None:
-        await validate_required_proxy_api_key_authorization(request.headers.get("authorization"))
+        await validate_required_proxy_api_key_authorization(proxy_api_authorization(request.headers))
     return _logged_error_json_response(
         request,
         400,
@@ -9648,7 +9649,7 @@ async def _validate_internal_bridge_api_key(
         return None, None
     try:
         api_key = await _validate_proxy_api_key_authorization_for_connection(
-            request.headers.get("authorization"),
+            proxy_api_authorization(request.headers),
             request,
         )
     except ProxyAuthError as exc:

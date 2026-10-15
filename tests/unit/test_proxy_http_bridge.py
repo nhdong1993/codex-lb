@@ -47908,3 +47908,32 @@ async def test_retry_http_bridge_precreated_request_refuses_a_third_send_after_a
     assert request_state.replay_count == 1
     assert request_state.clean_close_replay_count == 0
     assert request_state.replay_downstream_response_id == "resp-accepted-visible"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Authorization": "Bearer sk-clb-key"},
+        # A client keeping its own login sends that token as Authorization and the key separately.
+        {"Authorization": "Bearer client-login-token", "X-Codex-LB-Api-Key": "sk-clb-key"},
+    ],
+)
+def test_stream_http_responses_forwards_codex_lb_credential_not_client_login(
+    monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    captured: dict[str, Any] = {}
+
+    def fake_bridge(_payload: object, filtered: Mapping[str, str], **kwargs: Any) -> AsyncIterator[str]:
+        captured["filtered"] = filtered
+        captured["authorization"] = kwargs["proxy_api_authorization"]
+        return cast(AsyncIterator[str], None)
+
+    monkeypatch.setattr(service, "_stream_http_bridge_or_retry", fake_bridge)
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "", "input": "hi"})
+
+    service.stream_http_responses(payload, headers)
+
+    # Owner replicas re-authenticate this value, so it must be the codex-lb key.
+    assert captured["authorization"] == "Bearer sk-clb-key"
+    assert not {key.lower() for key in captured["filtered"]} & {"authorization", "x-codex-lb-api-key"}

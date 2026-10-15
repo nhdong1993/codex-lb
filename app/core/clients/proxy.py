@@ -115,6 +115,8 @@ CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
 CODEX_ROUTING_HINT_HEADER = "x-codex-routing-hint"
 CODEX_LB_REQUIRED_CAPABILITY_HEADER = "x-codex-lb-required-capability"
+# Carries the codex-lb API key when Authorization holds the client's own login token.
+CODEX_LB_API_KEY_HEADER = "x-codex-lb-api-key"
 CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
 CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite"
 
@@ -164,6 +166,7 @@ IGNORE_INBOUND_HEADERS = {
     CODEX_INSTALLATION_ID_HEADER,
     CODEX_ROUTING_HINT_HEADER,
     CODEX_LB_REQUIRED_CAPABILITY_HEADER,
+    CODEX_LB_API_KEY_HEADER,
     "true-client-ip",
 }
 INTERNAL_OPENAI_UPSTREAM_HEADERS = frozenset(
@@ -698,6 +701,26 @@ class CodexControlRequestPrivacyPolicy(Enum):
     @property
     def redacts_sensitive_details(self) -> bool:
         return self is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
+
+
+def dedicated_api_key_authorization(headers: Mapping[str, str]) -> str | None:
+    """Return a Bearer credential from the dedicated API-key header, if present."""
+    for key, value in headers.items():
+        if key.lower() == CODEX_LB_API_KEY_HEADER and value.strip():
+            return f"Bearer {value.strip()}"
+    return None
+
+
+def proxy_api_authorization(headers: Mapping[str, str]) -> str | None:
+    """Return the codex-lb credential: the dedicated API-key header, else Authorization.
+
+    Clients keeping their own login send that token as Authorization, so the dedicated
+    header wins wherever codex-lb authenticates or forwards the proxy credential.
+    """
+    dedicated = dedicated_api_key_authorization(headers)
+    if dedicated is not None:
+        return dedicated
+    return next((value for key, value in headers.items() if key.lower() == "authorization"), None)
 
 
 def _should_drop_inbound_header(name: str) -> bool:

@@ -122,7 +122,15 @@ async def test_validate_proxy_websocket_request_maps_auth_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_validate_proxy_websocket_request_returns_validated_api_key(monkeypatch):
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"authorization": "Bearer valid-key"},
+        # A client keeping its own login sends that token as Authorization and the key separately.
+        {"authorization": "Bearer client-login-token", "x-codex-lb-api-key": "valid-key"},
+    ],
+)
+async def test_validate_proxy_websocket_request_returns_validated_api_key(monkeypatch, headers):
     async def fake_denial(_websocket):
         return None
 
@@ -148,7 +156,7 @@ async def test_validate_proxy_websocket_request_returns_validated_api_key(monkey
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", pass_auth)
 
     resolved_api_key, response = await proxy_api_module._validate_proxy_websocket_request(
-        cast(WebSocket, SimpleNamespace(headers={"authorization": "Bearer valid-key"})),
+        cast(WebSocket, SimpleNamespace(headers=headers)),
     )
 
     assert response is None

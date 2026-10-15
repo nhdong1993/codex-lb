@@ -19,7 +19,11 @@ from app.core.auth.dashboard_access import (
     guest_principal,
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
-from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
+from app.core.clients.proxy import (
+    CODEX_LB_REQUIRED_CAPABILITY_HEADER,
+    dedicated_api_key_authorization,
+    proxy_api_authorization,
+)
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -65,7 +69,7 @@ async def validate_proxy_api_key(
 ) -> ApiKeyData | None:
     """A required-capability header authenticates even when global proxy API-key auth is disabled."""
 
-    authorization = None if credentials is None else f"Bearer {credentials.credentials}"
+    authorization = _proxy_credential(request, credentials)
     if request.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER):
         return await validate_required_proxy_api_key_authorization(authorization)
     return await validate_proxy_api_key_authorization(authorization, request=request)
@@ -128,8 +132,14 @@ async def validate_required_proxy_api_key(
 ) -> ApiKeyData:
     """Require a valid proxy API key regardless of the global auth setting."""
 
-    authorization = None if credentials is None else f"Bearer {credentials.credentials}"
-    return await validate_required_proxy_api_key_authorization(authorization)
+    return await validate_required_proxy_api_key_authorization(_proxy_credential(request, credentials))
+
+
+def _proxy_credential(request: Request, credentials: HTTPAuthorizationCredentials | None) -> str | None:
+    # The dedicated key header wins; otherwise keep the HTTPBearer-parsed Authorization credential.
+    return dedicated_api_key_authorization(request.headers) or (
+        None if credentials is None else f"Bearer {credentials.credentials}"
+    )
 
 
 # --- Self-service usage endpoint auth (always requires valid key) ---
@@ -294,6 +304,10 @@ def _is_proxy_unauthenticated_socket_peer_allowed(request: HTTPConnection) -> bo
 
 
 async def validate_codex_usage_identity(request: Request) -> ApiKeyData | None:
+    # A client keeping its own login authenticates usage with the dedicated key header.
+    dedicated = _extract_bearer_token(dedicated_api_key_authorization(request.headers))
+    if dedicated:
+        return await _validate_api_key_token(dedicated)
     token = _extract_bearer_token(request.headers.get("Authorization"))
     if not token:
         raise ProxyAuthError("Missing ChatGPT token in Authorization header")
@@ -374,7 +388,7 @@ async def validate_codex_provider_usage_identity(request: Request) -> ApiKeyData
     """Bind provider capability intent to a proxy API-key principal before usage I/O."""
 
     if request.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER):
-        return await validate_required_proxy_api_key_authorization(request.headers.get("authorization"))
+        return await validate_required_proxy_api_key_authorization(proxy_api_authorization(request.headers))
     return await validate_codex_usage_identity(request)
 
 

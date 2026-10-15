@@ -71,6 +71,28 @@ async def test_validate_proxy_api_key_preserves_headerless_authentication(
 
 
 @pytest.mark.asyncio
+async def test_validate_proxy_api_key_prefers_dedicated_header_over_client_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    principal = object()
+    # A client keeping its own login sends that token as Authorization and the key separately.
+    request = cast(Any, SimpleNamespace(headers=Headers({"x-codex-lb-api-key": "sk-clb-dedicated"})))
+
+    async def ordinary_auth(authorization: str | None, *, request: object | None = None) -> object:
+        assert authorization == "Bearer sk-clb-dedicated"
+        return principal
+
+    monkeypatch.setattr(auth_dependencies, "validate_proxy_api_key_authorization", ordinary_auth)
+
+    resolved = await auth_dependencies.validate_proxy_api_key(
+        request,
+        cast(Any, SimpleNamespace(credentials="client-login-token")),
+    )
+
+    assert resolved is principal
+
+
+@pytest.mark.asyncio
 async def test_validate_codex_provider_usage_identity_authenticates_carrier_before_usage_io(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

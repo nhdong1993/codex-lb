@@ -34,6 +34,7 @@ from app.core.clients.proxy import (  # noqa: F401
 )
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
+from app.core.clients.proxy import proxy_api_authorization as core_proxy_api_authorization
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
 from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
@@ -142,7 +143,6 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _build_rewritten_stream_response_failed_event,
     _codex_keepalive_frame,
     _fingerprint_input_items,
-    _header_value_case_insensitive,
     _http_bridge_startup_keepalive_grace_seconds,
     _inject_missing_interrupted_function_call_outputs,
     _input_prefix_matches_stored_context,
@@ -906,7 +906,8 @@ class _HTTPBridgeStreamingMixin:
         capacity_startup_ready_event: asyncio.Event | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
-        proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
+        # Forward the codex-lb credential, never a client's own login token, to the owner replica.
+        proxy_api_authorization = core_proxy_api_authorization(headers)
         filtered = filter_inbound_headers(headers)
         return self._stream_http_bridge_or_retry(
             payload,

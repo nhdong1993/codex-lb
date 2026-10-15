@@ -9,7 +9,7 @@ from starlette._utils import get_route_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.auth.dependencies import validate_required_proxy_api_key_authorization
-from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
+from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER, proxy_api_authorization
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError, ProxyRequiredCapabilityTransportError
 from app.core.runtime_logging import log_error_response
@@ -73,7 +73,7 @@ class RequiredCapabilityHttpMiddleware:
 
         request = Request(scope)
         try:
-            await validate_required_proxy_api_key_authorization(request.headers.get("authorization"))
+            await validate_required_proxy_api_key_authorization(proxy_api_authorization(request.headers))
         except ProxyAuthError as exc:
             response = _capability_error_response(request, exc)
         else:
