@@ -253,6 +253,7 @@ from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.selection import (
     allowed_source_ids_for_api_key,
     effective_model_for_api_key,
+    responses_model_is_source_only,
     select_responses_model_source,
 )
 from app.modules.model_sources.websocket import MAX_MESSAGE_BYTES, source_ws_error
@@ -1380,6 +1381,34 @@ async def _try_source_responses_websocket(
         )
         return route.require_security_work_authorized
 
+    async def reject_source_only_anchor(
+        payload: ResponsesRequest,
+        refreshed: ApiKeyData | None,
+        raw_model: str | None,
+        *,
+        anchor: Literal["previous_response", "turn_state"],
+    ) -> None:
+        # Recorded account continuity outranks source routing only for a model
+        # the anchored account can serve. Every ChatGPT account answers a
+        # source-only model with a terminal 400 the client never retries, and
+        # the native source session cannot take the turn either because its
+        # anchor lives on the account. A service-level 503 makes Codex fall
+        # back to HTTP and resend full context, which the source path serves.
+        if not await responses_model_is_source_only(payload.model, refreshed, raw_model=raw_model):
+            return
+        logger.info(
+            "Websocket model source requires http transport model=%s raw_model=%s stage=subscription_anchor anchor=%s",
+            payload.model,
+            raw_model,
+            anchor,
+        )
+        raise source_ws_error(
+            "model_source_requires_http_transport",
+            "The requested model is served by a model source that cannot continue this "
+            "subscription-anchored WebSocket turn; retry over HTTP",
+            status=503,
+        )
+
     @contextmanager
     def source_preparation_errors() -> Iterator[None]:
         try:
@@ -1451,6 +1480,7 @@ async def _try_source_responses_websocket(
                 fail_on_missing=not proxy_affinity_module._is_synthesized_turn_state(client_turn_state),
             )
             if turn_state_owner is not None:
+                await reject_source_only_anchor(payload, refreshed, original_model, anchor="turn_state")
                 return None
         try:
             selection, account_owned = await _select_responses_model_source_with_continuity(
@@ -1462,6 +1492,7 @@ async def _try_source_responses_websocket(
                 require_streaming=False,
             )
             if account_owned:
+                await reject_source_only_anchor(payload, refreshed, original_model, anchor="previous_response")
                 return None
             if selection is None:
                 error = await _source_ownership_miss_error(payload, refreshed, raw_model=original_model)

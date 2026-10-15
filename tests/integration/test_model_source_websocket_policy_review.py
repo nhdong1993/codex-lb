@@ -11,12 +11,14 @@ from aiohttp import web
 from sqlalchemy import select
 
 from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
 from app.core.clock import RealClock
 from app.core.errors import openai_error
 from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
+from app.modules.proxy.account_cache import get_routing_availability_cache
 from app.modules.proxy.capability_lineage import CapabilityLineageAlias
 from app.modules.proxy.capability_routing import CapabilityRouter, RoutingCapability, RoutingIntent
 from app.modules.proxy.service import ProxyService
@@ -128,13 +130,16 @@ async def test_source_respects_exact_key_subscription_turn_owner(
             await ws.send({"type": "response.create", "model": "source-ws-model", "input": "continue"})
             event = await ws.receive()
             if ownership == "same_key":
-                assert event["error"]["code"] == "subscription_probe"
+                # The anchored account cannot serve a source-only model, and
+                # the source cannot take an account-anchored turn: fall back.
+                assert event["status"] == 503
+                assert event["error"]["code"] == "model_source_requires_http_transport"
             else:
                 assert event["type"] == "response.created"
                 await ws.receive()
                 assert (await ws.receive())["type"] == "response.completed"
         assert len(calls) == (0 if ownership == "same_key" else 1)
-        assert len(subscription_calls) == (1 if ownership == "same_key" else 0)
+        assert not subscription_calls
         assert [row.status for row in await key_reservations(key["id"])] == (
             [] if ownership == "same_key" else ["finalized"]
         )
@@ -200,7 +205,9 @@ async def test_source_reused_socket_rechecks_subscription_turn_owner(async_clien
                 await ws.receive()
             await register_subscription_owner(async_client, app_instance, key)
             await ws.send({**payload, "previous_response_id": "resp_native"})
-            assert (await ws.receive())["error"]["code"] == "websocket_reconnect_required"
+            event = await ws.receive()
+            assert event["status"] == 503
+            assert event["error"]["code"] == "model_source_requires_http_transport"
         assert len(calls) == 1
         assert [row.status for row in await key_reservations(key["id"])] == ["finalized"]
 
@@ -255,13 +262,240 @@ async def test_source_preserves_subscription_previous_owner_before_admission(
             assert response.status_code == 200, response.text
         async with websocket_client(app_instance, path, key["key"]) as ws:
             await ws.send(payload)
-            assert (await ws.receive())["error"]["code"] == (
-                "subscription_probe" if carrier == "original" else "websocket_reconnect_required"
-            )
+            event = await ws.receive()
+            if carrier == "original":
+                # A recorded owner cannot serve a source-only model; neither
+                # the account nor the source may take the anchored turn.
+                assert event["status"] == 503
+                assert event["error"]["code"] == "model_source_requires_http_transport"
+            else:
+                assert event["error"]["code"] == "websocket_reconnect_required"
         assert len(calls) == 1
-        assert len(subscription_calls) == (1 if carrier == "original" else 0)
+        assert not subscription_calls
         assert [row.status for row in await key_reservations(key["id"])] == ["finalized"]
         assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+class SubscriptionUpstream:
+    """Answer every forwarded create with one completed subscription response."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, object]] = []
+        self.messages: asyncio.Queue[UpstreamWebSocketMessage] = asyncio.Queue()
+
+    async def send_text(self, text: str) -> None:
+        self.sent.append(json.loads(text))
+        response = {"id": f"resp_subscription_{len(self.sent)}", "object": "response", "status": "in_progress"}
+        for event in (
+            {"type": "response.created", "response": response},
+            {"type": "response.completed", "response": {**response, "status": "completed"}},
+        ):
+            self.messages.put_nowait(UpstreamWebSocketMessage(kind="text", text=json.dumps(event)))
+
+    async def send_bytes(self, data: bytes) -> None:
+        raise AssertionError("the subscription fixture expects text frames")
+
+    async def receive(self) -> UpstreamWebSocketMessage:
+        return await self.messages.get()
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        return None
+
+    def response_header(self, name: str) -> str | None:
+        return None
+
+
+@pytest.mark.parametrize("path", ROUTES)
+@pytest.mark.parametrize("prewarm", [False, True])
+async def test_source_only_model_bypasses_subscription_previous_owner(
+    async_client, app_instance, monkeypatch, path, prewarm
+):
+    # Codex Desktop prewarms a registry model on subscription, then chains the
+    # real turn to a model only an HTTP source serves. The recorded owner must
+    # not receive it: every ChatGPT account rejects the slug with a terminal 400.
+    upstream = SubscriptionUpstream()
+    connects = []
+
+    async def connect_subscription(self, headers, **kwargs):
+        connects.append(kwargs["model"])
+        return account, upstream
+
+    monkeypatch.setattr(ProxyService, "_connect_proxy_websocket", connect_subscription)
+    source_id = await create_source(async_client, "http://127.0.0.1:9/v1", enabled=False)
+    key = await create_key(async_client, source_id)
+    account_id = await register_subscription_owner(
+        async_client, app_instance, key, previous_response_id=None if prewarm else "resp_subscription_anchor"
+    )
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+    # The fixture account is committed after startup's availability snapshot.
+    await get_routing_availability_cache().refresh_from_db()
+    async with websocket_client(app_instance, path, key["key"]) as ws:
+        anchor = "resp_subscription_anchor"
+        if prewarm:
+            await ws.send({"type": "response.create", "model": "gpt-5.4", "generate": False, "input": []})
+            assert (await ws.receive())["type"] == "response.created"
+            completed = await ws.receive()
+            assert completed["type"] == "response.completed"
+            anchor = completed["response"]["id"]
+        turn = {"type": "response.create", "model": "source-ws-model", "input": "continue"}
+        await ws.send({**turn, "previous_response_id": anchor})
+        event = await ws.receive()
+        assert event["type"] == "error"
+        assert event["status"] == 503
+        assert event["error"]["type"] == "server_error"
+        assert event["error"]["code"] == "model_source_requires_http_transport"
+        # The refusal is per turn: the socket keeps serving the anchored account.
+        await ws.send({**turn, "model": "gpt-5.4", "previous_response_id": anchor})
+        assert (await ws.receive())["type"] == "response.created"
+        assert (await ws.receive())["type"] == "response.completed"
+    assert [payload["model"] for payload in upstream.sent] == ["gpt-5.4"] * (2 if prewarm else 1)
+    assert connects == ["gpt-5.4"]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+    # Only the forwarded subscription turns reserved usage or wrote request
+    # logs (released: the fixture reports no usage). The refused turn left
+    # neither an open reservation nor a request-log row.
+    await get_proxy_service_for_app(app_instance).drain_persistence_tasks(timeout_seconds=5)
+    reservations = await key_reservations(key["id"])
+    assert [(row.model, row.status) for row in reservations] == [("gpt-5.4", "released")] * len(upstream.sent)
+    async with SessionLocal() as session:
+        logs = (await session.execute(select(RequestLog).where(RequestLog.api_key_id == key["id"]))).scalars().all()
+    expected_logs = [f"resp_subscription_{index}" for index in range(1, len(upstream.sent) + 1)]
+    if not prewarm:
+        expected_logs.append("resp_subscription_anchor")  # the fixture's recorded owner
+    assert sorted(row.request_id for row in logs) == sorted(expected_logs)
+
+
+def anchored_turn_fixtures(monkeypatch):
+    """Record native source and subscription dispatches for one anchored turn."""
+    calls, subscription_calls = [], []
+
+    async def provider(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        calls.append(await ws.receive_json())
+        await complete(ws)
+        async for _ in ws:
+            pass
+        return ws
+
+    async def subscription_prepare(self, payload, **kwargs):
+        subscription_calls.append(payload)
+        raise ProxyResponseError(409, openai_error("subscription_probe", "Local subscription fixture"))
+
+    monkeypatch.setattr(ProxyService, "_prepare_websocket_response_create_request", subscription_prepare)
+    return provider, calls, subscription_calls
+
+
+@pytest.mark.parametrize("path", ROUTES)
+async def test_disabled_source_only_model_bypasses_subscription_previous_owner(
+    async_client, app_instance, monkeypatch, path
+):
+    provider, calls, subscription_calls = anchored_turn_fixtures(monkeypatch)
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(provider, shutdown_timeout=1))
+        key = await create_key(async_client, source_id)
+        await register_subscription_owner(async_client, app_instance, key, previous_response_id="resp_subscription")
+        # ``create_source(enabled=False)`` only turns WebSocket support off;
+        # switch the source itself off so only disabled ownership claims it.
+        response = await async_client.patch(f"/api/model-sources/{source_id}", json={"isEnabled": False})
+        assert response.status_code == 200, response.text
+        async with websocket_client(app_instance, path, key["key"]) as ws:
+            await ws.send(
+                {
+                    "type": "response.create",
+                    "model": "source-ws-model",
+                    "previous_response_id": "resp_subscription",
+                    "input": "continue",
+                }
+            )
+            event = await ws.receive()
+        assert event["status"] == 503
+        assert event["error"]["code"] == "model_source_requires_http_transport"
+        assert not calls
+        assert not subscription_calls
+        assert not await key_reservations(key["id"])
+
+
+@pytest.mark.parametrize("path", ROUTES)
+async def test_compaction_trigger_keeps_subscription_previous_owner_for_source_only_model(
+    async_client, app_instance, monkeypatch, path
+):
+    provider, calls, subscription_calls = anchored_turn_fixtures(monkeypatch)
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(provider, shutdown_timeout=1))
+        key = await create_key(async_client, source_id)
+        await register_subscription_owner(async_client, app_instance, key, previous_response_id="resp_subscription")
+        async with websocket_client(app_instance, path, key["key"]) as ws:
+            await ws.send(
+                {
+                    "type": "response.create",
+                    "model": "source-ws-model",
+                    "previous_response_id": "resp_subscription",
+                    "input": [{"role": "user", "content": "Retain this history"}, {"type": "compaction_trigger"}],
+                }
+            )
+            event = await ws.receive()
+        # A structural exclusion keeps the turn on its owner-bound
+        # subscription path ahead of the source-only refusal.
+        assert event["error"]["code"] == "subscription_probe"
+        assert not calls
+        assert len(subscription_calls) == 1
+        assert not await key_reservations(key["id"])
+
+
+@pytest.mark.parametrize("path", ROUTES)
+@pytest.mark.parametrize("anchor", [None, "previous_response", "turn_state"])
+async def test_source_registry_model_keeps_subscription_anchor(async_client, app_instance, monkeypatch, path, anchor):
+    calls, subscription_calls = [], []
+
+    async def provider(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        calls.append(await ws.receive_json())
+        await complete(ws, model="gpt-5.4")
+        async for _ in ws:
+            pass
+        return ws
+
+    async def subscription_prepare(self, payload, **kwargs):
+        subscription_calls.append(payload)
+        raise ProxyResponseError(409, openai_error("subscription_probe", "Local subscription fixture"))
+
+    monkeypatch.setattr(ProxyService, "_prepare_websocket_response_create_request", subscription_prepare)
+    async with stub_source_upstreams() as start:
+        source_id = await _create_model_source(
+            async_client,
+            name="native",
+            model="gpt-5.4",
+            base_url=await start(provider, shutdown_timeout=1),
+            supports_responses=True,
+        )
+        response = await async_client.patch(
+            f"/api/model-sources/{source_id}", json={"supportsResponsesWebsocket": True}
+        )
+        assert response.status_code == 200, response.text
+        key = await create_key(async_client, source_id)
+        await register_subscription_owner(async_client, app_instance, key, previous_response_id="resp_subscription")
+        payload = {"type": "response.create", "model": "gpt-5.4", "input": "continue"}
+        headers = []
+        if anchor == "previous_response":
+            payload["previous_response_id"] = "resp_subscription"
+        elif anchor == "turn_state":
+            headers.append((b"x-codex-turn-state", TURN_STATE.encode()))
+        async with websocket_client(app_instance, path, key["key"], extra_headers=headers) as ws:
+            await ws.send(payload)
+            event = await ws.receive()
+            if anchor is None:
+                # Control: this source-scoped key routes the registry slug to
+                # its source, so only the anchor keeps it on subscription.
+                assert event["type"] == "response.created"
+                await ws.receive()
+                assert (await ws.receive())["type"] == "response.completed"
+            else:
+                assert event["error"]["code"] == "subscription_probe"
+        assert len(calls) == (1 if anchor is None else 0)
+        assert len(subscription_calls) == (0 if anchor is None else 1)
 
 
 @pytest.mark.parametrize("path", ROUTES)

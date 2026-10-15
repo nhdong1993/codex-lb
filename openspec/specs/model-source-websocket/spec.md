@@ -20,7 +20,7 @@ Each source SHALL expose a persisted `supports_responses_websocket` boolean thro
 
 ### Requirement: Source WebSocket routes retain source authorization and payload semantics
 
-Both `/v1/responses` and `/backend-api/codex/responses`, including explicit trailing-slash equivalents without redirect, SHALL support opted-in source requests. Routing MUST apply raw/enforced public-model policy, source assignments, per-source overrides and aliases before dispatch. It MUST preserve source HTTP reasoning/instruction/tool semantics and validate original and effective ownership references. Subscription-owned anchors, uploaded-file ownership, structural compaction exclusions and required-capability security rules MUST retain their precedence. Lookup failure MUST fail closed before reservation or upstream dispatch.
+Both `/v1/responses` and `/backend-api/codex/responses`, including explicit trailing-slash equivalents without redirect, SHALL support opted-in source requests. Routing MUST apply raw/enforced public-model policy, source assignments, per-source overrides and aliases before dispatch. It MUST preserve source HTTP reasoning/instruction/tool semantics and validate original and effective ownership references. Subscription-owned anchors, uploaded-file ownership, structural compaction exclusions and required-capability security rules MUST retain their precedence over source dispatch. Unless a structural subscription exclusion or required-capability security routing applies, which keep their precedence, a subscription-owned anchor for a source-only model MUST NOT route the turn to a subscription account and MUST yield `model_source_requires_http_transport` as defined in `responses-api-compat`. Lookup failure MUST fail closed before reservation or upstream dispatch.
 
 Domain errors raised during shared preparation or source quota reservation MUST retain the existing WebSocket error status, type, code, message and supplied parameter. This contract MUST also apply when the eventual backend is subscription and when no model source is configured.
 
@@ -64,6 +64,12 @@ Shared source ownership preparation MUST preserve the existing HTTP error envelo
 - **WHEN** a create carries an explicit turn-state alias owned by a subscription account under the exact API key, including without a previous response ID
 - **THEN** the source path MUST preserve subscription ownership or fail closed before source admission
 - **AND** conflicting or unavailable ownership lookup MUST NOT permit source dispatch, while an unregistered synthesized source placeholder MUST remain usable
+
+#### Scenario: A subscription anchor cannot pin a source-only model
+- **WHEN** a create for a source-only model (claimed by a source, with no model candidate in the subscription model registry) carries a subscription-owned previous-response or turn-state anchor
+- **AND** no structural subscription exclusion or required-capability routing applies
+- **THEN** the turn MUST receive the service-level `model_source_requires_http_transport` failure
+- **AND** neither a subscription account nor the source receives the turn, and no usage reservation remains held
 
 #### Scenario: An invalid first subscription create is corrected
 - **WHEN** shared or subscription-specific payload validation rejects the first create before backend preparation succeeds

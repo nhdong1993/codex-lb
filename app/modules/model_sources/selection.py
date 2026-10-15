@@ -86,6 +86,37 @@ async def select_responses_model_source(
         return (source, candidate) if source is not None else None
 
 
+async def responses_model_is_source_only(
+    model: str,
+    api_key: ApiKeyData | None,
+    *,
+    raw_model: str | None = None,
+) -> bool:
+    """True when a Responses source, even a disabled one, claims a model subscription cannot serve.
+
+    Recorded account continuity (a previous-response or turn-state owner)
+    outranks source routing on the premise that the anchored account can serve
+    the model. That holds only for subscription registry slugs: a ChatGPT
+    account rejects every other slug (``The '<model>' model is not supported
+    when using Codex with a ChatGPT account.``), so pinning such a model to its
+    anchor guarantees a terminal 400. A source-scoped key may route a registry
+    slug to a source; that model stays servable by the anchor and is therefore
+    not source-only, whichever candidate (raw or normalized) is the slug.
+
+    The registry check runs first so ordinary anchored subscription turns never
+    open a database session. Unlike ``responses_model_is_source_owned`` this
+    does not fail open: its caller runs before any reservation and rejects
+    lookup errors the same way as its own source lookup.
+    """
+    registry_models = get_model_registry().get_models_with_fallback()
+    if any(candidate in registry_models for candidate in (raw_model, model) if candidate):
+        return False
+    selection = await select_responses_model_source(model, api_key, raw_model=raw_model)
+    if selection is None:
+        selection = await select_responses_model_source(model, api_key, raw_model=raw_model, only_disabled=True)
+    return selection is not None
+
+
 def effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str | None) -> str | None:
     """The model an API key forces, falling back to the requested one."""
     if api_key is None or api_key.enforced_model is None:

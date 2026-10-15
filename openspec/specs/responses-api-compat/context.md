@@ -432,3 +432,58 @@ entries, for example `["send_user_message_async", "clock", "namespace", "custom"
 Editing only the local Codex catalog does not update proxy egress filtering.
 Verify the repair with an actual CLI shell read and apply-patch write in a
 disposable workspace; a textual success claim is insufficient evidence.
+
+## Source-only models and subscription anchors on WebSocket (2026-10-15)
+
+A recorded subscription owner (a `previous_response_id` owner or a client
+turn-state owner) keeps a direct Responses WebSocket turn on the owner-bound
+subscription path only when that account can serve the model. A *source-only*
+model, one claimed by an enabled or disabled Responses-capable source with no
+candidate (raw or enforced model, and normalized model) in the subscription
+model registry, is refused in the source preflight with the existing 503
+`model_source_requires_http_transport`. Codex then falls back to HTTP and
+resends full context, which the source route serves. See "Previous-response
+source routing follows proven ownership" in [spec.md](spec.md).
+
+Why: for an unscoped key no registry slug is ever source-routed, so the owner
+veto on a source-only model always ended in the ChatGPT 400 "The '<model>'
+model is not supported when using Codex with a ChatGPT account", which Codex
+treats as terminal. The trigger is a Codex `generate:false` warmup for a
+subscription model followed on the same socket by a source-model turn
+anchored to that warmup (production request
+`ws_363b6f50d7ac42bf86601e1d777739d4`, 2026-10-15 04:00:21Z, model
+`http/gpt-6-astra` on the HTTP-only source `ch-relay`).
+
+Decisions and constraints:
+
+- A registry candidate keeps the old precedence, including a registry slug a
+  source-scoped key routes to its source.
+- The refusal is a 503, never a 4xx, because Codex falls back to HTTP only on
+  a service-level WebSocket failure. The turn is not forwarded to the source
+  over WebSocket, since its anchor lives on the subscription account.
+- Structural exclusions (terminal `compaction_trigger`, `input_file`) and
+  required-capability routing still come first.
+- The refusal precedes admission, reservation and request-log preparation:
+  it holds nothing and writes no request-log row. Lookup errors fail closed
+  as `model_source_lookup_failed` (502).
+- Side effects for source-only turns: a source-bound socket now gets the 503
+  instead of 409 `websocket_reconnect_required`, and a reused
+  subscription-bound socket with only a turn-state anchor gets an in-band 503
+  instead of a terminal `response.failed`.
+
+Known gap: HTTP is unchanged, so a non-Codex HTTP client that anchors a
+source-only model to a subscription-owned response still gets the
+subscription 400.
+
+Operator notes: before the fix, request logs show `transport=websocket`,
+`account_id` set, empty `model_source_id` and the ChatGPT 400 a few seconds
+after a warmup. After the fix, look for the application log line
+`Websocket model source requires http transport ... stage=subscription_anchor`
+followed by successful HTTP requests with `model_source_id` set. Without
+deploying, a provider profile with `supports_websockets=false` (or a
+source-only key) avoids the WebSocket path.
+
+Archive caveat: the still-active change `add-model-source-websocket` carries
+older deltas for the same three requirements. Archive it with spec updates
+skipped, or re-apply this wording afterwards. History:
+`openspec/changes/archive/2026-10-15-route-source-only-models-off-subscription-owner-pin/`.
