@@ -31,6 +31,17 @@ describe("ModelSourceCreateDialog", () => {
     });
   });
 
+  it("shows the default context window only while the field is blank", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ModelSourceCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={vi.fn()} />);
+    const hint =
+      "Blank advertises the default of 128,000 tokens to Codex. Set the model's real window so long threads can compact.";
+
+    expect(screen.getByText(hint)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Context Window"), "272000");
+    expect(screen.queryByText(hint)).not.toBeInTheDocument();
+  });
+
   it("replaces the blank starter row with pasted models", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

@@ -11,8 +11,12 @@ import type {
   ModelSourceFormValues,
   SourceToolTypeFlags,
 } from "@/features/model-sources/components/model-source-form";
-import { parseReasoningEffortsInput } from "@/features/model-sources/components/model-source-form";
+import {
+  DEFAULT_SOURCE_CONTEXT_WINDOW,
+  parseReasoningEffortsInput,
+} from "@/features/model-sources/components/model-source-form";
 import { SourceToolForwardingFields } from "@/features/model-sources/components/source-tool-forwarding-fields";
+import { formatNumber } from "@/utils/formatters";
 
 type ModelSourceFormFieldsProps = {
   control: Control<ModelSourceFormValues>;
@@ -95,13 +99,23 @@ export function ModelSourceFormFields({
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
-	          <label className="text-sm font-medium">{t("modelSources.fields.contextWindow")}</label>
+	          <label className="text-sm font-medium" htmlFor="model-source-context-window">
+	            {t("modelSources.fields.contextWindow")}
+	          </label>
           <Input
+            id="model-source-context-window"
             value={draft.contextWindow}
             onChange={(event) => updateDraft({ contextWindow: event.target.value })}
             placeholder="e.g. 32768"
             inputMode="numeric"
           />
+          {draft.contextWindow.trim() ? null : (
+            <p className="text-xs text-amber-700 dark:text-amber-300">
+              {t("modelSources.fields.contextWindowDefault", {
+                tokens: formatNumber(DEFAULT_SOURCE_CONTEXT_WINDOW),
+              })}
+            </p>
+          )}
         </div>
         <div className="space-y-1">
 	          <label className="text-sm font-medium">{t("modelSources.fields.maxOutputTokens")}</label>

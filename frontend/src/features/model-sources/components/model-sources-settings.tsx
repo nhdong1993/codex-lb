@@ -8,6 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { ModelSourceCreateDialog } from "@/features/model-sources/components/model-source-create-dialog";
 import { ModelSourceEditDialog } from "@/features/model-sources/components/model-source-edit-dialog";
+import {
+  DEFAULT_SOURCE_CONTEXT_WINDOW,
+  modelsMissingContextWindow,
+} from "@/features/model-sources/components/model-source-form";
 import { useModelSources } from "@/features/model-sources/hooks/use-model-sources";
 import type {
   ModelSource,
@@ -16,6 +20,7 @@ import type {
 } from "@/features/model-sources/schemas";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { getErrorMessageOrNull } from "@/utils/errors";
+import { formatNumber } from "@/utils/formatters";
 
 function modelPriceLabel(source: ModelSource): string | null {
   const priced = source.models.find(
@@ -25,6 +30,21 @@ function modelPriceLabel(source: ModelSource): string | null {
   const input = priced.inputPer1M ?? 0;
   const output = priced.outputPer1M ?? 0;
   return `$${input}/$${output} per 1M`;
+}
+
+function MissingContextWindowWarning({ source }: { source: ModelSource }) {
+  const { t } = useTranslation();
+  const models = modelsMissingContextWindow(source.models);
+  if (models.length === 0) return null;
+  return (
+    <AlertMessage variant="warning" className="mt-2">
+      {t("modelSources.contextWindowMissing", {
+        count: models.length,
+        models: models.join(", "),
+        tokens: formatNumber(DEFAULT_SOURCE_CONTEXT_WINDOW),
+      })}
+    </AlertMessage>
+  );
 }
 
 export type ModelSourcesSettingsProps = {
@@ -161,6 +181,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                   </Button>
                 </div>
               </div>
+              <MissingContextWindowWarning source={source} />
             </div>
           ))
         ) : (

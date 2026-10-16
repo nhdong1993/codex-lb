@@ -9,6 +9,17 @@ import type {
 
 const MAX_MODEL_ID_LENGTH = 255;
 
+// Mirrors DEFAULT_SOURCE_CONTEXT_WINDOW in app/modules/model_sources/catalog.py:
+// the window the model catalog advertises for a source model without one.
+export const DEFAULT_SOURCE_CONTEXT_WINDOW = 128_000;
+
+// Enabled models that fall back to DEFAULT_SOURCE_CONTEXT_WINDOW in the catalog.
+export function modelsMissingContextWindow(
+  models: Pick<ModelSourceModel, "model" | "contextWindow" | "isEnabled">[],
+): string[] {
+  return models.filter((model) => model.isEnabled && model.contextWindow === null).map((model) => model.model);
+}
+
 // One editable model row. ``originModel`` is the stored model the row was
 // loaded from, so renaming the public ID keeps that model's settings; rows
 // added in the form have no origin. ``subagentsAllowed`` mirrors the absence of

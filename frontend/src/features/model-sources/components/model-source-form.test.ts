@@ -8,6 +8,7 @@ import {
   mergeSubagentMetadata,
   mergeToolTypeMetadata,
   modelInputsFromForm,
+  modelsMissingContextWindow,
   newModelRow,
   parseBulkModelEntries,
   parseReasoningEffortsInput,
@@ -182,5 +183,17 @@ describe("model-source sub-agent policy metadata", () => {
     const [blocked, open] = modelInputsFromForm(parsed, initialModelSourceDraft);
     expect(JSON.parse(blocked.rawMetadataJson!)).toEqual({ block_subagents: true });
     expect(open.rawMetadataJson).toBeNull();
+  });
+});
+
+describe("modelsMissingContextWindow", () => {
+  it("lists only enabled models without a context window", () => {
+    expect(
+      modelsMissingContextWindow([
+        { model: "http/gpt-6-astra", contextWindow: null, isEnabled: true },
+        { model: "http/gpt-6-sol", contextWindow: 272000, isEnabled: true },
+        { model: "http/old", contextWindow: null, isEnabled: false },
+      ]),
+    ).toEqual(["http/gpt-6-astra"]);
   });
 });
