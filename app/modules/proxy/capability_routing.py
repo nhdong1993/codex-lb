@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
@@ -19,6 +20,12 @@ from app.modules.proxy.repo_bundle import ProxyRepoFactory
 REQUIRED_CAPABILITY_HEADER = CODEX_LB_REQUIRED_CAPABILITY_HEADER
 CODEX_PARENT_THREAD_ID_HEADER = "x-codex-parent-thread-id"
 CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
+CODEX_SUBAGENT_HEADER = "x-openai-subagent"
+CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
+# Codex marks threads created by ``spawn_agent`` with these values; review,
+# compaction and memory threads use other ``x-openai-subagent`` values.
+SPAWNED_SUBAGENT_HEADER_VALUE = "collab_spawn"
+SPAWNED_SUBAGENT_TURN_KIND = "thread_spawn"
 CAPABILITY_SIGNAL_UNTRUSTED_CODE = "capability_signal_untrusted"
 UNSUPPORTED_REQUIRED_CAPABILITY_CODE = "unsupported_required_capability"
 CAPABILITY_LINEAGE_UNAVAILABLE_CODE = "capability_lineage_unavailable"
@@ -206,6 +213,32 @@ def strip_capability_metadata(client_metadata: JsonValue | None) -> JsonValue | 
         for key, value in client_metadata.items()
         if not isinstance(key, str) or key.lower() != normalized_name
     }
+
+
+def is_spawned_subagent_request(headers: Mapping[str, str], client_metadata: JsonValue | None) -> bool:
+    """Whether Codex sent this request from a thread created by ``spawn_agent``.
+
+    Codex repeats the signals in ``client_metadata``, which is the only place a
+    WebSocket ``response.create`` frame carries them.
+    """
+    subagent_values = (
+        *_header_values(headers, CODEX_SUBAGENT_HEADER),
+        *_metadata_string_values(client_metadata, CODEX_SUBAGENT_HEADER),
+    )
+    if any(value.strip() == SPAWNED_SUBAGENT_HEADER_VALUE for value in subagent_values):
+        return True
+    turn_metadata_values = (
+        *_header_values(headers, CODEX_TURN_METADATA_HEADER),
+        *_metadata_string_values(client_metadata, CODEX_TURN_METADATA_HEADER),
+    )
+    for value in turn_metadata_values:
+        try:
+            turn_metadata = json.loads(value)
+        except ValueError:
+            continue
+        if is_json_mapping(turn_metadata) and turn_metadata.get("subagent_kind") == SPAWNED_SUBAGENT_TURN_KIND:
+            return True
+    return False
 
 
 def _header_values(headers: Mapping[str, str], name: str) -> tuple[str, ...]:

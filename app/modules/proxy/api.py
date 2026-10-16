@@ -211,6 +211,7 @@ from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.model_sources.aliases import restore_sse_model_identity
 from app.modules.model_sources.catalog import (
     source_model_audio_cost_usd,
+    source_model_blocks_subagents,
     source_model_cost_usd,
     source_model_request_overrides,
     source_model_supported_tool_types,
@@ -289,6 +290,7 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import (
     capability_lineage_aliases,
+    is_spawned_subagent_request,
     parse_routing_intent,
     required_capability_metadata_values,
 )
@@ -1524,7 +1526,12 @@ async def _try_source_responses_websocket(
             # Preserve exact upstream wire semantics before candidate overrides.
             restore_source_reasoning_effort(payload, selection[0], pre_normalization_effort=effort)
             payload.stream = True
-            resolved = await _resolve_source_response_candidates(payload, refreshed, websocket=True)
+            resolved = await _resolve_source_response_candidates(
+                payload,
+                refreshed,
+                websocket=True,
+                spawned_subagent=is_spawned_subagent_request(websocket.headers, raw.get("client_metadata")),
+            )
         except (ModelSourceForwardingError, ProxyResponseError):
             raise
         except Exception:
@@ -5536,6 +5543,7 @@ async def _resolve_source_response_candidates(
     *,
     pooled: bool = False,
     websocket: bool = False,
+    spawned_subagent: bool = False,
 ) -> _SourceResponseCandidates:
     """Shared HTTP/WS effective-body and durable ownership resolution, before admission."""
     scope = OwnershipScope(api_key.id if api_key is not None else None, payload.model)
@@ -5547,8 +5555,19 @@ async def _resolve_source_response_candidates(
                 allowed_source_ids=_allowed_source_ids_for_api_key(api_key),
                 require_streaming=bool(payload.stream),
             )
+            # Pool mode follows the authorized set, so excluding sub-agent-blocking
+            # members keeps the pool's ownership and cooldown safeguards.
+            authorized_candidate_count = len(candidates)
+            subagent_blocked_ids = (
+                {candidate.id for candidate in candidates if source_model_blocks_subagents(candidate, payload.model)}
+                if spawned_subagent
+                else set()
+            )
+            candidates = [candidate for candidate in candidates if candidate.id not in subagent_blocked_ids]
             effective_payloads = {
-                candidate.id: _shape_source_responses_payload(payload, candidate, api_key=api_key)
+                candidate.id: _shape_source_responses_payload(
+                    payload, candidate, api_key=api_key, log_dropped_tools=True
+                )
                 for candidate in candidates
             }
             invalid_override_ids = {
@@ -5614,7 +5633,24 @@ async def _resolve_source_response_candidates(
                 openai_error("model_source_lookup_failed", "Unable to resolve model source availability and ownership"),
             ),
         ) from None
-    pooled = pooled or len(candidates) > 1
+    if subagent_blocked_ids and not candidates:
+        logger.info(
+            "subagent_request_blocked model=%s source_ids=%s",
+            payload.model,
+            ",".join(sorted(subagent_blocked_ids)),
+        )
+        raise ModelSourceForwardingError(
+            status_code=403,
+            payload=cast(
+                dict[str, JsonValue],
+                openai_error(
+                    "subagents_disabled",
+                    "Sub-agents are disabled for this model",
+                    error_type="invalid_request_error",
+                ),
+            ),
+        )
+    pooled = pooled or authorized_candidate_count > 1
     eligible_candidates: list[ModelSource] = []
     portable_by_source: dict[str, bool] = {}
     for candidate in candidates:
@@ -5735,7 +5771,14 @@ async def _balanced_source_responses_response(
     pooled = False
     for _ in range(MAX_SOURCE_ATTEMPTS):
         try:
-            resolved = await _resolve_source_response_candidates(payload, api_key, pooled=pooled)
+            resolved = await _resolve_source_response_candidates(
+                payload,
+                api_key,
+                pooled=pooled,
+                spawned_subagent=is_spawned_subagent_request(
+                    request.headers, (payload.model_extra or {}).get("client_metadata")
+                ),
+            )
         except ModelSourceForwardingError as exc:
             return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
         candidates = resolved.sources
@@ -6033,6 +6076,7 @@ def _shape_source_responses_payload(
     source: ModelSource,
     *,
     api_key: ApiKeyData | None,
+    log_dropped_tools: bool = False,
 ) -> dict[str, JsonValue]:
     """Project the client body onto what the source may see (telemetry stripped, reasoning aliases resolved)."""
 
@@ -6071,10 +6115,28 @@ def _shape_source_responses_payload(
     strip_replayed_tool_call_namespaces_from_payload(source_payload)
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))
-    _drop_unsupported_source_response_tools(
+    dropped_tool_types = _drop_unsupported_source_response_tools(
         source_payload,
         supported_tool_types=source_model_supported_tool_types(source, payload.model),
     )
+    if log_dropped_tools and dropped_tool_types:
+        # Candidate resolution runs once per request or WebSocket turn; the HTTP
+        # dispatch re-shapes the chosen source without logging again.
+        logger.info(
+            "source_tools_dropped source_id=%s model=%s types=%s",
+            source.id,
+            payload.model,
+            ",".join(sorted(dropped_tool_types)),
+        )
+    if source_model_blocks_subagents(source, payload.model):
+        stripped_namespaces = _strip_source_subagent_namespaces(source_payload)
+        if log_dropped_tools and stripped_namespaces:
+            logger.info(
+                "source_subagent_tools_stripped source_id=%s model=%s namespaces=%s",
+                source.id,
+                payload.model,
+                ",".join(sorted(stripped_namespaces)),
+            )
     if strip_terminal_compaction_trigger_input(payload) is not None:
         # The operation cannot be replaced by an override for an ordinary turn.
         source_payload["input"] = payload.model_dump_for_forwarding()["input"]
@@ -6334,11 +6396,12 @@ def _drop_unsupported_source_response_tools(
     payload: dict[str, JsonValue],
     *,
     supported_tool_types: frozenset[str],
-) -> None:
+) -> frozenset[str]:
+    """Remove undeclared non-function tools; return the normalized dropped types."""
     _normalize_source_allowed_tool_choice_aliases(payload)
     tools = payload.get("tools")
     if not is_json_list(tools):
-        return
+        return frozenset()
     kept_tools: list[JsonValue] = []
     kept_types: set[str] = set()
     dropped_types: set[str] = set()
@@ -6354,15 +6417,59 @@ def _drop_unsupported_source_response_tools(
         if isinstance(tool_type, str):
             kept_types.add(tool_type)
     if len(kept_tools) == len(tools):
-        return
+        return frozenset()
     _prune_source_tool_specific_includes(payload, frozenset(dropped_types))
     if not kept_tools:
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
         payload.pop("parallel_tool_calls", None)
-        return
+        return frozenset(dropped_types)
     payload["tools"] = kept_tools
     _drop_dangling_source_tool_choice(payload, frozenset(kept_types))
+    return frozenset(dropped_types)
+
+
+# Namespaces Codex declares for sub-agent tools: ``multi_agent_v1`` on regular
+# models, ``collaboration`` in code mode with ``multi_agent_version: v2``.
+# MCP namespaces (``mcp__*``) are never matched.
+_CODEX_SUBAGENT_NAMESPACES = frozenset({"multi_agent_v1", "collaboration"})
+
+
+def _is_subagent_namespace_entry(entry: JsonValue) -> bool:
+    return (
+        is_json_mapping(entry) and entry.get("type") == "namespace" and entry.get("name") in _CODEX_SUBAGENT_NAMESPACES
+    )
+
+
+def _strip_source_subagent_namespaces(payload: dict[str, JsonValue]) -> frozenset[str]:
+    """Remove sub-agent namespace declarations and choices naming them; return the removed names."""
+    tools = payload.get("tools")
+    if not is_json_list(tools):
+        return frozenset()
+    removed = frozenset(
+        cast(str, cast(Mapping[str, JsonValue], tool)["name"]) for tool in tools if _is_subagent_namespace_entry(tool)
+    )
+    if not removed:
+        return removed
+    kept_tools: list[JsonValue] = [tool for tool in tools if not _is_subagent_namespace_entry(tool)]
+    if not kept_tools:
+        payload.pop("tools", None)
+        payload.pop("tool_choice", None)
+        payload.pop("parallel_tool_calls", None)
+        return removed
+    payload["tools"] = kept_tools
+    tool_choice = payload.get("tool_choice")
+    if _is_subagent_namespace_entry(tool_choice):
+        payload.pop("tool_choice", None)
+    elif is_json_mapping(tool_choice) and tool_choice.get("type") == "allowed_tools":
+        allowed = tool_choice.get("tools")
+        if is_json_list(allowed):
+            kept_allowed: list[JsonValue] = [entry for entry in allowed if not _is_subagent_namespace_entry(entry)]
+            if not kept_allowed:
+                payload.pop("tool_choice", None)
+            elif len(kept_allowed) != len(allowed):
+                payload["tool_choice"] = {**tool_choice, "tools": kept_allowed}
+    return removed
 
 
 def _drop_dangling_source_tool_choice(payload: dict[str, JsonValue], kept_types: frozenset[str]) -> None:

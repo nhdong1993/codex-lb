@@ -64,6 +64,7 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     # client-visible catalog payloads built from UpstreamModel.raw.
     raw.pop("source_request_overrides", None)
     raw.pop("upstream_model", None)
+    raw.pop("block_subagents", None)
     context_window = source_model.context_window or DEFAULT_SOURCE_CONTEXT_WINDOW
     raw.setdefault("visibility", "list")
     raw.setdefault("shell_type", "shell_command")
@@ -238,6 +239,16 @@ def source_model_upstream_id(source: ModelSource, model: str) -> str:
         return model
     upstream = _raw_metadata(entry).get("upstream_model")
     return upstream.strip() if isinstance(upstream, str) and upstream.strip() else model
+
+
+def source_model_blocks_subagents(source: ModelSource, model: str) -> bool:
+    """Whether the operator blocked Codex sub-agents (``spawn_agent``) on this source model.
+
+    Opt-in via ``"block_subagents": true`` in ``raw_metadata_json``; like
+    ``source_request_overrides`` it is proxy policy and never reaches catalogs.
+    """
+    entry = _enabled_source_model(source, model)
+    return entry is not None and _raw_metadata(entry).get("block_subagents") is True
 
 
 def source_model_request_overrides(source: ModelSource, model: str) -> dict[str, JsonValue]:

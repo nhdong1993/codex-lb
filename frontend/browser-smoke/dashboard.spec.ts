@@ -380,3 +380,54 @@ test("the API key create dialog stays inside supported viewports", async ({ page
   await page.mouse.click(8, Math.floor(viewportCases[0].size.height / 2));
   await expect(dialog).toBeHidden();
 });
+
+test("the model source edit dialog keeps tool forwarding and save reachable", async ({ page }) => {
+  const created = await page.request.post("/api/model-sources/", {
+    data: {
+      name: "smoke-relay",
+      baseUrl: "http://127.0.0.1:9/v1",
+      supportsResponses: true,
+      models: Array.from({ length: 8 }, (_, index) => ({ model: `smoke/model-${index + 1}` })),
+    },
+  });
+  expect(created.ok()).toBe(true);
+  const sourceId = ((await created.json()) as { id: string }).id;
+
+  for (const size of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(size);
+    await openLongSettingsPage(page, 0);
+    await page.getByRole("button", { name: "Edit smoke-relay model source" }).click();
+    const dialog = page.getByRole("dialog", { name: "Edit model source" });
+    await expect(dialog).toBeVisible();
+
+    const box = await dialog.boundingBox();
+    if (!box) {
+      throw new Error("Expected the model source dialog to have a bounding box");
+    }
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height).toBeLessThanOrEqual(size.height);
+    expect(await dialog.evaluate((element) => getComputedStyle(element).overflowY)).toBe("auto");
+
+    const webSearch = dialog.getByRole("checkbox", { name: "Web search" });
+    const enableWebSearch = !(await webSearch.isChecked());
+    await webSearch.click();
+    await expect(webSearch).toBeChecked({ checked: enableWebSearch });
+
+    const update = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === `/api/model-sources/${sourceId}` && response.request().method() === "PATCH",
+    );
+    await dialog.getByRole("button", { name: "Save" }).click();
+    const response = await update;
+    expect(response.ok()).toBe(true);
+    const sent = response.request().postDataJSON() as { models: { rawMetadataJson: string | null }[] };
+    expect(sent.models).toHaveLength(8);
+    for (const model of sent.models) {
+      expect((model.rawMetadataJson ?? "").includes("web_search")).toBe(enableWebSearch);
+    }
+    await expect(dialog).toBeHidden();
+  }
+});

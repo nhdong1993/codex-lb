@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import logging
 import re
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -1511,7 +1512,7 @@ async def test_v1_responses_strips_replayed_tool_call_namespaces_for_model_sourc
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_responses_filters_unsupported_model_source_tools(async_client, monkeypatch):
+async def test_backend_codex_responses_filters_unsupported_model_source_tools(async_client, monkeypatch, caplog):
     model = "external-codex-responses-tools"
     await _create_model_source(
         async_client,
@@ -1539,6 +1540,7 @@ async def test_backend_codex_responses_filters_unsupported_model_source_tools(as
         return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
 
     monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+    caplog.set_level(logging.INFO, logger=proxy_api.__name__)
 
     async with async_client.stream(
         "POST",
@@ -1559,6 +1561,10 @@ async def test_backend_codex_responses_filters_unsupported_model_source_tools(as
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line]
 
+    dropped_logs = [record.getMessage() for record in caplog.records if "source_tools_dropped" in record.getMessage()]
+    expected_log = f"source_tools_dropped source_id={observed['source_id']} model={model} types=namespace,web_search"
+    assert dropped_logs == [expected_log]
+
     forwarded_payload = cast("dict[str, object]", observed["payload"])
     assert forwarded_payload["tools"] == [
         {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}}
@@ -1570,6 +1576,53 @@ async def test_backend_codex_responses_filters_unsupported_model_source_tools(as
     assert forwarded_payload["tool_choice"] == "auto"
     assert forwarded_payload["parallel_tool_calls"] is True
     assert any("resp_source_tools" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_logs_nothing_when_source_declares_every_tool(async_client, monkeypatch, caplog):
+    model = "external-codex-responses-declared-tools"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-declared-tools",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json='{"experimental_supported_tools":["namespace","web_search"]}',
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload, **_kwargs):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_declared_tools",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+    caplog.set_level(logging.INFO, logger=proxy_api.__name__)
+    tools = [
+        {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+        {
+            "type": "namespace",
+            "name": "mcp__demo",
+            "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object", "properties": {}}}],
+        },
+        {"type": "web_search"},
+    ]
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": model, "instructions": "hi", "input": [], "stream": True, "tools": tools},
+    )
+
+    assert response.status_code == 200
+    assert cast("dict[str, object]", observed["payload"])["tools"] == tools
+    assert not [record for record in caplog.records if "source_tools_dropped" in record.getMessage()]
 
 
 @pytest.mark.parametrize(

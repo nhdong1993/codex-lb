@@ -5,11 +5,14 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ModelRowsEditor } from "@/features/model-sources/components/model-rows-editor";
 import type {
   ModelSourceDraft,
   ModelSourceFormValues,
+  SourceToolTypeFlags,
 } from "@/features/model-sources/components/model-source-form";
 import { parseReasoningEffortsInput } from "@/features/model-sources/components/model-source-form";
+import { SourceToolForwardingFields } from "@/features/model-sources/components/source-tool-forwarding-fields";
 
 type ModelSourceFormFieldsProps = {
   control: Control<ModelSourceFormValues>;
@@ -17,6 +20,7 @@ type ModelSourceFormFieldsProps = {
   updateDraft: (patch: Partial<ModelSourceDraft>) => void;
   apiKeyLabel: string;
   apiKeyPlaceholder?: string;
+  lockedToolTypes?: SourceToolTypeFlags;
 };
 
 const CAPABILITY_TOGGLES = [
@@ -26,7 +30,6 @@ const CAPABILITY_TOGGLES = [
   ["supportsAudioTranscriptions", "modelSources.capabilities.audioTranscriptions"] as const,
   ["supportsEmbeddings", "modelSources.capabilities.embeddings"] as const,
   ["supportsStreaming", "modelSources.capabilities.streaming"] as const,
-  ["supportsTools", "modelSources.capabilities.tools"] as const,
   ["supportsVision", "modelSources.capabilities.vision"] as const,
   ["supportsReasoning", "modelSources.capabilities.reasoning"] as const,
 ];
@@ -39,6 +42,7 @@ export function ModelSourceFormFields({
   updateDraft,
   apiKeyLabel,
   apiKeyPlaceholder,
+  lockedToolTypes,
 }: ModelSourceFormFieldsProps) {
   const { t } = useTranslation();
   return (
@@ -87,20 +91,7 @@ export function ModelSourceFormFields({
         )}
       />
 
-      <FormField
-        control={control}
-        name="models"
-        render={({ field }) => (
-          <FormItem>
-	            <FormLabel>{t("apiKeys.table.models")}</FormLabel>
-            <FormControl>
-              <Input {...field} placeholder="local-coder, cd/gpt-6-astra=cd/linxaq" autoComplete="off" />
-            </FormControl>
-            <p className="text-xs text-muted-foreground">{t("modelSources.fields.aliasesDescription")}</p>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
+      <ModelRowsEditor control={control} />
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
@@ -273,6 +264,8 @@ export function ModelSourceFormFields({
           </div>
         </div>
       ) : null}
+
+      <SourceToolForwardingFields draft={draft} updateDraft={updateDraft} lockedToolTypes={lockedToolTypes} />
     </>
   );
 }

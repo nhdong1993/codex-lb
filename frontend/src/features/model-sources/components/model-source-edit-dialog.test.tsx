@@ -392,20 +392,24 @@ describe("ModelSourceEditDialog", () => {
   });
 });
 
-describe("ModelSourceEditDialog aliases", () => {
-  it("renames an upstream model into an alias without losing capabilities or disabled state", async () => {
+async function submitAndGetPayload(onSubmit: ReturnType<typeof vi.fn>, user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  return onSubmit.mock.calls[0][1];
+}
+
+describe("ModelSourceEditDialog model rows", () => {
+  it("renames a row into an alias without losing capabilities or disabled state", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const source = createModelSource();
     source.models[0].rawMetadataJson = JSON.stringify({ multi_agent_version: "v2", base_instructions: "Spawn agents" });
     source.models[0].isEnabled = false;
     renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
-    const models = screen.getByDisplayValue(source.models[0].model);
-    await user.clear(models);
-    await user.type(models, `cd/gpt-6-astra=${source.models[0].model}`);
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-    const model = onSubmit.mock.calls[0][1].models[0];
+    await user.clear(screen.getByLabelText("Model ID 1"));
+    await user.type(screen.getByLabelText("Model ID 1"), "cd/gpt-6-astra");
+    await user.type(screen.getByLabelText("Upstream model 1"), source.models[0].model);
+    const model = (await submitAndGetPayload(onSubmit, user)).models[0];
     expect(model).toMatchObject({ model: "cd/gpt-6-astra", displayName: "cd/gpt-6-astra", contextWindow: 32768,
       supportsTools: true, inputPer1M: 0.5, outputPer1M: 1.5, isEnabled: false });
     expect(JSON.parse(model.rawMetadataJson)).toEqual({ multi_agent_version: "v2", base_instructions: "Spawn agents", upstream_model: source.models[0].model });
@@ -417,19 +421,183 @@ describe("ModelSourceEditDialog aliases", () => {
     const source = createModelSource();
     source.models[0].rawMetadataJson = JSON.stringify({ upstream_model: "cd/linxaq", multi_agent_version: "v2" });
     renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
-    const models = screen.getByDisplayValue(`${source.models[0].model}=cd/linxaq`);
+    expect(screen.getByLabelText("Upstream model 1")).toHaveValue("cd/linxaq");
     if (removeAlias) {
-      await user.clear(models);
-      await user.type(models, source.models[0].model);
+      await user.clear(screen.getByLabelText("Upstream model 1"));
     } else {
       const price = screen.getByDisplayValue("1.5");
       await user.clear(price);
       await user.type(price, "2");
     }
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-    const metadata = JSON.parse(onSubmit.mock.calls[0][1].models[0].rawMetadataJson);
+    const metadata = JSON.parse((await submitAndGetPayload(onSubmit, user)).models[0].rawMetadataJson);
     expect(metadata.multi_agent_version).toBe("v2");
     expect(metadata.upstream_model).toBe(removeAlias ? undefined : "cd/linxaq");
+  });
+
+  it("disables a single model without changing the others", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const base = createModelSource().models[0];
+    const source = createModelSource({
+      models: [
+        { ...base, model: "m-one", displayName: "m-one" },
+        { ...base, id: 2, model: "m-two", displayName: "m-two", isEnabled: false },
+        { ...base, id: 3, model: "m-three", displayName: "m-three" },
+      ],
+    });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    await user.click(screen.getByRole("switch", { name: "Enable m-one" }));
+    const models = (await submitAndGetPayload(onSubmit, user)).models;
+    expect(models.map((model: { model: string; isEnabled: boolean }) => [model.model, model.isEnabled])).toEqual([
+      ["m-one", false],
+      ["m-two", false],
+      ["m-three", true],
+    ]);
+  });
+
+  it("bulk-pastes new rows that take the current source settings and skips listed IDs", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource();
+    source.models[0].rawMetadataJson = JSON.stringify({
+      supports_reasoning: true,
+      supported_reasoning_levels: ["low", "high"],
+      default_reasoning_level: "high",
+      experimental_supported_tools: ["namespace"],
+    });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    await user.click(screen.getByRole("button", { name: "Paste list" }));
+    await user.type(screen.getByRole("textbox", { name: /One entry per line/ }), `${source.models[0].model}, http/new=upstream-new`);
+    await user.click(screen.getByRole("button", { name: "Add to list" }));
+    expect(screen.getByLabelText("Model ID 2")).toHaveValue("http/new");
+    expect(screen.queryByLabelText("Model ID 3")).not.toBeInTheDocument();
+
+    const models = (await submitAndGetPayload(onSubmit, user)).models;
+    expect(models).toHaveLength(2);
+    expect(models[1]).toMatchObject({ model: "http/new", contextWindow: 32768, inputPer1M: 0.5, outputPer1M: 1.5,
+      supportsTools: true, isEnabled: true });
+    expect(JSON.parse(models[1].rawMetadataJson)).toEqual({
+      supports_reasoning: true,
+      supported_reasoning_levels: ["low", "high"],
+      default_reasoning_level: "high",
+      experimental_supported_tools: ["namespace"],
+      upstream_model: "upstream-new",
+    });
+  });
+
+  it("keeps an active filter reachable after deleting its only match", async () => {
+    const user = userEvent.setup();
+    const base = createModelSource().models[0];
+    const source = createModelSource({
+      models: Array.from({ length: 6 }, (_, index) => ({
+        ...base,
+        id: index + 1,
+        model: `m-${index + 1}`,
+        displayName: `m-${index + 1}`,
+      })),
+    });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={vi.fn()} />);
+    await user.type(screen.getByRole("textbox", { name: "Filter models" }), "m-6");
+    await user.click(screen.getByRole("button", { name: "Remove m-6" }));
+    expect(screen.getByText("No models match the filter.")).toBeInTheDocument();
+
+    await user.clear(screen.getByRole("textbox", { name: "Filter models" }));
+    expect(screen.getAllByRole("textbox", { name: /^Model ID \d$/ })).toHaveLength(5);
+    expect(screen.queryByRole("textbox", { name: "Filter models" })).not.toBeInTheDocument();
+  });
+
+  it("blocks submit on duplicate model IDs", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={createModelSource()} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    await user.click(screen.getByRole("button", { name: "Add model" }));
+    await user.type(screen.getByLabelText("Model ID 2"), "Qwen/Qwen3.6-27B-FP8");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("This model ID is already listed")).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe("ModelSourceEditDialog tool forwarding", () => {
+  it("declares MCP forwarding on every model while keeping other metadata", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const base = createModelSource().models[0];
+    const source = createModelSource({
+      models: [
+        { ...base, model: "http/a", supportsTools: false, rawMetadataJson: JSON.stringify({ upstream_model: "a", supports_search_tool: false }) },
+        { ...base, id: 2, model: "http/b", supportsTools: false, rawMetadataJson: JSON.stringify({ experimental_supported_tools: ["web_search"] }) },
+      ],
+    });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const mcp = screen.getByRole("checkbox", { name: "MCP & sub-agents" });
+    expect(mcp).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Web search" })).not.toBeChecked();
+    await user.click(mcp);
+    expect(screen.getByRole("checkbox", { name: "Advertise tool support" })).toBeChecked();
+
+    const models = (await submitAndGetPayload(onSubmit, user)).models;
+    expect(models.map((model: { supportsTools: boolean }) => model.supportsTools)).toEqual([true, true]);
+    expect(JSON.parse(models[0].rawMetadataJson)).toEqual({
+      upstream_model: "a",
+      supports_search_tool: false,
+      experimental_supported_tools: ["namespace"],
+    });
+    expect(JSON.parse(models[1].rawMetadataJson)).toEqual({ experimental_supported_tools: ["web_search", "namespace"] });
+  });
+
+  it("locks types granted by advanced metadata and leaves them untouched", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource();
+    const stored = { tool_mode: "code_mode_only", multi_agent_version: "v2", supports_search_tool: true };
+    source.models[0].rawMetadataJson = JSON.stringify(stored);
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    for (const name of ["MCP & sub-agents", "apply_patch (file edits)", "Web search"]) {
+      const checkbox = screen.getByRole("checkbox", { name });
+      expect(checkbox).toBeChecked();
+      expect(checkbox).toBeDisabled();
+    }
+    const price = screen.getByDisplayValue("1.5");
+    await user.clear(price);
+    await user.type(price, "2");
+    expect(JSON.parse((await submitAndGetPayload(onSubmit, user)).models[0].rawMetadataJson)).toEqual(stored);
+  });
+});
+
+describe("ModelSourceEditDialog sub-agent switch", () => {
+  it("blocks sub-agents on one model and leaves the others unchanged", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const base = createModelSource().models[0];
+    const otherMetadata = JSON.stringify({ upstream_model: "two", multi_agent_version: "v2" });
+    const source = createModelSource({
+      models: [
+        { ...base, model: "m-one", displayName: "m-one", rawMetadataJson: JSON.stringify({ upstream_model: "one" }) },
+        { ...base, id: 2, model: "m-two", displayName: "m-two", rawMetadataJson: otherMetadata },
+      ],
+    });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const subagents = screen.getByRole("switch", { name: "Allow sub-agents on m-one" });
+    expect(subagents).toBeChecked();
+    await user.click(subagents);
+
+    const models = (await submitAndGetPayload(onSubmit, user)).models;
+    expect(JSON.parse(models[0].rawMetadataJson)).toEqual({ upstream_model: "one", block_subagents: true });
+    expect(models[1].rawMetadataJson).toBe(otherMetadata);
+  });
+
+  it("re-allows sub-agents by removing the flag", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource();
+    source.models[0].rawMetadataJson = JSON.stringify({ block_subagents: true, supports_reasoning: true });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const subagents = screen.getByRole("switch", { name: `Allow sub-agents on ${source.models[0].model}` });
+    expect(subagents).not.toBeChecked();
+    await user.click(subagents);
+
+    const [model] = (await submitAndGetPayload(onSubmit, user)).models;
+    expect(JSON.parse(model.rawMetadataJson)).toEqual({ supports_reasoning: true });
   });
 });

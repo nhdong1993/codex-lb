@@ -19,6 +19,7 @@ import {
   createModelSourceFormSchema,
   modelInputsFromForm,
   modelSourceDraftReducer,
+  newModelRow,
   type ModelSourceFormValues,
 } from "@/features/model-sources/components/model-source-form";
 import type { ModelSourceCreateRequest } from "@/features/model-sources/schemas";
@@ -43,7 +44,7 @@ export function ModelSourceCreateDialog({
       name: "",
       baseUrl: "",
       apiKey: "",
-      models: "",
+      models: [newModelRow()],
     },
   });
   const [draft, updateDraft] = useReducer(modelSourceDraftReducer, initialModelSourceDraft);
@@ -66,7 +67,7 @@ export function ModelSourceCreateDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
 	          <DialogTitle>{t("modelSources.createDialog.title")}</DialogTitle>
 	          <DialogDescription>{t("modelSources.createDialog.description")}</DialogDescription>

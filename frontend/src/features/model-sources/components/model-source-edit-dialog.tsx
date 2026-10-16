@@ -15,16 +15,22 @@ import {
 import { Form } from "@/components/ui/form";
 import { ModelSourceFormFields } from "@/features/model-sources/components/model-source-form-fields";
 import {
+  SOURCE_TOOL_TYPES,
   createModelSourceFormSchema,
   draftFromSource,
   mergeReasoningMetadata,
+  mergeSubagentMetadata,
+  mergeToolTypeMetadata,
   mergeUpstreamModelMetadata,
-  modelIdsToInput,
+  modelRowsFromSource,
   modelSourceDraftReducer,
-  parseModelEntries,
-  type ModelEntry,
+  parseNonNegativeFloat,
+  parsePositiveInt,
+  sourceToolTypeStates,
+  type ModelRow,
   type ModelSourceDraft,
   type ModelSourceFormValues,
+  type SourceToolTypeFlags,
 } from "@/features/model-sources/components/model-source-form";
 import type {
   ModelSource,
@@ -44,21 +50,8 @@ type ModelDraftChangeFlags = {
   supportsTools: boolean;
   supportsVision: boolean;
   supportsReasoning: boolean;
+  toolTypes: Partial<SourceToolTypeFlags>;
 };
-
-function parsePositiveInt(value: string): number | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number.parseInt(trimmed, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
-
-function parseNonNegativeFloat(value: string): number | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number.parseFloat(trimmed);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-}
 
 function getModelDraftChangeFlags(
   draft: ModelSourceDraft,
@@ -78,23 +71,70 @@ function getModelDraftChangeFlags(
       draft.supportsReasoning !== initialDraft.supportsReasoning ||
       JSON.stringify(draft.reasoningEfforts) !== JSON.stringify(initialDraft.reasoningEfforts) ||
       draft.defaultReasoningEffort !== initialDraft.defaultReasoningEffort,
+    toolTypes: Object.fromEntries(
+      SOURCE_TOOL_TYPES.filter((type) => draft.toolTypes[type] !== initialDraft.toolTypes[type]).map((type) => [
+        type,
+        draft.toolTypes[type],
+      ]),
+    ),
   };
 }
 
 function hasAnyModelDraftChange(flags: ModelDraftChangeFlags): boolean {
-  return Object.values(flags).some(Boolean);
+  return Object.values(flags).some((flag) => (typeof flag === "boolean" ? flag : Object.keys(flag).length > 0));
+}
+
+// A row with no stored model takes every current source-wide setting.
+function newRowChangeFlags(draft: ModelSourceDraft): ModelDraftChangeFlags {
+  return {
+    contextWindow: true,
+    maxOutputTokens: true,
+    inputPer1M: true,
+    cachedInputPer1M: true,
+    outputPer1M: true,
+    audioPerMinute: true,
+    supportsStreaming: true,
+    supportsTools: true,
+    supportsVision: true,
+    supportsReasoning: true,
+    toolTypes: draft.toolTypes,
+  };
+}
+
+function rowSignature(rows: ModelRow[]): string {
+  return JSON.stringify(
+    rows.map((row) => [row.model.trim(), row.upstreamModel.trim(), row.isEnabled, row.subagentsAllowed, row.originModel]),
+  );
 }
 
 function buildModelInputs(
-  modelEntries: ModelEntry[],
+  rows: ModelRow[],
   draft: ModelSourceDraft,
   draftChangeFlags: ModelDraftChangeFlags,
   existingModelsByName: Map<string, ModelSourceModel>,
 ): ModelSourceModelInput[] {
-  return modelEntries.map(({ model, upstreamModel }) => {
+  return rows.map((row) => {
+    const model = row.model.trim();
+    const upstreamModel = row.upstreamModel.trim();
+    // Rows remember the stored model they came from; pasted aliases fall back
+    // to an existing model named by their upstream target.
     const existingModel =
+      (row.originModel ? existingModelsByName.get(row.originModel) : undefined) ??
       existingModelsByName.get(model) ??
       (upstreamModel ? existingModelsByName.get(upstreamModel) : undefined);
+    const flags = existingModel ? draftChangeFlags : newRowChangeFlags(draft);
+
+    let rawMetadataJson = existingModel?.rawMetadataJson ?? null;
+    if (flags.supportsReasoning) {
+      rawMetadataJson = mergeReasoningMetadata(
+        rawMetadataJson,
+        draft.supportsReasoning,
+        draft.reasoningEfforts,
+        draft.defaultReasoningEffort,
+      );
+    }
+    rawMetadataJson = mergeToolTypeMetadata(rawMetadataJson, flags.toolTypes);
+    rawMetadataJson = mergeSubagentMetadata(rawMetadataJson, row.subagentsAllowed);
 
     return {
       model,
@@ -102,45 +142,23 @@ function buildModelInputs(
         existingModel?.displayName && existingModel.displayName !== existingModel.model
           ? existingModel.displayName
           : model,
-      contextWindow: draftChangeFlags.contextWindow
-        ? parsePositiveInt(draft.contextWindow)
-        : existingModel?.contextWindow ?? null,
-      maxOutputTokens: draftChangeFlags.maxOutputTokens
+      contextWindow: flags.contextWindow ? parsePositiveInt(draft.contextWindow) : existingModel?.contextWindow ?? null,
+      maxOutputTokens: flags.maxOutputTokens
         ? parsePositiveInt(draft.maxOutputTokens)
         : existingModel?.maxOutputTokens ?? null,
-      supportsStreaming: draftChangeFlags.supportsStreaming
-        ? draft.supportsStreaming
-        : existingModel?.supportsStreaming ?? true,
-      supportsTools: draftChangeFlags.supportsTools
-        ? draft.supportsTools
-        : existingModel?.supportsTools ?? false,
-      supportsVision: draftChangeFlags.supportsVision
-        ? draft.supportsVision
-        : existingModel?.supportsVision ?? false,
-      inputPer1M: draftChangeFlags.inputPer1M
-        ? parseNonNegativeFloat(draft.inputPer1M)
-        : existingModel?.inputPer1M ?? null,
-      cachedInputPer1M: draftChangeFlags.cachedInputPer1M
+      supportsStreaming: flags.supportsStreaming ? draft.supportsStreaming : existingModel?.supportsStreaming ?? true,
+      supportsTools: flags.supportsTools ? draft.supportsTools : existingModel?.supportsTools ?? false,
+      supportsVision: flags.supportsVision ? draft.supportsVision : existingModel?.supportsVision ?? false,
+      inputPer1M: flags.inputPer1M ? parseNonNegativeFloat(draft.inputPer1M) : existingModel?.inputPer1M ?? null,
+      cachedInputPer1M: flags.cachedInputPer1M
         ? parseNonNegativeFloat(draft.cachedInputPer1M)
         : existingModel?.cachedInputPer1M ?? null,
-      outputPer1M: draftChangeFlags.outputPer1M
-        ? parseNonNegativeFloat(draft.outputPer1M)
-        : existingModel?.outputPer1M ?? null,
-      audioPerMinute: draftChangeFlags.audioPerMinute
+      outputPer1M: flags.outputPer1M ? parseNonNegativeFloat(draft.outputPer1M) : existingModel?.outputPer1M ?? null,
+      audioPerMinute: flags.audioPerMinute
         ? parseNonNegativeFloat(draft.audioPerMinute)
         : existingModel?.audioPerMinute ?? null,
-      rawMetadataJson: mergeUpstreamModelMetadata(
-        draftChangeFlags.supportsReasoning
-          ? mergeReasoningMetadata(
-              existingModel?.rawMetadataJson,
-              draft.supportsReasoning,
-              draft.reasoningEfforts,
-              draft.defaultReasoningEffort,
-            )
-          : existingModel?.rawMetadataJson ?? null,
-        upstreamModel,
-      ),
-      isEnabled: existingModel?.isEnabled ?? true,
+      rawMetadataJson: mergeUpstreamModelMetadata(rawMetadataJson, upstreamModel || undefined),
+      isEnabled: row.isEnabled,
     };
   });
 }
@@ -168,16 +186,15 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
       name: source.name,
       baseUrl: source.baseUrl,
       apiKey: "",
-      models: modelIdsToInput(source),
+      models: modelRowsFromSource(source),
     },
   });
   const [draft, updateDraft] = useReducer(modelSourceDraftReducer, source, draftFromSource);
+  const lockedToolTypes = sourceToolTypeStates(source.models).locked;
 
   const handleSubmit = async (values: ModelSourceFormValues) => {
-    const initialDraft = draftFromSource(source);
-    const draftChangeFlags = getModelDraftChangeFlags(draft, initialDraft);
-    const modelEntries = parseModelEntries(values.models);
-    const modelIdsChanged = JSON.stringify(modelEntries) !== JSON.stringify(parseModelEntries(modelIdsToInput(source)));
+    const draftChangeFlags = getModelDraftChangeFlags(draft, draftFromSource(source));
+    const modelRowsChanged = rowSignature(values.models) !== rowSignature(modelRowsFromSource(source));
 
     const payload: ModelSourceUpdateRequest = {
       name: values.name,
@@ -189,14 +206,9 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
       supportsEmbeddings: draft.supportsEmbeddings,
     };
 
-    if (modelIdsChanged || hasAnyModelDraftChange(draftChangeFlags)) {
+    if (modelRowsChanged || hasAnyModelDraftChange(draftChangeFlags)) {
       const existingModelsByName = new Map(source.models.map((model) => [model.model, model]));
-      payload.models = buildModelInputs(
-        modelEntries,
-        draft,
-        draftChangeFlags,
-        existingModelsByName,
-      );
+      payload.models = buildModelInputs(values.models, draft, draftChangeFlags, existingModelsByName);
     }
 
     // The stored key is never returned, so a blank field means "keep it";
@@ -220,6 +232,7 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
           control={form.control}
           draft={draft}
           updateDraft={updateDraft}
+          lockedToolTypes={lockedToolTypes}
 	          apiKeyLabel={t("modelSources.fields.upstreamApiKey")}
 	          apiKeyPlaceholder={t("modelSources.editDialog.keepCurrentKey")}
         />
@@ -243,7 +256,7 @@ export function ModelSourceEditDialog({
   const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
 	          <DialogTitle>{t("modelSources.editDialog.title")}</DialogTitle>
 	          <DialogDescription>{t("modelSources.editDialog.description")}</DialogDescription>
