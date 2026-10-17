@@ -1822,5 +1822,8 @@
   "modelSources.tools.locked": "由高级模型元数据授予",
   "modelSources.models.subagents": "子代理",
   "modelSources.models.subagentsAria": "允许 {{model}} 使用子代理",
-  "modelSources.models.subagentsDescription": "关闭子代理后，该模型将阻止 Codex 子代理（spawn_agent）。MCP 和其他工具不受影响。"
+  "modelSources.models.subagentsDescription": "关闭子代理后，该模型将阻止 Codex 子代理（spawn_agent）。MCP 和其他工具不受影响。",
+  "modelSources.models.fastMode": "Fast",
+  "modelSources.models.fastModeAria": "为 {{model}} 提供 Fast 模式",
+  "modelSources.models.fastModeDescription": "开启 Fast 后，该模型将向 Codex 提供 Fast 模式（service tier priority）。仅在来源支持 priority 层级时使用。保存了本地目录的客户端需要刷新目录。"
 }

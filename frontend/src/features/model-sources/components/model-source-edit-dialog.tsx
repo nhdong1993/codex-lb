@@ -18,6 +18,7 @@ import {
   SOURCE_TOOL_TYPES,
   createModelSourceFormSchema,
   draftFromSource,
+  mergeFastModeMetadata,
   mergeReasoningMetadata,
   mergeSubagentMetadata,
   mergeToolTypeMetadata,
@@ -103,7 +104,14 @@ function newRowChangeFlags(draft: ModelSourceDraft): ModelDraftChangeFlags {
 
 function rowSignature(rows: ModelRow[]): string {
   return JSON.stringify(
-    rows.map((row) => [row.model.trim(), row.upstreamModel.trim(), row.isEnabled, row.subagentsAllowed, row.originModel]),
+    rows.map((row) => [
+      row.model.trim(),
+      row.upstreamModel.trim(),
+      row.isEnabled,
+      row.subagentsAllowed,
+      row.fastMode,
+      row.originModel,
+    ]),
   );
 }
 
@@ -135,6 +143,7 @@ function buildModelInputs(
     }
     rawMetadataJson = mergeToolTypeMetadata(rawMetadataJson, flags.toolTypes);
     rawMetadataJson = mergeSubagentMetadata(rawMetadataJson, row.subagentsAllowed);
+    rawMetadataJson = mergeFastModeMetadata(rawMetadataJson, row.fastMode);
 
     return {
       model,

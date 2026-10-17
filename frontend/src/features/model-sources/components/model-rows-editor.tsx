@@ -16,7 +16,7 @@ import {
 
 const FILTER_MIN_ROWS = 6;
 // Fixed switch/button columns keep the header aligned with every row.
-const ROW_GRID = "grid grid-cols-[2.25rem_minmax(0,1fr)_minmax(0,1fr)_3.75rem_2rem] gap-2";
+const ROW_GRID = "grid grid-cols-[2.25rem_minmax(0,1fr)_minmax(0,1fr)_3.75rem_3.75rem_2rem] gap-2";
 const BULK_INPUT_ID = "model-source-bulk-models";
 
 type ModelRowsEditorProps = {
@@ -76,6 +76,7 @@ export function ModelRowsEditor({ control }: ModelRowsEditorProps) {
           <div className="text-sm font-medium">{t("modelSources.models.title")}</div>
           <p className="text-xs text-muted-foreground">{t("modelSources.models.description")}</p>
           <p className="text-xs text-muted-foreground">{t("modelSources.models.subagentsDescription")}</p>
+          <p className="text-xs text-muted-foreground">{t("modelSources.models.fastModeDescription")}</p>
         </div>
         <span className="text-xs text-muted-foreground">
           {t("modelSources.models.count", { count: rows.length, enabled: enabledCount })}
@@ -97,94 +98,111 @@ export function ModelRowsEditor({ control }: ModelRowsEditorProps) {
         </div>
       ) : null}
 
-      <div className="rounded-md border">
-        <div className={`${ROW_GRID} items-center border-b bg-muted/40 px-2 py-1.5 text-xs font-medium text-muted-foreground`}>
-          <span>{t("modelSources.models.enabled")}</span>
-          <span>{t("modelSources.models.modelId")}</span>
-          <span>{t("modelSources.models.upstreamModel")}</span>
-          <span className="leading-tight">{t("modelSources.models.subagents")}</span>
-          <span />
-        </div>
-        <div className="max-h-80 divide-y overflow-y-auto">
-          {visibleRows.map(({ field, index }) => {
-            const rowLabel = rows[index]?.model.trim() || `#${index + 1}`;
-            return (
-              <div key={field.id} className={`${ROW_GRID} items-start px-2 py-1.5`}>
-                <FormField
-                  control={control}
-                  name={`models.${index}.isEnabled`}
-                  render={({ field: enabledField }) => (
-                    <Switch
-                      className="mt-2.5"
-                      checked={enabledField.value}
-                      onCheckedChange={enabledField.onChange}
-                      aria-label={t("modelSources.models.enableAria", { model: rowLabel })}
-                    />
-                  )}
-                />
-                <FormField
-                  control={control}
-                  name={`models.${index}.model`}
-                  render={({ field: modelField }) => (
-                    <FormItem className="gap-1">
-                      <FormControl>
-                        <Input
-                          {...modelField}
-                          aria-label={t("modelSources.models.modelIdAria", { index: index + 1 })}
-                          placeholder="provider/model"
-                          autoComplete="off"
-                        />
-                      </FormControl>
-                      <FormMessage className="text-xs" />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={control}
-                  name={`models.${index}.upstreamModel`}
-                  render={({ field: upstreamField }) => (
-                    <FormItem className="gap-1">
-                      <FormControl>
-                        <Input
-                          {...upstreamField}
-                          aria-label={t("modelSources.models.upstreamAria", { index: index + 1 })}
-                          placeholder={t("modelSources.models.upstreamPlaceholder")}
-                          autoComplete="off"
-                        />
-                      </FormControl>
-                      <FormMessage className="text-xs" />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={control}
-                  name={`models.${index}.subagentsAllowed`}
-                  render={({ field: subagentsField }) => (
-                    <Switch
-                      className="mt-2.5"
-                      checked={subagentsField.value}
-                      onCheckedChange={subagentsField.onChange}
-                      aria-label={t("modelSources.models.subagentsAria", { model: rowLabel })}
-                    />
-                  )}
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="mt-0.5"
-                  disabled={fields.length === 1}
-                  onClick={() => remove(index)}
-                  aria-label={t("modelSources.models.removeAria", { model: rowLabel })}
-                >
-                  <Trash2 />
-                </Button>
-              </div>
-            );
-          })}
-          {visibleRows.length === 0 ? (
-            <p className="px-2 py-3 text-xs text-muted-foreground">{t("modelSources.models.noMatches")}</p>
-          ) : null}
+      {/* Narrow screens scroll the table sideways so the ID inputs stay usable;
+          inline-size containment keeps the table from widening the dialog. */}
+      <div className="overflow-x-auto rounded-md border [contain:inline-size]">
+        <div className="min-w-[34rem]">
+          <div className={`${ROW_GRID} items-center border-b bg-muted/40 px-2 py-1.5 text-xs font-medium text-muted-foreground`}>
+            <span>{t("modelSources.models.enabled")}</span>
+            <span>{t("modelSources.models.modelId")}</span>
+            <span>{t("modelSources.models.upstreamModel")}</span>
+            <span className="leading-tight">{t("modelSources.models.subagents")}</span>
+            <span className="leading-tight">{t("modelSources.models.fastMode")}</span>
+            <span />
+          </div>
+          <div className="max-h-80 divide-y overflow-y-auto">
+            {visibleRows.map(({ field, index }) => {
+              const rowLabel = rows[index]?.model.trim() || `#${index + 1}`;
+              return (
+                <div key={field.id} className={`${ROW_GRID} items-start px-2 py-1.5`}>
+                  <FormField
+                    control={control}
+                    name={`models.${index}.isEnabled`}
+                    render={({ field: enabledField }) => (
+                      <Switch
+                        className="mt-2.5"
+                        checked={enabledField.value}
+                        onCheckedChange={enabledField.onChange}
+                        aria-label={t("modelSources.models.enableAria", { model: rowLabel })}
+                      />
+                    )}
+                  />
+                  <FormField
+                    control={control}
+                    name={`models.${index}.model`}
+                    render={({ field: modelField }) => (
+                      <FormItem className="gap-1">
+                        <FormControl>
+                          <Input
+                            {...modelField}
+                            aria-label={t("modelSources.models.modelIdAria", { index: index + 1 })}
+                            placeholder="provider/model"
+                            autoComplete="off"
+                          />
+                        </FormControl>
+                        <FormMessage className="text-xs" />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={control}
+                    name={`models.${index}.upstreamModel`}
+                    render={({ field: upstreamField }) => (
+                      <FormItem className="gap-1">
+                        <FormControl>
+                          <Input
+                            {...upstreamField}
+                            aria-label={t("modelSources.models.upstreamAria", { index: index + 1 })}
+                            placeholder={t("modelSources.models.upstreamPlaceholder")}
+                            autoComplete="off"
+                          />
+                        </FormControl>
+                        <FormMessage className="text-xs" />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={control}
+                    name={`models.${index}.subagentsAllowed`}
+                    render={({ field: subagentsField }) => (
+                      <Switch
+                        className="mt-2.5"
+                        checked={subagentsField.value}
+                        onCheckedChange={subagentsField.onChange}
+                        aria-label={t("modelSources.models.subagentsAria", { model: rowLabel })}
+                      />
+                    )}
+                  />
+                  <FormField
+                    control={control}
+                    name={`models.${index}.fastMode`}
+                    render={({ field: fastModeField }) => (
+                      <Switch
+                        className="mt-2.5"
+                        checked={fastModeField.value}
+                        onCheckedChange={fastModeField.onChange}
+                        aria-label={t("modelSources.models.fastModeAria", { model: rowLabel })}
+                      />
+                    )}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="mt-0.5"
+                    disabled={fields.length === 1}
+                    onClick={() => remove(index)}
+                    aria-label={t("modelSources.models.removeAria", { model: rowLabel })}
+                  >
+                    <Trash2 />
+                  </Button>
+                </div>
+              );
+            })}
+            {visibleRows.length === 0 ? (
+              <p className="px-2 py-3 text-xs text-muted-foreground">{t("modelSources.models.noMatches")}</p>
+            ) : null}
+          </div>
         </div>
       </div>
       {listError ? <p className="text-sm text-destructive">{listError}</p> : null}

@@ -1822,5 +1822,8 @@
   "modelSources.tools.locked": "고급 모델 메타데이터로 허용됨",
   "modelSources.models.subagents": "하위 에이전트",
   "modelSources.models.subagentsAria": "{{model}}에서 하위 에이전트 허용",
-  "modelSources.models.subagentsDescription": "하위 에이전트를 끄면 해당 모델에서 Codex 하위 에이전트(spawn_agent)를 차단합니다. MCP와 다른 도구는 계속 동작합니다."
+  "modelSources.models.subagentsDescription": "하위 에이전트를 끄면 해당 모델에서 Codex 하위 에이전트(spawn_agent)를 차단합니다. MCP와 다른 도구는 계속 동작합니다.",
+  "modelSources.models.fastMode": "Fast",
+  "modelSources.models.fastModeAria": "{{model}}에서 Fast 모드 제공",
+  "modelSources.models.fastModeDescription": "Fast를 켜면 해당 모델에서 Codex Fast 모드(service tier priority)를 제공합니다. 소스가 priority 티어를 지원할 때만 사용하세요. 카탈로그를 저장해 둔 클라이언트는 카탈로그를 새로 고쳐야 합니다."
 }

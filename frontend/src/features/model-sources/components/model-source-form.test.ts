@@ -4,6 +4,7 @@ import {
   bulkModelRows,
   createModelSourceFormSchema,
   initialModelSourceDraft,
+  mergeFastModeMetadata,
   mergeReasoningMetadata,
   mergeSubagentMetadata,
   mergeToolTypeMetadata,
@@ -183,6 +184,57 @@ describe("model-source sub-agent policy metadata", () => {
     const [blocked, open] = modelInputsFromForm(parsed, initialModelSourceDraft);
     expect(JSON.parse(blocked.rawMetadataJson!)).toEqual({ block_subagents: true });
     expect(open.rawMetadataJson).toBeNull();
+  });
+});
+
+describe("model-source Fast mode metadata", () => {
+  const fastTier = { id: "priority", name: "Fast", description: "Priority processing" };
+
+  it("adds and removes both tier keys without touching other keys", () => {
+    const fast = mergeFastModeMetadata(JSON.stringify({ upstream_model: "gpt" }), true);
+    expect(JSON.parse(fast!)).toEqual({
+      upstream_model: "gpt",
+      service_tiers: [fastTier],
+      additional_speed_tiers: ["fast"],
+    });
+    expect(JSON.parse(mergeFastModeMetadata(fast, false)!)).toEqual({ upstream_model: "gpt" });
+    expect(mergeFastModeMetadata(JSON.stringify({ additional_speed_tiers: ["Fast"] }), false)).toBeNull();
+  });
+
+  it("keeps other tiers when switching", () => {
+    const flex = { id: "flex", name: "Flex", description: "Cheaper" };
+    const stored = JSON.stringify({ service_tiers: [flex], additional_speed_tiers: ["slow"] });
+    expect(JSON.parse(mergeFastModeMetadata(stored, true)!)).toEqual({
+      service_tiers: [flex, fastTier],
+      additional_speed_tiers: ["slow", "fast"],
+    });
+
+    const custom = { id: "priority", name: "Fast", description: "2x speed, increased usage" };
+    const turnedOff = mergeFastModeMetadata(
+      JSON.stringify({ service_tiers: [custom, flex], additional_speed_tiers: ["fast"], default_service_tier: "priority" }),
+      false,
+    );
+    expect(JSON.parse(turnedOff!)).toEqual({ service_tiers: [flex] });
+  });
+
+  it("returns stored metadata unchanged when the switch already matches", () => {
+    const stored = '{"service_tiers":[{"id":"priority","description":"2x speed, increased usage"}],"x":1}';
+    expect(mergeFastModeMetadata(stored, true)).toBe(stored);
+    expect(mergeFastModeMetadata('{"additional_speed_tiers":["fast"]}', true)).toBe('{"additional_speed_tiers":["fast"]}');
+    expect(mergeFastModeMetadata('{"x":1}', false)).toBe('{"x":1}');
+    expect(mergeFastModeMetadata(null, false)).toBeNull();
+  });
+
+  it("leaves new rows without Fast and writes it for rows switched on", () => {
+    const parsed = schema.parse({
+      name: "source",
+      baseUrl: "https://example.test/v1",
+      apiKey: "",
+      models: [newModelRow("plain"), { ...newModelRow("fast"), fastMode: true }],
+    });
+    const [plain, fast] = modelInputsFromForm(parsed, initialModelSourceDraft);
+    expect(plain.rawMetadataJson).toBeNull();
+    expect(JSON.parse(fast.rawMetadataJson!)).toEqual({ service_tiers: [fastTier], additional_speed_tiers: ["fast"] });
   });
 });
 

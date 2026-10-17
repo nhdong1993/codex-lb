@@ -23,12 +23,14 @@ export function modelsMissingContextWindow(
 // One editable model row. ``originModel`` is the stored model the row was
 // loaded from, so renaming the public ID keeps that model's settings; rows
 // added in the form have no origin. ``subagentsAllowed`` mirrors the absence of
-// the proxy's ``block_subagents`` metadata flag.
+// the proxy's ``block_subagents`` metadata flag; ``fastMode`` mirrors whether
+// the model's catalog metadata advertises the priority (Fast) service tier.
 export type ModelRow = {
   model: string;
   upstreamModel: string;
   isEnabled: boolean;
   subagentsAllowed: boolean;
+  fastMode: boolean;
   originModel: string | null;
 };
 
@@ -44,6 +46,7 @@ export function createModelSourceFormSchema(t: TFunction) {
           upstreamModel: z.string(),
           isEnabled: z.boolean(),
           subagentsAllowed: z.boolean(),
+          fastMode: z.boolean(),
           originModel: z.string().nullable(),
         }),
       )
@@ -80,7 +83,7 @@ export type ModelSourceFormValues = z.infer<ReturnType<typeof createModelSourceF
 export type ModelEntry = { model: string; upstreamModel?: string };
 
 export function newModelRow(model = "", upstreamModel = ""): ModelRow {
-  return { model, upstreamModel, isEnabled: true, subagentsAllowed: true, originModel: null };
+  return { model, upstreamModel, isEnabled: true, subagentsAllowed: true, fastMode: false, originModel: null };
 }
 
 // Bulk paste keeps the original text syntax: ``model`` or ``alias=upstream``
@@ -120,6 +123,7 @@ export function modelRowsFromSource(source: ModelSource): ModelRow[] {
       upstreamModel: typeof upstream === "string" ? upstream.trim() : "",
       isEnabled: model.isEnabled,
       subagentsAllowed: metadata.block_subagents !== true,
+      fastMode: advertisesFastMode(metadata),
       originModel: model.model,
     };
   });
@@ -148,6 +152,56 @@ export function mergeSubagentMetadata(existing: string | null | undefined, subag
   if (subagentsAllowed === (metadata.block_subagents !== true)) return existing ?? null;
   if (subagentsAllowed) delete metadata.block_subagents;
   else metadata.block_subagents = true;
+  return serializeMetadata(metadata);
+}
+
+// Codex offers Fast, and sends ``service_tier: "priority"``, only for models
+// whose catalog entry lists the priority tier: ``service_tiers`` for current
+// clients and ``additional_speed_tiers`` for older ones. The proxy copies both
+// keys from source metadata into its catalogs. ``fast`` is the alias of
+// ``priority``.
+const FAST_SERVICE_TIER = { id: "priority", name: "Fast", description: "Priority processing" };
+const FAST_SPEED_TIER = "fast";
+
+function isFastTier(value: unknown): boolean {
+  return typeof value === "string" && ["fast", "priority"].includes(value.trim().toLowerCase());
+}
+
+function isFastServiceTier(entry: unknown): boolean {
+  return typeof entry === "object" && entry !== null && isFastTier((entry as Record<string, unknown>).id);
+}
+
+function listValue(metadata: Record<string, unknown>, key: string): unknown[] {
+  const value = metadata[key];
+  return Array.isArray(value) ? value : [];
+}
+
+function advertisesFastMode(metadata: Record<string, unknown>): boolean {
+  return (
+    listValue(metadata, "service_tiers").some(isFastServiceTier) ||
+    listValue(metadata, "additional_speed_tiers").some(isFastTier)
+  );
+}
+
+// Adds or removes only the Fast entries; other tiers and keys are kept, and an
+// unchanged switch leaves the stored metadata untouched.
+export function mergeFastModeMetadata(existing: string | null | undefined, fastMode: boolean): string | null {
+  const metadata = parseMetadata(existing);
+  if (fastMode === advertisesFastMode(metadata)) return existing ?? null;
+  const serviceTiers = listValue(metadata, "service_tiers");
+  const speedTiers = listValue(metadata, "additional_speed_tiers");
+  if (fastMode) {
+    metadata.service_tiers = [...serviceTiers, FAST_SERVICE_TIER];
+    metadata.additional_speed_tiers = [...speedTiers, FAST_SPEED_TIER];
+    return serializeMetadata(metadata);
+  }
+  const keptServiceTiers = serviceTiers.filter((entry) => !isFastServiceTier(entry));
+  const keptSpeedTiers = speedTiers.filter((entry) => !isFastTier(entry));
+  if (keptServiceTiers.length > 0) metadata.service_tiers = keptServiceTiers;
+  else delete metadata.service_tiers;
+  if (keptSpeedTiers.length > 0) metadata.additional_speed_tiers = keptSpeedTiers;
+  else delete metadata.additional_speed_tiers;
+  if (isFastTier(metadata.default_service_tier)) delete metadata.default_service_tier;
   return serializeMetadata(metadata);
 }
 
@@ -404,12 +458,15 @@ export function modelInputsFromForm(
       outputPer1M,
       audioPerMinute,
       rawMetadataJson: mergeUpstreamModelMetadata(
-        mergeSubagentMetadata(
-          mergeToolTypeMetadata(
-            mergeReasoningMetadata(null, draft.supportsReasoning, draft.reasoningEfforts, draft.defaultReasoningEffort),
-            draft.toolTypes,
+        mergeFastModeMetadata(
+          mergeSubagentMetadata(
+            mergeToolTypeMetadata(
+              mergeReasoningMetadata(null, draft.supportsReasoning, draft.reasoningEfforts, draft.defaultReasoningEffort),
+              draft.toolTypes,
+            ),
+            row.subagentsAllowed,
           ),
-          row.subagentsAllowed,
+          row.fastMode,
         ),
         row.upstreamModel.trim() || undefined,
       ),

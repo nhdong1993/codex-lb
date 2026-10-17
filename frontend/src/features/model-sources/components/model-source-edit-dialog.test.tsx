@@ -601,3 +601,49 @@ describe("ModelSourceEditDialog sub-agent switch", () => {
     expect(JSON.parse(model.rawMetadataJson)).toEqual({ supports_reasoning: true });
   });
 });
+
+describe("ModelSourceEditDialog Fast switch", () => {
+  it("turns on Fast for one model and leaves the others unchanged", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const base = createModelSource().models[0];
+    const otherMetadata = JSON.stringify({ upstream_model: "two", block_subagents: true });
+    const source = createModelSource({
+      models: [
+        { ...base, model: "m-one", displayName: "m-one", rawMetadataJson: JSON.stringify({ upstream_model: "one" }) },
+        { ...base, id: 2, model: "m-two", displayName: "m-two", rawMetadataJson: otherMetadata },
+      ],
+    });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const fast = screen.getByRole("switch", { name: "Offer Fast mode on m-one" });
+    expect(fast).not.toBeChecked();
+    await user.click(fast);
+
+    const models = (await submitAndGetPayload(onSubmit, user)).models;
+    expect(JSON.parse(models[0].rawMetadataJson)).toEqual({
+      upstream_model: "one",
+      service_tiers: [{ id: "priority", name: "Fast", description: "Priority processing" }],
+      additional_speed_tiers: ["fast"],
+    });
+    expect(models[1].rawMetadataJson).toBe(otherMetadata);
+  });
+
+  it("turns off Fast and keeps other service tiers", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const flex = { id: "flex", name: "Flex", description: "Cheaper" };
+    const source = createModelSource();
+    source.models[0].rawMetadataJson = JSON.stringify({
+      service_tiers: [{ id: "priority", name: "Fast", description: "2x speed, increased usage" }, flex],
+      additional_speed_tiers: ["fast"],
+      supports_reasoning: true,
+    });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const fast = screen.getByRole("switch", { name: `Offer Fast mode on ${source.models[0].model}` });
+    expect(fast).toBeChecked();
+    await user.click(fast);
+
+    const [model] = (await submitAndGetPayload(onSubmit, user)).models;
+    expect(JSON.parse(model.rawMetadataJson)).toEqual({ service_tiers: [flex], supports_reasoning: true });
+  });
+});

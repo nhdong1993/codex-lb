@@ -1822,5 +1822,8 @@
   "modelSources.tools.locked": "Granted by advanced model metadata",
   "modelSources.models.subagents": "Sub-agents",
   "modelSources.models.subagentsAria": "Allow sub-agents on {{model}}",
-  "modelSources.models.subagentsDescription": "Turn Sub-agents off to block Codex sub-agents (spawn_agent) on that model. MCP and other tools keep working."
+  "modelSources.models.subagentsDescription": "Turn Sub-agents off to block Codex sub-agents (spawn_agent) on that model. MCP and other tools keep working.",
+  "modelSources.models.fastMode": "Fast",
+  "modelSources.models.fastModeAria": "Offer Fast mode on {{model}}",
+  "modelSources.models.fastModeDescription": "Turn Fast on to offer Codex Fast mode (service tier priority) for that model. Use it only when the source honors the priority tier. Clients with a saved catalog must refresh it."
 }
