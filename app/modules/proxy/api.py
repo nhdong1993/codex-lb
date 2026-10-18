@@ -302,7 +302,10 @@ from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_STREAM_STATE,
     record_images_route_observability,
 )
-from app.modules.proxy.replay_safety import transcript_is_source_free
+from app.modules.proxy.replay_safety import (
+    project_responses_input_for_account_neutral_fresh_replay,
+    transcript_is_source_free,
+)
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
@@ -5535,6 +5538,33 @@ class _SourceResponseCandidates:
     request_keys: dict[str, set[str]]
     portable: dict[str, bool]
     pooled: bool
+    # Client input to forward instead of the original, for candidates whose
+    # stale same-source state was projected away (HTTP re-shapes from it).
+    projected_inputs: dict[str, list[JsonValue]]
+
+
+_SourceOwners = dict[str, list[tuple[str, str | None]]]
+
+
+def _model_source_lookup_failed() -> ModelSourceForwardingError:
+    return ModelSourceForwardingError(
+        status_code=502,
+        payload=cast(
+            dict[str, JsonValue],
+            openai_error("model_source_lookup_failed", "Unable to resolve model source availability and ownership"),
+        ),
+    )
+
+
+async def _load_source_owners(session: AsyncSession, keys: set[str]) -> _SourceOwners:
+    """Live and historical ``(source_id, source_revision)`` owners of each scoped reference."""
+    repository = SourceOwnershipRepository(session)
+    references = await repository.find(sorted(keys), now=utcnow())
+    history = await repository.find_history(sorted(keys))
+    owners: _SourceOwners = {key: [(record.source_id, record.source_revision)] for key, record in references.items()}
+    for key, records in history.items():
+        owners.setdefault(key, []).extend((record.source_id, record.source_revision) for record in records)
+    return owners
 
 
 async def _resolve_source_response_candidates(
@@ -5594,15 +5624,7 @@ async def _resolve_source_response_candidates(
             effective_request_keys = set(request_keys)
             for candidate_keys in effective_keys_by_source.values():
                 effective_request_keys.update(candidate_keys)
-            references = await SourceOwnershipRepository(session).find(sorted(effective_request_keys), now=utcnow())
-            history = await SourceOwnershipRepository(session).find_history(sorted(effective_request_keys))
-            owners_by_reference: dict[str, list[tuple[str, str | None]]] = {
-                key: [(record.source_id, record.source_revision)] for key, record in references.items()
-            }
-            for key, records in history.items():
-                owners_by_reference.setdefault(key, []).extend(
-                    (record.source_id, record.source_revision) for record in records
-                )
+            owners_by_reference = await _load_source_owners(session, effective_request_keys)
             response_ids = {
                 previous_response_id
                 for candidate_id, candidate_payload in effective_payloads.items()
@@ -5626,13 +5648,7 @@ async def _resolve_source_response_candidates(
             detach_session_objects(session)
     except Exception:
         logger.warning("model_source_pool_lookup_failed", exc_info=True)
-        raise ModelSourceForwardingError(
-            status_code=502,
-            payload=cast(
-                dict[str, JsonValue],
-                openai_error("model_source_lookup_failed", "Unable to resolve model source availability and ownership"),
-            ),
-        ) from None
+        raise _model_source_lookup_failed() from None
     if subagent_blocked_ids and not candidates:
         logger.info(
             "subagent_request_blocked model=%s source_ids=%s",
@@ -5653,6 +5669,8 @@ async def _resolve_source_response_candidates(
     pooled = pooled or authorized_candidate_count > 1
     eligible_candidates: list[ModelSource] = []
     portable_by_source: dict[str, bool] = {}
+    projected_inputs: dict[str, list[JsonValue]] = {}
+    input_item_owners: tuple[set[str], _SourceOwners] | None = None
     for candidate in candidates:
         if (
             candidate.id in invalid_override_ids
@@ -5686,7 +5704,47 @@ async def _resolve_source_response_candidates(
             or bool(missing & (candidate_keys - request_keys))
             or (not portable and pooled and (missing or not owner_revisions))
         ):
-            continue
+            # Only this source's own earlier revision conflicts: its opaque
+            # state is invalid on the new transport, but the plain transcript
+            # may still continue on the same source.
+            if not owner_revisions or any(owner_id != candidate.id for owner_id, _ in owner_revisions):
+                continue
+            if all(owner_revision == revision for _, owner_revision in owner_revisions):
+                continue
+            if input_item_owners is None:
+                # Overrides may add input items, so their references are loaded too.
+                input_item_owners = await _load_input_item_owners(
+                    scope,
+                    [
+                        payload.model_dump_for_forwarding().get("input"),
+                        *(candidate_payload.get("input") for candidate_payload in effective_payloads.values()),
+                    ],
+                )
+            projection = _project_stale_source_input(
+                payload,
+                candidate,
+                api_key=api_key,
+                scope=scope,
+                revision=revision,
+                owners=owners_by_reference,
+                input_item_owners=input_item_owners[1],
+                loaded_keys=effective_request_keys | input_item_owners[0],
+                pooled=pooled,
+            )
+            if projection is None:
+                continue
+            effective_payloads[candidate.id] = projection.effective_payload
+            effective_keys_by_source[candidate.id] = projection.effective_keys
+            projected_inputs[candidate.id] = projection.input
+            # A projected request is pinned to its owner and never fails over.
+            portable_by_source[candidate.id] = False
+            logger.info(
+                "source_stale_state_projected source_id=%s model=%s projected_items=%d dropped_items=%d",
+                candidate.id,
+                payload.model,
+                projection.prefix_items,
+                projection.dropped_items,
+            )
         eligible_candidates.append(candidate)
     if not eligible_candidates and invalid_override_ids and len(invalid_override_ids) == len(candidates):
         raise ModelSourceForwardingError(
@@ -5738,7 +5796,154 @@ async def _resolve_source_response_candidates(
             ),
         )
     return _SourceResponseCandidates(
-        eligible_candidates, effective_payloads, effective_keys_by_source, portable_by_source, pooled
+        eligible_candidates, effective_payloads, effective_keys_by_source, portable_by_source, pooled, projected_inputs
+    )
+
+
+def _projected_input_update(resolved: _SourceResponseCandidates, source: ModelSource) -> dict[str, JsonValue]:
+    projected_input = resolved.projected_inputs.get(source.id)
+    # Resolution reruns per attempt, so the projected list is never shared.
+    return {} if projected_input is None else {"input": projected_input}
+
+
+async def _load_input_item_owners(
+    scope: OwnershipScope, inputs: list[JsonValue | None]
+) -> tuple[set[str], _SourceOwners]:
+    """Owners of every input item's raw references, including complete call/result pairs.
+
+    Ownership enforcement skips the bookkeeping IDs of complete pairs, so only
+    this wider view can tell which items an earlier source revision produced.
+    """
+    keys = {
+        key
+        for items in inputs
+        if isinstance(items, list)
+        for item in items
+        if isinstance(item, dict)
+        for key in scope.item_keys(item)
+    }
+    if not keys:
+        return keys, {}
+    try:
+        async with get_background_session() as session:
+            owners = await _load_source_owners(session, keys)
+            detach_session_objects(session)
+    except Exception:
+        logger.warning("model_source_pool_lookup_failed", exc_info=True)
+        raise _model_source_lookup_failed() from None
+    return keys, owners
+
+
+def _owned_by_earlier_revision(keys: Iterable[str], owners: _SourceOwners, source_id: str, revision: str) -> bool:
+    return any(
+        owner_id == source_id and owner_revision != revision
+        for key in keys
+        for owner_id, owner_revision in owners.get(key, [])
+    )
+
+
+def _item_state_keys(scope: OwnershipScope, item: Mapping[str, JsonValue]) -> set[str]:
+    return {
+        scope.key(kind, value)
+        for kind, field_name in (("item", "id"), ("encrypted", "encrypted_content"))
+        if isinstance(value := item.get(field_name), str) and value
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _StaleSourceProjection:
+    input: list[JsonValue]
+    effective_payload: dict[str, JsonValue]
+    effective_keys: set[str]
+    prefix_items: int
+    dropped_items: int
+
+
+def _project_stale_source_input(
+    payload: ResponsesRequest,
+    source: ModelSource,
+    *,
+    api_key: ApiKeyData | None,
+    scope: OwnershipScope,
+    revision: str,
+    owners: _SourceOwners,
+    input_item_owners: _SourceOwners,
+    loaded_keys: set[str],
+    pooled: bool,
+) -> _StaleSourceProjection | None:
+    """Make input produced by this source's earlier revision portable, or return None.
+
+    The prefix ending at the last item carrying earlier-revision references
+    loses its reasoning items and item IDs; later items came from the current
+    revision and are kept. Anchors are not input items, so they survive and
+    fail the re-check below.
+    """
+    items = payload.model_dump_for_forwarding().get("input")
+    if not isinstance(items, list):
+        return None
+    boundary = max(
+        (
+            index
+            for index, item in enumerate(items)
+            if isinstance(item, dict)
+            and _owned_by_earlier_revision(scope.item_keys(item), input_item_owners, source.id, revision)
+        ),
+        default=None,
+    )
+    if boundary is None:
+        return None
+    prefix = items[: boundary + 1]
+    if any(isinstance(item, dict) and item.get("type") == "item_reference" for item in prefix):
+        return None
+    projection = project_responses_input_for_account_neutral_fresh_replay(prefix, stored_count=len(prefix))
+    if projection is None:
+        return None
+    projected_input = projection.input_items + items[boundary + 1 :]
+    if not projected_input:
+        return None
+    projected = payload.model_copy(deep=True, update={"input": projected_input})
+    effective_payload = _shape_source_responses_payload(projected, source, api_key=api_key)
+    if _source_payload_has_invalid_input_types(effective_payload) or _source_payload_has_file_references(
+        effective_payload
+    ):
+        return None
+    # Call IDs stay so pairs remain complete, but no item ID or encrypted
+    # content from the earlier revision may reach the source, including one
+    # that an input override reintroduces.
+    effective_input = effective_payload.get("input")
+    if isinstance(effective_input, list) and any(
+        isinstance(item, dict)
+        and _owned_by_earlier_revision(_item_state_keys(scope, item), input_item_owners, source.id, revision)
+        for item in effective_input
+    ):
+        return None
+    # The client view keeps the request's own anchors even when an override
+    # clears them; namespaces are stripped as they are on the forwarded body.
+    original_view = projected.model_dump_for_forwarding()
+    strip_replayed_tool_call_namespaces_from_payload(original_view)
+    original_keys = scope.request_keys(original_view)
+    effective_keys = scope.request_keys(effective_payload)
+    keys = original_keys | effective_keys
+    if not keys <= loaded_keys:
+        return None
+    known = owners.keys() | input_item_owners.keys()
+    missing = keys - known
+    if (
+        any(
+            owner_id != source.id or owner_revision != revision
+            for key in keys
+            for owner_id, owner_revision in owners.get(key, input_item_owners.get(key, []))
+        )
+        or missing & (effective_keys - original_keys)
+        or (pooled and missing)
+    ):
+        return None
+    return _StaleSourceProjection(
+        input=projected_input,
+        effective_payload=effective_payload,
+        effective_keys=effective_keys,
+        prefix_items=len(prefix),
+        dropped_items=len(prefix) - len(projection.input_items),
     )
 
 
@@ -5804,7 +6009,7 @@ async def _balanced_source_responses_response(
         try:
             return await _source_responses_response(
                 request,
-                payload.model_copy(deep=True),
+                payload.model_copy(deep=True, update=_projected_input_update(resolved, source)),
                 source=source,
                 api_key=api_key,
                 rate_limit_headers=rate_limit_headers,
