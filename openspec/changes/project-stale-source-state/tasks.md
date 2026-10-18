@@ -15,5 +15,6 @@
 - [x] 3.2b HTTP: stale inline state is projected while a source override removes a current-revision-owned `prompt` from the effective body. Expect 200, the guard passes, and the recorded input keys equal the forwarded body's keys (no stale key recorded under the new revision).
 - [x] 3.3 Pool: stale state on pool member A is projected and sent only to A. A retryable failure does not fail over.
 - [x] 3.4 WebSocket: after a mapping change, the old bound socket gets `websocket_reconnect_required` with no frame forwarded. A new connection's full-transcript `response.create` reaches the source with the projected input.
-- [ ] 3.5 Re-run the existing replaced-credential and ownership suites; adjust only expectations that the new requirement changes and document each.
+- [x] 3.5 Re-run the existing replaced-credential and ownership suites; adjust only expectations that the new requirement changes and document each.
+  - 2026-10-18: no existing expectation needed changing. All 36 `test_source_*` / `test_model_source_*` files ran; failures under host load passed on serial rerun. Three failures also occur on the pre-change commit 4075adcd and are unrelated: `test_unavailable_source_owner_preserves_http_error_envelope` (16 cases; the WebSocket handshake for a disabled source returns 426) and `test_executor_storm_p99_stays_under_the_acquisition_budget` (a timing budget on this host).
 - [x] 3.6 Run targeted pytest (serial), ruff and `openspec validate --specs`.
