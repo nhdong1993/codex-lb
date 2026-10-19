@@ -381,6 +381,64 @@ test("the API key create dialog stays inside supported viewports", async ({ page
   await expect(dialog).toBeHidden();
 });
 
+test("the API key edit dialog keeps Save reachable through one scroll region", async ({ page }) => {
+  const created = await page.request.post("/api/api-keys/", { data: { name: "smoke-edit-key" } });
+  expect(created.ok()).toBe(true);
+  const keyId = ((await created.json()) as { id: string }).id;
+  const viewportCases = [
+    { width: 320, height: 568, columns: 1 },
+    { width: 390, height: 844, columns: 1 },
+    { width: 1440, height: 900, columns: 2 },
+  ] as const;
+
+  for (const viewportCase of viewportCases) {
+    await page.setViewportSize(viewportCase);
+    await page.goto(`/apis?selected=${keyId}`, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Edit API key" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue("smoke-edit-key");
+
+    const title = dialog.getByRole("heading", { name: "Edit API key" });
+    const closeButton = dialog.getByRole("button", { name: "Close" });
+    const saveButton = dialog.getByRole("button", { name: "Save" });
+    for (const element of [dialog, title, closeButton, saveButton]) {
+      const box = await element.boundingBox();
+      if (!box) {
+        throw new Error("Expected dialog element to have a bounding box");
+      }
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.y + box.height).toBeLessThanOrEqual(viewportCase.height);
+    }
+
+    // Nested scrollers trap touch scrolling on phones, so exactly one element may scroll vertically.
+    const scrollers = await dialog.evaluate((root) =>
+      [root, ...root.querySelectorAll<HTMLElement>("*")]
+        .filter((element) => ["auto", "scroll"].includes(getComputedStyle(element).overflowY))
+        .map((element) => element.dataset.testid ?? element.className),
+    );
+    expect(scrollers).toEqual(["api-key-edit-scroll-region"]);
+    const scrollRegion = dialog.getByTestId("api-key-edit-scroll-region");
+    const columnCount = await scrollRegion.locator(":scope > div").evaluate((element) =>
+      getComputedStyle(element).gridTemplateColumns.split(" ").filter(Boolean).length,
+    );
+    expect(columnCount).toBe(viewportCase.columns);
+
+    const finalField = dialog.getByRole("spinbutton", { name: "Weekly cost limit ($)" });
+    await finalField.scrollIntoViewIfNeeded();
+    await expect(finalField).toBeInViewport();
+    await expect(title).toBeInViewport();
+    await expect(saveButton).toBeInViewport();
+    if (viewportCase.columns === 1) {
+      expect(await scrollRegion.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    }
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+  }
+});
+
 test("the model source edit dialog keeps tool forwarding and save reachable", async ({ page }) => {
   const created = await page.request.post("/api/model-sources/", {
     data: {
