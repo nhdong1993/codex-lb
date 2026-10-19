@@ -1528,6 +1528,72 @@ async def test_unlimited_key_streams_live_without_a_settlement(async_client, sou
     assert [row.status for row in rows] == ["success"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["completed", "failed"])
+async def test_source_request_never_selects_or_penalizes_a_subscription_account(
+    async_client, source_upstream, monkeypatch, outcome
+) -> None:
+    """Source routing stays account-neutral with an empty account pool, yet keeps its key reservation."""
+    from app.modules.proxy.load_balancer import LoadBalancer
+
+    account_calls: list[str] = []
+    for method_name in (
+        "select_account",
+        "record_success",
+        "record_error",
+        "record_error_backoff",
+        "record_errors",
+        "mark_rate_limit",
+        "mark_quota_exceeded",
+        "mark_permanent_failure",
+    ):
+
+        async def spy(self, *args, _name=method_name, **kwargs):
+            account_calls.append(_name)
+            raise AssertionError(f"source request touched LoadBalancer.{_name}")
+
+        monkeypatch.setattr(LoadBalancer, method_name, spy)
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    if outcome == "completed":
+        frames = [_created(), _ITEM_ADDED, _DELTA, _completed(None)]
+    else:
+        frames = [
+            _created("resp_dispatch_neutral_failed"),
+            _sse(
+                {
+                    "type": "response.failed",
+                    "sequence_number": 1,
+                    "response": {
+                        "id": "resp_dispatch_neutral_failed",
+                        "object": "response",
+                        "status": "failed",
+                        "error": {"code": "server_error", "message": "upstream exploded"},
+                    },
+                }
+            ),
+        ]
+    base_url = await source_upstream(_sse_handler(state, before_hold=frames))
+    model = f"dispatch-account-neutral-{outcome}"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    async with async_client.stream(
+        "POST", "/v1/responses", headers={"Authorization": f"Bearer {key}"}, json=_request_body(model)
+    ) as response:
+        assert response.status_code == 200
+        text = "".join([chunk async for chunk in response.aiter_text()])
+
+    assert f"response.{outcome}" in text
+    assert account_calls == []
+    reservations = await _reservations(key_id)
+    assert len(reservations) == 1
+    assert reservations[0].status in {"finalized", "settled", "released"}
+
+
 # -- zero hot-path cost for subscription traffic --------------------------------------------------------------
 
 
