@@ -202,6 +202,8 @@ async def test_discovery_matches_enforced_alias_routing(
 
     async with stub_source_upstreams() as start:
         source_ids = []
+        # Capable sources stream natively over WebSocket; incapable ones do not
+        # stream at all (an HTTP-only streaming source is bridged, so capable).
         for model, capable in [("gpt-5.4", canonical_capable), (alias, alias_capable)]:
             if capable is None:
                 continue
@@ -211,6 +213,7 @@ async def test_discovery_matches_enforced_alias_routing(
                 model=model,
                 base_url=await start(provider, shutdown_timeout=1),
                 supports_responses=True,
+                supports_streaming=capable,
             )
             response = await async_client.patch(
                 f"/api/model-sources/{sid}", json={"supportsResponsesWebsocket": capable}
@@ -232,8 +235,12 @@ async def test_discovery_matches_enforced_alias_routing(
         if alias_capable is not None:
             catalog = await async_client.get("/api/key-dashboard/models", headers=headers)
             assert catalog.status_code == 200
-            entry = next(model for model in catalog.json()["models"] if model["slug"] == alias)
-            assert entry["prefer_websockets"] is expected
+            entry = next((model for model in catalog.json()["models"] if model["slug"] == alias), None)
+            if alias_capable:
+                assert entry is not None and entry["prefer_websockets"] is expected
+            else:
+                # The installer catalog never lists a nonstreaming model.
+                assert entry is None
         assert not await _reservations()
         if expected:
             async with websocket_client(app_instance, path, key["key"]) as ws:
@@ -351,7 +358,8 @@ async def test_installer_aggregates_only_eligible_responses_models(async_client,
         )
         assert response.status_code == 200, response.text
         headers = {"Authorization": f"Bearer {key['key']}"}
-        expected = extra not in {"http_only", "nonstreaming"}
+        # An HTTP-only streaming model is bridged; only a nonstreaming one needs HTTP.
+        expected = extra != "nonstreaming"
         for platform in ("linux", "macos", "windows"):
             script = await async_client.get(f"/api/key-dashboard/install-script?platform={platform}", headers=headers)
             assert script.status_code == 200

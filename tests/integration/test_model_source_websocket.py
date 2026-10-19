@@ -78,7 +78,7 @@ async def websocket_client(app, path, key=None, *, extra_headers=()):
                 await asyncio.gather(task, return_exceptions=True)
 
 
-async def create_source(client, url, *, enabled=True, metadata=None):
+async def create_source(client, url, *, enabled=True, metadata=None, streaming=True):
     source_id = await _create_model_source(
         client,
         name="native",
@@ -86,6 +86,7 @@ async def create_source(client, url, *, enabled=True, metadata=None):
         base_url=url,
         supports_responses=True,
         raw_metadata_json=metadata,
+        supports_streaming=streaming,
     )
     response = await client.patch(f"/api/model-sources/{source_id}", json={"supportsResponsesWebsocket": enabled})
     assert response.status_code == 200, response.text
@@ -183,12 +184,12 @@ async def test_source_native_two_turn_connection_and_accounting(async_client, ap
         assert all(res.status == "finalized" for res in reservations)
 
 
-async def test_source_native_opt_in_required_before_reservation(async_client, app_instance):
-    # A mixed key cannot be downgraded before its first model frame. Source-only
-    # HTTP keys now receive 426 at upgrade (test_source_http_only_handshake).
+async def test_source_non_streaming_requires_http_before_reservation(async_client, app_instance):
+    # A mixed key cannot be downgraded before its first model frame. HTTP-only
+    # streaming sources are bridged; only a non-streaming pool still needs HTTP.
     from tests.integration.test_proxy_transient_retry import _import_account
 
-    source_id = await create_source(async_client, "http://127.0.0.1:9/v1", enabled=False)
+    source_id = await create_source(async_client, "http://127.0.0.1:9/v1", enabled=False, streaming=False)
     key = await create_key(async_client, source_id)
     account_id = await _import_account(async_client, "mixed-http-only", "mixed-http-only@example.test")
     response = await async_client.patch(f"/api/api-keys/{key['id']}", json={"assignedAccountIds": [account_id]})
@@ -458,19 +459,30 @@ async def test_source_websocket_http_continuity_and_alias(async_client, app_inst
         assert calls[-1]["previous_response_id"] == "resp_ws"
 
 
-@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("platform", ["linux", "macos", "windows"])
-async def test_source_websocket_catalog_and_installer(async_client, enabled, platform):
-    source_id = await create_source(async_client, "http://127.0.0.1:9/v1", enabled=enabled)
+async def test_source_websocket_catalog_and_installer(async_client, native, platform):
+    # Native sources and HTTP-only streaming sources (bridged) both serve WS.
+    source_id = await create_source(async_client, "http://127.0.0.1:9/v1", enabled=native)
     key = await create_key(async_client, source_id)
     headers = {"Authorization": f"Bearer {key['key']}"}
     models = await async_client.get("/api/key-dashboard/models", headers=headers)
     assert models.status_code == 200
     model = next(model for model in models.json()["models"] if model["slug"] == "source-ws-model")
-    assert model["prefer_websockets"] is enabled
+    assert model["prefer_websockets"] is True
     script = await async_client.get(f"/api/key-dashboard/install-script?platform={platform}", headers=headers)
     assert script.status_code == 200
-    assert f"supports_websockets = {'true' if enabled else 'false'}" in script.text
+    assert "supports_websockets = true" in script.text
+
+
+@pytest.mark.parametrize("platform", ["linux", "macos", "windows"])
+async def test_source_websocket_catalog_and_installer_non_streaming(async_client, platform):
+    source_id = await create_source(async_client, "http://127.0.0.1:9/v1", enabled=False, streaming=False)
+    key = await create_key(async_client, source_id)
+    headers = {"Authorization": f"Bearer {key['key']}"}
+    script = await async_client.get(f"/api/key-dashboard/install-script?platform={platform}", headers=headers)
+    assert script.status_code == 200
+    assert "supports_websockets = false" in script.text
 
 
 async def test_source_websocket_mixed_pool_catalog_is_conservative(async_client):

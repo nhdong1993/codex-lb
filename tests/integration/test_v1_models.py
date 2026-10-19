@@ -680,7 +680,8 @@ async def test_backend_codex_models_defaults_source_model_context_window(async_c
     assert source_entry["supports_search_tool"] is False
     assert source_entry["use_responses_lite"] is False
     assert source_entry["experimental_supported_tools"] == []
-    assert source_entry["prefer_websockets"] is False
+    # A streaming Responses source is bridged over HTTP when it lacks native WS.
+    assert source_entry["prefer_websockets"] is True
 
 
 @pytest.mark.parametrize(

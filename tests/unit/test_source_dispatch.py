@@ -279,6 +279,22 @@ async def test_finish_and_abandon_are_a_single_latch(recorder: _Recorder) -> Non
 
 
 @pytest.mark.asyncio
+async def test_discard_releases_admission_once_without_a_row_or_settlement(recorder: _Recorder) -> None:
+    bulkhead = SourceBulkhead()
+    owner = _owner(recorder, bulkhead=bulkhead)
+    assert bulkhead.in_flight(owner.source.id) == 1
+
+    await owner.discard()
+    await owner.discard()
+    await owner.finish(status="cancelled")
+
+    assert owner.finished is True
+    assert bulkhead.in_flight(owner.source.id) == 0
+    assert recorder.rows == []
+    assert recorder.settle_calls == [] and recorder.release_calls == []
+
+
+@pytest.mark.asyncio
 async def test_abandon_writes_a_cancelled_row_and_releases_everything(recorder: _Recorder) -> None:
     bulkhead = SourceBulkhead()
     clock = VirtualClock()

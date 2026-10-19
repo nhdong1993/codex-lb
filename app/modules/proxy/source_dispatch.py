@@ -791,6 +791,18 @@ class SourceDispatch:
             trial_result=forwarding_error_trial_result(exc),
         )
 
+    async def discard(self) -> None:
+        """Finish an attempt answered without dispatch; it never reserved quota or reached the source.
+
+        Only the admission claim is released: nothing was attempted, so no
+        settlement, dispatch result or request-log row is recorded.
+        """
+
+        if self.finished:
+            return
+        self.finished = True
+        self.release_claims("inconclusive")
+
     async def abandon(self, reason: str) -> None:
         """Cancellation-class ``finish()`` for a client that left during the open / before the body."""
 

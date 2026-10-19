@@ -27,9 +27,9 @@ def source_websocket_models(sources: list[ModelSource]) -> dict[str, bool]:
             continue
         for model in source.models:
             if model.is_enabled:
-                candidates.setdefault(model.model, []).append(
-                    bool(source.supports_responses_websocket and model.supports_streaming)
-                )
+                # Native sources take WebSocket turns directly; the rest are
+                # bridged over HTTP/SSE, which needs a streaming model.
+                candidates.setdefault(model.model, []).append(bool(model.supports_streaming))
     return {model: all(flags) for model, flags in candidates.items()}
 
 

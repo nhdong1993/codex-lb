@@ -165,9 +165,9 @@ async def test_exported_installer_downloads_scoped_aliases_and_preserves_agent_m
 @pytest.mark.parametrize(
     ("assign_account", "assign_source", "source_model", "allowed_models", "expected_websockets"),
     [
-        (False, True, "custom/install", None, False),
-        (False, True, "custom/install", ["custom/install"], False),
-        (False, True, "gpt-5.4", ["gpt-5.4"], False),
+        (False, True, "custom/install", None, True),
+        (False, True, "custom/install", ["custom/install"], True),
+        (False, True, "gpt-5.4", ["gpt-5.4"], True),
         (True, True, "custom/install", None, True),
         (True, True, "custom/install", ["custom/install"], True),
         (True, False, "custom/install", None, True),
@@ -178,7 +178,8 @@ async def test_exported_installer_downloads_scoped_aliases_and_preserves_agent_m
 async def test_exported_installer_websockets_follow_key_assignments(
     async_client, tmp_path: Path, assign_account, assign_source, source_model, allowed_models, expected_websockets
 ):
-    # An available global account must not enable transport for a source-only assignment.
+    # A source-only assignment follows its own pool, never an available global
+    # account: these streaming source models are bridged, so WebSocket is on.
     account_id = "installer-account"
     async with SessionLocal() as session:
         session.add(

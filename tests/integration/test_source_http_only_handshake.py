@@ -1,4 +1,4 @@
-"""HTTP-only source keys decline upgrades before the first model frame."""
+"""Source-only keys decline upgrades before the first model frame unless every model streams."""
 
 from __future__ import annotations
 
@@ -56,7 +56,17 @@ async def handshake(app, path, key):
 
 
 @pytest.mark.parametrize("path", ROUTES)
-async def test_http_only_key_denies_upgrade_without_reserving_and_http_succeeds(async_client, app_instance, path):
+async def test_http_only_streaming_key_keeps_websocket(async_client, app_instance, path):
+    # The upgrade itself makes no upstream call; turns are bridged over HTTP.
+    source_id = await create_source(async_client, "http://127.0.0.1:9/v1", enabled=False)
+    key = await create_key(async_client, source_id)
+    assert (await handshake(app_instance, path, key["key"]))[0] == 101
+    async with SessionLocal() as session:
+        assert (await session.execute(select(ApiKeyUsageReservation))).scalars().all() == []
+
+
+@pytest.mark.parametrize("path", ROUTES)
+async def test_non_streaming_key_denies_upgrade_without_reserving_and_http_succeeds(async_client, app_instance, path):
     calls = []
 
     async def provider(request):
@@ -73,7 +83,7 @@ async def test_http_only_key_denies_upgrade_without_reserving_and_http_succeeds(
         )
 
     async with stub_source_upstreams() as start:
-        source_id = await create_source(async_client, await start(provider), enabled=False)
+        source_id = await create_source(async_client, await start(provider), enabled=False, streaming=False)
         key = await create_key(async_client, source_id)
         status, body = await handshake(app_instance, path, key["key"])
         assert status == 426

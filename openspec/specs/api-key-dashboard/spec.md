@@ -338,18 +338,18 @@ Every execution of an exported installer MUST fetch `/api/key-dashboard/models` 
 
 The catalog endpoint MUST require an active unexpired Bearer API key regardless of global proxy authentication settings, reuse native catalog serialization and key/source scoping, and return private no-store responses without consuming inference limits.
 
-For a key assigned model sources and no subscription accounts, the exported provider SHALL enable WebSockets only when its nonempty eligible Responses source set is entirely streaming and native-WebSocket capable and runtime/global policy permits source WebSocket. Otherwise that source-only provider MUST use HTTP Responses. Mixed, account-only and unassigned key providers SHALL retain WebSocket support. Export MUST determine this policy from authenticated assignments and capabilities without exposing them. The installer MUST back up and protect the catalog alongside configuration and authentication. Failed downloads, redirects, invalid or empty catalogs, unsafe target paths, and backup failures MUST stop setup before replacement and MUST NOT print the credential or response body.
+For a key assigned model sources and no subscription accounts, the exported provider SHALL enable WebSockets only when its nonempty eligible Responses source set is entirely streaming, whether each source is served natively or through the HTTP/SSE bridge, and runtime/global policy permits source WebSocket. Otherwise that source-only provider MUST use HTTP Responses. Mixed, account-only and unassigned key providers SHALL retain WebSocket support. Export MUST determine this policy from authenticated assignments and capabilities without exposing them. The installer MUST back up and protect the catalog alongside configuration and authentication. Failed downloads, redirects, invalid or empty catalogs, unsafe target paths, and backup failures MUST stop setup before replacement and MUST NOT print the credential or response body.
 
-Eligibility MUST be evaluated before streaming/WebSocket filtering. Eligibility MUST use the effective routed model after key model enforcement, alias resolution and fast-mode prohibition, while preserving exact source alias precedence, model permissions and source assignment scope. The provider WebSocket flag MUST be fixed at export. Re-running an existing export MUST refresh its catalog without changing that embedded flag; a new export MUST evaluate current assignment, capability and global transport policy.
+Eligibility MUST be evaluated before streaming filtering. Eligibility MUST use the effective routed model after key model enforcement, alias resolution and fast-mode prohibition, while preserving exact source alias precedence, model permissions and source assignment scope. The provider WebSocket flag MUST be fixed at export. Re-running an existing export MUST refresh its catalog without changing that embedded flag; a new export MUST evaluate current assignment, capability and global transport policy.
 
-An allowlisted name with no eligible enabled Responses source after effective model routing MUST NOT count as an incapable member of the installer aggregate. Eligible HTTP-only or nonstreaming Responses candidates MUST still disable WebSocket preference. If no eligible Responses candidate remains, including when an enforced model has none, a source-only installer MUST disable WebSockets.
+An allowlisted name with no eligible enabled Responses source after effective model routing MUST NOT count as an incapable member of the installer aggregate. Eligible nonstreaming Responses candidates MUST still disable WebSocket preference. If no eligible Responses candidate remains, including when an enforced model has none, a source-only installer MUST disable WebSockets.
 
 #### Scenario: Allowlist includes a model outside Responses eligibility
 
-- **GIVEN** a source-only key permits a nonempty native-capable Responses set and also a Chat-only, disabled or unassigned model
+- **GIVEN** a source-only key permits a nonempty streaming Responses set and also a Chat-only, disabled or unassigned model
 - **WHEN** a new installer is exported on any supported platform
 - **THEN** names with no eligible Responses candidate MUST NOT disable WebSocket for that eligible set
-- **AND** the native-capable models retain their catalog WebSocket preference
+- **AND** the streaming models retain their catalog WebSocket preference
 
 #### Scenario: Install custom aliases with agent metadata
 
@@ -357,11 +357,11 @@ An allowlisted name with no eligible enabled Responses source after effective mo
 - **WHEN** its installer runs successfully
 - **THEN** the local catalog contains the public alias and its native instructions, tool capabilities, and agent metadata
 - **AND** inaccessible, disabled, non-streaming, and hidden models are not installed
-- **AND** the provider uses HTTP and credentials contain only the codex-lb key
+- **AND** the provider supports WebSocket, its turns are bridged to the source over HTTP, and credentials contain only the codex-lb key
 
 #### Scenario: Install an opted-in source-only key
 
-- **GIVEN** every eligible Responses source/model for a source-only key supports native WebSocket and runtime/global policy permits it
+- **GIVEN** every eligible Responses source/model for a source-only key streams and runtime/global policy permits WebSocket
 - **WHEN** a newly exported installer runs successfully
 - **THEN** its provider supports WebSocket and its catalog preserves the verified model transport preferences
 - **AND** no source identity or upstream secret is exported
@@ -375,7 +375,7 @@ An allowlisted name with no eligible enabled Responses source after effective mo
 
 #### Scenario: Disable WebSockets for source-only assignments
 
-- **GIVEN** a key has assigned model sources and no assigned accounts, and its eligible source/model set is not entirely native-WebSocket capable
+- **GIVEN** a key has assigned model sources and no assigned accounts, and its eligible source/model set includes a nonstreaming Responses model or is empty
 - **WHEN** its installer is exported and run on any supported platform
 - **THEN** the provider disables WebSockets even if the catalog includes native models or a source uses a native model slug
 
@@ -384,7 +384,7 @@ An allowlisted name with no eligible enabled Responses source after effective mo
 - **GIVEN** a key has both assigned accounts and assigned model sources
 - **WHEN** its installer is exported and run
 - **THEN** the provider enables WebSockets even if its model allowlist contains only source models preferring HTTP
-- **AND** installed per-model transport preferences remain unchanged and unsupported source turns retain their HTTP-required error behavior
+- **AND** installed per-model transport preferences remain unchanged and HTTP-only streaming source turns are bridged
 
 #### Scenario: Preserve WebSockets for account-only and unassigned keys
 
@@ -400,7 +400,7 @@ An allowlisted name with no eligible enabled Responses source after effective mo
 
 #### Scenario: Capability changes require a new export
 
-- **GIVEN** a source-only installer was exported with WebSocket disabled and the sources later become entirely capable
+- **GIVEN** a source-only installer was exported with WebSocket disabled and the eligible sources later become entirely streaming
 - **WHEN** the old installer is rerun
 - **THEN** it refreshes the catalog but keeps its embedded WebSocket flag disabled
 - **AND** a newly exported installer evaluates the current capability and can enable WebSocket
@@ -417,6 +417,7 @@ An allowlisted name with no eligible enabled Responses source after effective mo
 - **WHEN** an installer downloads its catalog
 - **THEN** the endpoint still validates the supplied key and scopes the catalog to its model/source policy
 - **AND** missing, invalid, expired or inactive keys are rejected with 401
+
 ### Requirement: Client setup redirects the built-in provider
 
 Generated installers MUST write root `openai_base_url` with the same endpoint as the configured `codex-lb` provider. File-backed authentication MUST use the current exported key. Setup MUST preserve session/history files and project configuration, and MUST NOT change machine or user environment variables. The UI MUST explain restarting clients and the remaining scope of explicit profile/CLI overrides.

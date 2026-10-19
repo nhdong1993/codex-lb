@@ -5,7 +5,17 @@ import json
 import logging
 import math
 import time
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterable,
+    Iterator,
+    Mapping,
+)
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -111,6 +121,7 @@ from app.core.metrics.prometheus import (
     stream_keepalive_sent_total,
 )
 from app.core.middleware.multipart_content_encoding import raise_for_unsupported_multipart_content_encoding
+from app.core.middleware.request_body_limit import request_body_limit_for_path
 from app.core.multipart import (
     IMAGE_EDITS_MULTIPART_POLICY,
     TRANSCRIPTION_MULTIPART_POLICY,
@@ -285,6 +296,7 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy._service.websocket.helpers import (
     _app_error_to_websocket_event,
     _websocket_capability_metadata_values,
+    _websocket_continuity_error_fields,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
@@ -378,7 +390,13 @@ from app.modules.proxy.source_ownership import (
     source_revision,
 )
 from app.modules.proxy.source_pool import MAX_SOURCE_ATTEMPTS, get_source_pool, retryable_source_error
-from app.modules.proxy.source_websocket import SourceSocketIdentity, SourceWebSocketSession, SourceWebSocketTurn
+from app.modules.proxy.source_websocket import (
+    BridgedSourceEvents,
+    SourceSocketIdentity,
+    SourceUpstream,
+    SourceWebSocketSession,
+    SourceWebSocketTurn,
+)
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
     RateLimitResetCreditsData,
@@ -1507,10 +1525,6 @@ async def _try_source_responses_websocket(
                     payload.model, refreshed, raw_model=original_model, only_disabled=True
                 )
                 if disabled is not None:
-                    if not disabled[0].supports_responses_websocket:
-                        raise source_ws_error(
-                            "model_source_requires_http_transport", "This source requires HTTP Responses", status=503
-                        )
                     raise source_ws_error("model_source_disabled", "The requested model source is disabled", status=503)
                 return None
             if bound is None and first_message_size > MAX_MESSAGE_BYTES:
@@ -1541,13 +1555,22 @@ async def _try_source_responses_websocket(
             raise source_ws_error(
                 "model_source_lookup_failed", "Unable to resolve model source availability and ownership", status=502
             ) from None
-        candidates = [source for source in resolved.sources if source.supports_responses_websocket]
+        # Native sources keep their upstream WebSocket; when no eligible
+        # candidate has one, every turn is bridged over HTTP/SSE. ``resolved``
+        # holds streaming sources only, so an empty pool still needs HTTP.
+        native = [source for source in resolved.sources if source.supports_responses_websocket]
+        upstream: SourceUpstream
         if bound is not None:
+            upstream = bound.upstream
             candidates = [
                 source
-                for source in candidates
+                for source in (native if upstream == "websocket" else resolved.sources)
                 if source.id == bound.source_id and source_revision(source, payload.model) == bound.revision
             ]
+        elif native:
+            upstream, candidates = "websocket", native
+        else:
+            upstream, candidates = "http", list(resolved.sources)
         if not candidates:
             raise source_ws_error(
                 "websocket_reconnect_required" if bound is not None else "model_source_requires_http_transport",
@@ -1558,6 +1581,14 @@ async def _try_source_responses_websocket(
             raise source_ws_error(
                 "websocket_reconnect_required", "Reconnect to change from a subscription to a source", status=409
             )
+        if upstream == "http" and payload.previous_response_id:
+            # The session already expanded a continuation of its own last
+            # response. Any other anchor names state an HTTP source never kept.
+            code, message = _websocket_continuity_error_fields(
+                reason="previous_response_not_found",
+                expose_stale_previous_response_classifier=expose_stale_previous_response_classifier,
+            )
+            raise source_ws_error(code, message, status=502)
         admission_excluded = set(excluded)
         deadline = received_at + request_timeout
         for _ in range(MAX_SOURCE_ATTEMPTS):
@@ -1639,7 +1670,9 @@ async def _try_source_responses_websocket(
                 settle_reservation=_settle_source_reservation,
                 release_reservation=_release_reservation,
                 transport="websocket",
-                upstream_transport="openai_compatible_websocket",
+                upstream_transport=(
+                    "openai_compatible_websocket" if upstream == "websocket" else "openai_compatible_http"
+                ),
                 warmup=warmup,
                 ownership=SourceOwnershipRecorder(
                     scope=OwnershipScope(refreshed.id if refreshed else None, payload.model),
@@ -1652,7 +1685,15 @@ async def _try_source_responses_websocket(
         except BaseException:
             claims.release_if_unowned()
             raise
-        return SourceWebSocketTurn(owner, effective, resolved.portable[source.id], deadline, reserve)
+        return SourceWebSocketTurn(
+            owner,
+            effective,
+            resolved.portable[source.id],
+            deadline,
+            reserve,
+            upstream,
+            client_input=raw.get("input"),
+        )
 
     received_at = input_buffer.received_at
     session = SourceWebSocketSession(
@@ -1668,8 +1709,33 @@ async def _try_source_responses_websocket(
         cleanup_scheduler=context.service,
         expose_stale_previous_response_classifier=expose_stale_previous_response_classifier,
         input_buffer=input_buffer,
+        open_http=_open_bridged_source_events,
+        transcript_limit=request_body_limit_for_path("/v1/responses"),
     )
     return await session.run(first_payload, received_at)
+
+
+async def _open_bridged_source_events(owner: SourceDispatch, payload: dict[str, JsonValue]) -> BridgedSourceEvents:
+    """Open one streaming HTTP Responses request for a WebSocket turn bridged to ``owner.source``."""
+    stream = await stream_source_responses(owner.source, payload, scheduler=owner.scheduler, clock=owner.clock)
+    blocks = _iter_source_sse_event_blocks(stream.body, max_event_bytes=MAX_MESSAGE_BYTES)
+
+    async def events() -> AsyncGenerator[str, None]:
+        try:
+            async for block in blocks:
+                yield block
+        except StreamEventTooLargeError:
+            raise source_ws_error(
+                "model_source_invalid_event", "Model source returned an oversized event", status=502
+            ) from None
+        except aiohttp.ClientError:
+            raise source_ws_error(
+                "model_source_stream_truncated", "Model source disconnected before completing the response", status=502
+            ) from None
+        finally:
+            await _aclose_stream(blocks)
+
+    return BridgedSourceEvents(events(), stream.upstream_status_code, stream.aclose)
 
 
 @ws_router.websocket("/responses/")
@@ -10034,12 +10100,11 @@ async def _websocket_upstream_transport_denial(*, api_key: ApiKeyData | None = N
             async with get_background_session() as session:
                 sources = await ModelSourcesRepository(session).list_enabled_sources()
                 allowed = _allowed_source_ids_for_api_key(api_key)
+                # Native or HTTP-bridged: any streaming Responses source serves WS.
                 capable_models = {
                     model.model
                     for source in sources
-                    if source.supports_responses
-                    and source.supports_responses_websocket
-                    and (allowed is None or source.id in allowed)
+                    if source.supports_responses and (allowed is None or source.id in allowed)
                     for model in source.models
                     if model.is_enabled and model.supports_streaming
                 }
