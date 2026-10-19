@@ -6,10 +6,30 @@ import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
 
+const DropdownMenuTapToggleContext = React.createContext<(() => void) | null>(null)
+
 function DropdownMenu({
+  open: openProp,
+  defaultOpen = false,
+  onOpenChange,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Root>) {
-  return <DropdownMenuPrimitive.Root data-slot="dropdown-menu" {...props} />
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen)
+  const open = openProp ?? uncontrolledOpen
+  const setOpen = (next: boolean) => {
+    if (openProp === undefined) setUncontrolledOpen(next)
+    onOpenChange?.(next)
+  }
+  return (
+    <DropdownMenuTapToggleContext.Provider value={() => setOpen(!open)}>
+      <DropdownMenuPrimitive.Root
+        data-slot="dropdown-menu"
+        open={open}
+        onOpenChange={setOpen}
+        {...props}
+      />
+    </DropdownMenuTapToggleContext.Provider>
+  )
 }
 
 function DropdownMenuPortal({
@@ -21,11 +41,29 @@ function DropdownMenuPortal({
 }
 
 function DropdownMenuTrigger({
+  onPointerDown,
+  onClick,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Trigger>) {
+  const toggleOnTap = React.useContext(DropdownMenuTapToggleContext)
+  const tapRef = React.useRef(false)
   return (
     <DropdownMenuPrimitive.Trigger
       data-slot="dropdown-menu-trigger"
+      onPointerDown={(event) => {
+        onPointerDown?.(event)
+        // Radix opens on pointerdown, which a touch fires before the browser
+        // knows the gesture is a scroll. Like Radix Select, touches open on
+        // the tap's click instead; a scroll never produces that click.
+        tapRef.current =
+          toggleOnTap !== null && event.pointerType === "touch" && !event.defaultPrevented
+        if (tapRef.current) event.preventDefault()
+      }}
+      onClick={(event) => {
+        onClick?.(event)
+        if (tapRef.current && !event.defaultPrevented) toggleOnTap?.()
+        tapRef.current = false
+      }}
       {...props}
     />
   )

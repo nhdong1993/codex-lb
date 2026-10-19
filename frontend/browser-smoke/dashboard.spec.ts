@@ -439,6 +439,49 @@ test("the API key edit dialog keeps Save reachable through one scroll region", a
   }
 });
 
+test.describe("on a touch phone", () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+
+  async function swipeUp(page: Page, x: number, y: number, distance: number) {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+    for (let moved = 20; moved <= distance; moved += 20) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y - moved }] });
+    }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await cdp.detach();
+  }
+
+  test("a swipe starting on a dropdown trigger scrolls instead of opening the menu", async ({ page }) => {
+    const created = await page.request.post("/api/api-keys/", { data: { name: "smoke-touch-key" } });
+    expect(created.ok()).toBe(true);
+    const keyId = ((await created.json()) as { id: string }).id;
+    await page.goto(`/apis?selected=${keyId}`, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Actions", exact: true }).tap();
+    await page.getByRole("menuitem", { name: "Edit", exact: true }).tap();
+    const dialog = page.getByRole("dialog", { name: "Edit API key" });
+    await expect(dialog).toBeVisible();
+
+    // An open modal menu hides the dialog from the accessibility tree, so match the trigger by markup.
+    const trigger = page.locator('button[aria-haspopup="menu"]', { hasText: "All accounts" });
+    await expect(trigger).toBeInViewport();
+    const box = await trigger.boundingBox();
+    if (!box) {
+      throw new Error("Expected the dropdown trigger to have a bounding box");
+    }
+    await swipeUp(page, Math.round(box.x + box.width / 2), Math.round(box.y + box.height / 2), 240);
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    expect(
+      await dialog.getByTestId("api-key-edit-scroll-region").evaluate((element) => element.scrollTop),
+    ).toBeGreaterThan(0);
+
+    await trigger.tap();
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByRole("menu")).toBeVisible();
+  });
+});
+
 test("the model source edit dialog keeps tool forwarding and save reachable", async ({ page }) => {
   const created = await page.request.post("/api/model-sources/", {
     data: {
