@@ -33,9 +33,7 @@ from app.core.balancer import (
     handle_rate_limit,
     plausible_rate_limit_reset_at,
 )
-from app.core.balancer import (
-    select_account as select_account,
-)
+from app.core.balancer import select_account as select_account
 from app.core.balancer.types import UpstreamError
 from app.core.clock import REAL_CLOCK, Clock
 from app.core.config import settings as config_settings
@@ -108,12 +106,8 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _StickySelectionOutcome,
     run_sticky_selection_path,
 )
-from app.modules.proxy._load_balancer.sticky_selection import (
-    _account_cap_error_message as _account_cap_error_message,
-)
-from app.modules.proxy._load_balancer.sticky_selection import (
-    _best_health_tier_states as _best_health_tier_states,
-)
+from app.modules.proxy._load_balancer.sticky_selection import _account_cap_error_message as _account_cap_error_message
+from app.modules.proxy._load_balancer.sticky_selection import _best_health_tier_states as _best_health_tier_states
 from app.modules.proxy._load_balancer.sticky_selection import (
     _filter_recovery_probe_candidates as _filter_recovery_probe_candidates,
 )
@@ -121,9 +115,7 @@ from app.modules.proxy._load_balancer.sticky_selection import _persist_sticky_mu
 from app.modules.proxy._load_balancer.sticky_selection import (
     _probing_result_requires_recovery_reservation as _probing_result_requires_recovery_reservation,
 )
-from app.modules.proxy._load_balancer.sticky_selection import (
-    _restore_sticky_mutation as _restore_sticky_mutation,
-)
+from app.modules.proxy._load_balancer.sticky_selection import _restore_sticky_mutation as _restore_sticky_mutation
 from app.modules.proxy._load_balancer.sticky_selection import (
     _select_account_preferring_budget_safe as _select_account_preferring_budget_safe,
 )
@@ -224,6 +216,10 @@ class AccountSelection:
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
     continuity_owner_no_longer_exists: bool = False
     hard_affinity_scope_mismatch: bool = False
+    # ``hard_affinity_saturated`` whose resolved owner is one of the caller's
+    # own ``exclude_account_ids``: the wait a transient owner outage earns
+    # cannot clear this one (``_hard_affinity_owner_excluded_by_caller``).
+    hard_affinity_owner_excluded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,6 +613,7 @@ class LoadBalancer:
 
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
+        hard_affinity_owner_excluded = False
         owner_restricted_selection = required_account_is_ownership_constraint or required_continuity_owner
         sticky_selection_may_resolve_owner = sticky_key is not None and sticky_kind == StickySessionKind.CODEX_SESSION
         # C2-3 resilience toggles: resolved from the caller's dashboard snapshot
@@ -988,6 +985,7 @@ class LoadBalancer:
             selection_error_code = sticky_outcome.error_code
             selection_resets_at = sticky_outcome.resets_at
             hard_affinity_scope_mismatch = sticky_outcome.hard_affinity_scope_mismatch
+            hard_affinity_owner_excluded = sticky_outcome.hard_affinity_owner_excluded
             if sticky_outcome.disposition == "direct_error":
                 return AccountSelection(account=None, error_message=error_message, error_code=selection_error_code)
 
@@ -1036,6 +1034,7 @@ class LoadBalancer:
                 error_code=selection_error_code,
                 resets_at=selection_resets_at,
                 hard_affinity_scope_mismatch=hard_affinity_scope_mismatch,
+                hard_affinity_owner_excluded=hard_affinity_owner_excluded,
             )
         if not circuit_breaker_open:
             set_normal()
