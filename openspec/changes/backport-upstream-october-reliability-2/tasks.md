@@ -2,7 +2,7 @@
 
 - [x] 1.1 Bump rustls to 0.23.46 (`ed487558`); build and test the native helper in a disposable container and run the native wire suites.
 - [x] 1.2 Require and lock urllib3 2.8.0 (`0b294950`, floor of `a563790a`), keeping the package version.
-- [ ] 1.3 Upgrade the remaining high-severity Debian runtime packages (`2a241401`).
+- [x] 1.3 Upgrade the remaining high-severity Debian runtime packages (`2a241401`).
 
 ## 2. Model metadata (C)
 
