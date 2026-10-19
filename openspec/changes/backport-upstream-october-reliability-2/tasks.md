@@ -25,7 +25,7 @@
 - [x] 3.10 Keep safety-policy blocks account-neutral on HTTP, WebSocket and bridge (`b28d9afc`).
 - [x] 3.11 Exclude deactivated workspaces and fail over safely, settling before health on both terminal sites (`3d8fa7ba`).
 - [x] 3.12 Publish HTTP response owners before delivery, never for capacity-replayed attempts (`d1fd2f21`).
-- [ ] 3.13 Preserve routed file failover provenance (`6b10052e`).
+- [x] 3.13 Preserve routed file failover provenance (`6b10052e`).
 - [ ] 3.14 Confirm source routing stays account-neutral and keeps its key reservations.
 
 ## 4. Verify and hand off
