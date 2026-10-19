@@ -56,10 +56,7 @@ from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
-from app.modules.api_keys.service import (
-    ApiKeyData,
-    ApiKeyUsageReservationData,
-)
+from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import model_admission
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -272,6 +269,7 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.streaming.capacity_replay import hold_capacity_replay_prelude, raise_if_capacity_replay
+from app.modules.proxy._service.streaming.capacity_replay import is_capacity_terminal as _is_capacity_terminal
 from app.modules.proxy._service.streaming.helpers import (
     _classify_terminal_stream_error_frame,
     _mark_downstream_stream_cancelled,
@@ -279,6 +277,7 @@ from app.modules.proxy._service.streaming.helpers import (
     _native_stream_iterator,
     _observe_terminal_stream_error_frame,
     _openai_error_fields,
+    _publish_http_response_owner,
     _rewrite_malformed_stream_error_event,
     _stream_transport_failure_event_or_raise,
 )
@@ -621,6 +620,8 @@ class _StreamingMixin(_StreamingRetryMixin):
             first_payload = parse_sse_data_json(first)
             event_type = classify_event_type(first_payload)
             event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
+            if not _is_capacity_terminal(iterator):
+                _publish_http_response_owner(proxy, event, first_payload, first, account_id_value, api_key, session_id)
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
             malformed_error_rewrite = _rewrite_malformed_stream_error_event(
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -780,6 +781,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 event_payload = parse_sse_data_json(line)
                 event_type = classify_event_type(event_payload)
                 event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
+                _publish_http_response_owner(proxy, event, event_payload, line, account_id_value, api_key, session_id)
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
                 malformed_error_rewrite = _rewrite_malformed_stream_error_event(
                     enforce_openai_sdk_contract=enforce_openai_sdk_contract,

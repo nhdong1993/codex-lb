@@ -353,6 +353,45 @@ async def test_stream_accepted_capacity_terminal_is_replayed_on_another_account(
 
 
 @pytest.mark.asyncio
+async def test_capacity_replayed_attempt_publishes_no_response_owner(async_client, monkeypatch):
+    """The discarded attempt's ID (in its held created frame and its capacity terminal) is never an owner."""
+    await _import_account(async_client, "acc_cap_owner_a", "cap-owner-a@example.com")
+    await _import_account(async_client, "acc_cap_owner_b", "cap-owner-b@example.com")
+    seen_account_ids = _install_scripted_upstream(
+        monkeypatch,
+        [
+            [
+                _created_sse_event("resp_dropped"),
+                _accepted_failed_sse_event(
+                    "resp_dropped",
+                    "server_is_overloaded",
+                    "Our servers are currently overloaded. Please try again later.",
+                ),
+            ],
+            _completed_sse_events("resp_kept"),
+        ],
+    )
+    published: list[tuple[str, str | None]] = []
+    original_remember = proxy_module.ProxyService._remember_websocket_previous_response_owner
+
+    def remember(self, *, previous_response_id, account_id, **kwargs):
+        published.append((previous_response_id, account_id))
+        return original_remember(self, previous_response_id=previous_response_id, account_id=account_id, **kwargs)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_remember_websocket_previous_response_owner", remember)
+
+    lines = await _stream_codex_responses(async_client)
+
+    assert len(seen_account_ids) == 2
+    events = _extract_events(lines)
+    assert {event["response"]["id"] for event in events if event.get("response")} == {"resp_kept"}
+    assert "resp_dropped" not in {response_id for response_id, _account in published}
+    kept_owners = {account for response_id, account in published if response_id == "resp_kept"}
+    assert len(kept_owners) == 1
+    assert kept_owners != {seen_account_ids[0]}
+
+
+@pytest.mark.asyncio
 async def test_stream_first_event_overload_is_replayed_on_another_account(async_client, monkeypatch):
     await _import_account(async_client, "acc_cap_first_a", "cap-first-a@example.com")
     await _import_account(async_client, "acc_cap_first_b", "cap-first-b@example.com")

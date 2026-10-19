@@ -166,7 +166,12 @@ def hold_capacity_replay_prelude(
     return CapacityReplayPrelude(upstream, load_balancer, admission_lease, account_lease)
 
 
+def is_capacity_terminal(iterator: AsyncIterator[str]) -> bool:
+    """Whether the held prelude resolved to an output-free capacity terminal (the attempt is discarded)."""
+    return isinstance(iterator, CapacityReplayPrelude) and iterator.capacity_terminal
+
+
 def raise_if_capacity_replay(iterator: AsyncIterator[str], code: str, error: UpstreamError) -> None:
     """Hand an output-free capacity terminal to the pre-visible failover path."""
-    if isinstance(iterator, CapacityReplayPrelude) and iterator.capacity_terminal:
+    if is_capacity_terminal(iterator):
         raise _RetryableStreamError(code, error, exclude_account=True, capacity_replay=True)
