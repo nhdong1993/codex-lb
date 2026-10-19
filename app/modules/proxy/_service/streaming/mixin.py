@@ -731,7 +731,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.error = {"message": error_message or "Upstream error"}
                 settlement.record_success = False
                 settlement.account_health_error = False
-
             if event and event.type in ("response.completed", "response.incomplete"):
                 usage = event.response.usage if event.response else None
                 if event.response and event.response.id:

@@ -16849,6 +16849,72 @@ async def test_backend_responses_http_bridge_retries_accepted_output_free_capaci
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_http_bridge_safety_policy_rejection_is_account_neutral(async_client, monkeypatch):
+    """A safety-policy block reproduces on every account: the bridge forwards it unchanged,
+    does not fail over, and writes no account health."""
+    _install_bridge_settings(monkeypatch, enabled=True)
+    first_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_safety_block_a",
+        "http-bridge-safety-block-a@example.com",
+    )
+    second_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_safety_block_b",
+        "http-bridge-safety-block-b@example.com",
+    )
+    first_account = await _get_account(first_account_id)
+    second_account = await _get_account(second_account_id)
+    blocked_upstream = _AcceptedOutputFreeCapacityErrorUpstreamWebSocket(
+        error_code="misalignment_policy_violation",
+        error_message="This request was blocked by our safety systems.",
+    )
+    unused_upstream = _FakeBridgeUpstreamWebSocket("resp_safety_block_unused")
+    connect_account_ids, _selection_exclusions = _install_two_account_bridge_failover(
+        monkeypatch,
+        first_account=first_account,
+        second_account=second_account,
+        upstreams=[blocked_upstream, unused_upstream],
+    )
+    health_writes: list[tuple[str, str]] = []
+    for method_name in (
+        "record_error",
+        "record_error_backoff",
+        "record_errors",
+        "mark_rate_limit",
+        "mark_quota_exceeded",
+        "mark_permanent_failure",
+    ):
+        original = getattr(load_balancer_module.LoadBalancer, method_name)
+
+        async def spy(self, account, *args, _name=method_name, _original=original, **kwargs):
+            health_writes.append((_name, account.id))
+            return await _original(self, account, *args, **kwargs)
+
+        monkeypatch.setattr(load_balancer_module.LoadBalancer, method_name, spy)
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "blocked-by-safety",
+            "prompt_cache_key": "safety-block-key",
+            "stream": True,
+        },
+    )
+
+    terminal = events[-1]
+    terminal_error = terminal.get("error") or (terminal.get("response") or {}).get("error") or {}
+    assert terminal_error.get("code") == "misalignment_policy_violation"
+    assert connect_account_ids == ["acc_http_bridge_safety_block_a"]
+    assert len(blocked_upstream.sent_text) == 1
+    assert unused_upstream.sent_text == []
+    assert health_writes == []
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_retries_accepted_output_free_abrupt_close_on_another_account(
     async_client,
     monkeypatch,

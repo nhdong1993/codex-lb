@@ -10669,6 +10669,77 @@ def test_backend_responses_websocket_usage_limit_frame_benches_the_account_witho
     assert first_upstream.closed is True
 
 
+def test_backend_responses_websocket_safety_policy_rejection_is_account_neutral(app_instance, monkeypatch):
+    """A safety-policy block reproduces on every account: forward it without touching account health."""
+    upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "id": "resp_ws_safety_block",
+                            "status": "failed",
+                            "error": {
+                                "code": "misalignment_policy_violation",
+                                "message": "This request was blocked by our safety systems.",
+                            },
+                            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        ]
+    )
+    connect_models: list[str | None] = []
+    handled_error_codes: list[str] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, *, model, **_kwargs):
+        del self, headers
+        connect_models.append(model)
+        return SimpleNamespace(id="acct_ws_safety_block"), upstream
+
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
+        del self, account, error
+        handled_error_codes.append(code)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", fake_handle_stream_error)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "blocked prompt"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            event = json.loads(websocket.receive_text())
+
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "misalignment_policy_violation"
+    assert handled_error_codes == []
+    assert connect_models == ["gpt-5.1"]
+
+
 @pytest.mark.parametrize(
     ("frame_error", "expected_health_code"),
     [
