@@ -41,6 +41,10 @@ Upstream OpenSpec change folders and canonical spec hunks are not imported verba
   - Example: an API-key request gets 401, the token refresh succeeds, and the redispatch gets HTTP 402 `deactivated_workspace` on a file-pinned owner.
   - Before: the account health write could run while the key's reservation was still open.
   - After: the reservation is closed first, then the account becomes `deactivated`, with no sibling dispatch.
+- **Scope of the workspace signal:**
+  - The covered delivery forms are an HTTP 402 status error and a status-less terminal frame carrying `deactivated_workspace`.
+  - A pre-visible HTTP 500 still takes the generic server-error same-account retry before classification. This is the `status_code != 500` gate in `streaming/retry.py`, identical on upstream `origin/main`.
+  - No HTTP 500 form has been observed (0 deactivated-workspace rows in production over 30 days), so it is not special-cased here.
 - **Bridge replay spin:** a created-only bridge replay whose hard owner is in the request's own exclusions re-selected every 2 s until the 7200 s budget ran out. Now it fails at once.
 - **Soft owner moved by one transient failure:** a single output-free capacity terminal moved a prompt-cache thread to a sibling forever. Now the sibling serves only that turn, unless the owner is in sustained backoff or rejected by model admission.
 - **Safety block penalized the account:** `misalignment_policy_violation` "This request was blocked by our safety systems." counted as an account error. It is now account-neutral; `cyber_policy` still routes as before.
