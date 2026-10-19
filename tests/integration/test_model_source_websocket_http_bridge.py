@@ -281,6 +281,42 @@ async def test_bridge_failed_response_is_sanitized_and_not_continuable(async_cli
     assert [reservation.status for reservation in reservations] == ["released", "finalized"]
 
 
+async def test_bridge_turn_records_proxy_measured_timing(async_client, app_instance):
+    async def handler(request: web.Request) -> web.StreamResponse:
+        await request.json()
+        streaming_message = {**MESSAGE, "status": "in_progress", "content": []}
+        return await _sse(
+            request,
+            [
+                {"type": "response.created", "response": _envelope("resp_timed", "in_progress", [])},
+                {"type": "response.output_item.added", "output_index": 0, "item": streaming_message},
+                {
+                    "type": "response.output_text.delta",
+                    "item_id": "msg_2",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "done",
+                },
+                {"type": "response.output_item.done", "output_index": 0, "item": MESSAGE},
+                {"type": "response.completed", "response": _envelope("resp_timed", "completed", [MESSAGE], usage=True)},
+            ],
+        )
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            assert (await _receive_turn(ws))[-1]["type"] == "response.completed"
+        rows, _ = await _rows(source_id)
+    assert [(row.transport, row.upstream_transport, row.status) for row in rows] == [
+        ("websocket", "openai_compatible_http", "success")
+    ]
+    # The source sends no ``metrics``: the bridged turn is timed by the proxy.
+    assert rows[0].latency_first_token_ms is not None and rows[0].latency_ms is not None
+    assert rows[0].latency_first_token_ms <= rows[0].latency_ms
+
+
 async def test_bridge_source_rejection_returns_http_envelope(async_client, app_instance):
     calls = 0
 

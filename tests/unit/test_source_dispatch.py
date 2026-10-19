@@ -21,6 +21,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 from starlette.requests import Request
 
+from app.core.types import JsonValue
+from app.core.utils.sse import format_sse_event
 from app.db.models import ModelSource
 from app.modules.api_keys.service import (
     API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
@@ -32,6 +34,7 @@ from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
     SourceChatStream,
     SourceStreamTransport,
+    SourceTimings,
     SourceUsage,
     SourceUsageHolder,
 )
@@ -648,7 +651,7 @@ async def test_watch_returns_the_open_result(recorder: _Recorder) -> None:
 
     result = await open_with_disconnect_watch(request.request, owner, open_stream())
     assert result == "stream"
-    assert owner.sent_at == 0.0 or owner.sent_at == clock.monotonic()
+    assert owner.sent_at == clock.monotonic()
     await scheduler.cancel_owned_tasks()
 
 
@@ -1987,3 +1990,187 @@ async def test_missing_usage_increments_usage_estimated_total_with_source_and_ca
 
     assert counter.calls == [{"source_id": owner.source.id, "cause": "missing_usage"}]
     assert counter.incs == 1
+
+
+# -- proxy-measured timings ----------------------------------------------------------------------
+#
+# Binary-exact virtual-clock steps (0.125, 0.25, ...) keep the millisecond conversion exact.
+
+
+def _event(payload: dict[str, JsonValue]) -> str:
+    return format_sse_event(payload)
+
+
+_CREATED = _event({"type": "response.created", "response": {"id": "resp_t", "status": "in_progress"}})
+_TEXT_DELTA = _event({"type": "response.output_text.delta", "item_id": "msg_1", "delta": "hi"})
+_COMPLETED = _event({"type": "response.completed", "response": {"id": "resp_t", "status": "completed"}})
+
+
+def _reasoning_delta(delta: str) -> str:
+    return _event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": delta,
+        }
+    )
+
+
+def _timing(row: dict[str, object]) -> tuple[object, object]:
+    return row["latency_first_token_ms"], row["latency_ms"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_timing_ends_at_the_relayed_terminal_not_at_the_source_eof(recorder: _Recorder) -> None:
+    clock = VirtualClock()
+    owner = _owner(recorder, clock=clock)
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+    # The virtual clock starts at 0.0: a zero-origin send is a real send.
+    owner.sent_at = clock.monotonic()
+
+    async def inner() -> AsyncIterator[str]:
+        clock.advance(0.125)
+        yield _CREATED
+        clock.advance(0.125)
+        yield _TEXT_DELTA
+        clock.advance(0.75)
+        holder.usage = SourceUsage(input_tokens=3, output_tokens=21)
+        holder.terminal_kind = "completed"
+        yield _COMPLETED
+        # The source keeps the body open after its terminal.
+        clock.advance(2.0)
+        yield "data: [DONE]\n\n"
+
+    chunks = [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert len(chunks) == 4
+    assert recorder.rows[0]["status"] == "success"
+    assert _timing(recorder.rows[0]) == (250, 1000)
+
+
+@pytest.mark.asyncio
+async def test_proxy_timing_ignores_events_after_a_completed_only_terminal(recorder: _Recorder) -> None:
+    clock = VirtualClock(monotonic_value=10.0)
+    owner = _owner(recorder, clock=clock)
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+    owner.sent_at = clock.monotonic()
+
+    async def inner() -> AsyncIterator[str]:
+        clock.advance(0.25)
+        yield _CREATED
+        clock.advance(0.25)
+        holder.terminal_kind = "completed"
+        yield _COMPLETED
+        clock.advance(0.25)
+        yield _TEXT_DELTA
+
+    [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert _timing(recorder.rows[0]) == (None, 500)
+
+
+@pytest.mark.asyncio
+async def test_proxy_timing_skips_a_blank_reasoning_placeholder(recorder: _Recorder) -> None:
+    clock = VirtualClock()
+    owner = _owner(recorder, clock=clock)
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+    owner.sent_at = clock.monotonic()
+
+    async def inner() -> AsyncIterator[str]:
+        yield _CREATED
+        clock.advance(0.25)
+        yield _reasoning_delta("<!-- -->\n")
+        clock.advance(0.25)
+        yield _TEXT_DELTA
+        clock.advance(0.25)
+        holder.terminal_kind = "completed"
+        yield _COMPLETED
+
+    [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert _timing(recorder.rows[0]) == (500, 750)
+
+
+@pytest.mark.asyncio
+async def test_proxy_timing_finalizes_a_pending_reasoning_delta_at_the_terminal(recorder: _Recorder) -> None:
+    clock = VirtualClock()
+    owner = _owner(recorder, clock=clock)
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+    owner.sent_at = clock.monotonic()
+
+    async def inner() -> AsyncIterator[str]:
+        yield _CREATED
+        clock.advance(0.25)
+        # Could still become a blank ``<!-- -->`` line: visibility is decided later.
+        yield _reasoning_delta("<!-")
+        clock.advance(0.25)
+        holder.terminal_kind = "completed"
+        yield _COMPLETED
+
+    [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert _timing(recorder.rows[0]) == (500, 500)
+
+
+@pytest.mark.asyncio
+async def test_valid_upstream_timings_win_over_the_proxy_measurement(recorder: _Recorder) -> None:
+    clock = VirtualClock()
+    owner = _owner(recorder, clock=clock)
+    holder = SourceUsageHolder()
+    _attach_stream(owner, holder=holder)
+    owner.sent_at = clock.monotonic()
+
+    async def inner() -> AsyncIterator[str]:
+        clock.advance(0.25)
+        yield _TEXT_DELTA
+        clock.advance(0.25)
+        holder.terminal_kind = "completed"
+        holder.timings = SourceTimings(latency_first_token_ms=25, latency_ms=145)
+        yield _COMPLETED
+
+    [chunk async for chunk in settlement_stream(owner, inner())]
+
+    assert _timing(recorder.rows[0]) == (25, 145)
+
+
+@pytest.mark.asyncio
+async def test_abandon_records_latency_only_after_the_send(recorder: _Recorder) -> None:
+    clock = VirtualClock()
+    never_sent = _owner(recorder, clock=clock)
+    _attach_stream(never_sent)
+    await never_sent.abandon(ABANDON_CLIENT_DISCONNECTED_DURING_OPEN)
+
+    sent = _owner(recorder, clock=clock)
+    _attach_stream(sent)
+    sent.sent_at = clock.monotonic()
+    clock.advance(12.0)
+    await sent.abandon(ABANDON_SOURCE_STALL)
+
+    assert [_timing(row) for row in recorder.rows] == [(None, None), (None, 12000)]
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_a_terminal_ends_at_finish_entry(recorder: _Recorder) -> None:
+    clock = VirtualClock()
+    owner = _owner(recorder, clock=clock)
+    _attach_stream(owner)
+    owner.sent_at = clock.monotonic()
+
+    async def inner() -> AsyncIterator[str]:
+        clock.advance(0.25)
+        yield _TEXT_DELTA
+        yield _TEXT_DELTA
+
+    body = cast(AsyncGenerator[str, None], settlement_stream(owner, inner()))
+    assert await body.__anext__() == _TEXT_DELTA
+    clock.advance(0.75)
+    await body.aclose()
+
+    assert recorder.rows[0]["status"] == "cancelled"
+    assert _timing(recorder.rows[0]) == (250, 1000)

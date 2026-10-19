@@ -182,6 +182,13 @@ async def test_source_native_two_turn_connection_and_accounting(async_client, ap
         )
         assert all(row.input_tokens == 7 and row.output_tokens == 3 for row in rows)
         assert all(res.status == "finalized" for res in reservations)
+        # No upstream ``metrics``: each turn is timed by the proxy from its own send.
+        assert all(
+            row.latency_first_token_ms is not None
+            and row.latency_ms is not None
+            and row.latency_first_token_ms <= row.latency_ms
+            for row in rows
+        )
 
 
 async def test_source_non_streaming_requires_http_before_reservation(async_client, app_instance):

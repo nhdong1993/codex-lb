@@ -99,7 +99,13 @@ from app.modules.model_sources.forwarding import (
     TimeoutPhase,
     classify_responses_frame,
 )
-from app.modules.proxy._service.support import _request_log_client_fields
+from app.modules.proxy._service.support import (
+    _finalize_ttft_reasoning_deltas,
+    _request_log_client_fields,
+    _ttft_event_visible_at,
+    _ttft_latency_ms_from_visible_at,
+    _TTFTReasoningDeltaState,
+)
 from app.modules.proxy.affinity import _owner_lookup_session_id_from_headers
 from app.modules.proxy.model_source_pins import PinIntent, PinWriteExecutor, PinWriteOutcome
 from app.modules.proxy.source_admission import SourceAdmission, TrialResult
@@ -401,8 +407,14 @@ class SourceDispatch:
     transport: Literal["http", "websocket"] = "http"
     upstream_transport: str = "openai_compatible_http"
     warmup: bool = False
-    sent_at: float = 0.0
+    # Owner-clock instant the attempt was sent to the source; ``None`` until then.
+    sent_at: float | None = None
     first_frame_at: float | None = None
+    # Proxy-measured timing, stamped as frames are handed to the client
+    # transport (``observe_relayed_event``); used when the source reports no
+    # valid ``metrics`` pair. The first relayed terminal closes the window.
+    first_token_at: float | None = None
+    terminal_at: float | None = None
     first_output_item_seen: bool = False
     # Set by ``settlement_stream`` when it hands the transport an event frame
     # that carries content (``relayed_frame_delivers_content``); the cancel
@@ -437,6 +449,9 @@ class SourceDispatch:
     _claims_released: bool = field(default=False, init=False, repr=False)
     _result_recorded: bool = field(default=False, init=False, repr=False)
     _row_written: bool = field(default=False, init=False, repr=False)
+    _ttft_pending: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.request_id is None:
@@ -464,6 +479,43 @@ class SourceDispatch:
         self.first_output_item_seen = self.first_output_item_seen or holder.first_output_item_seen
         self.delta_chars = max(self.delta_chars, holder.delta_chars)
         return holder
+
+    def observe_relayed_event(self, event_type: str | None, payload: dict[str, JsonValue] | None) -> None:
+        """Stamp the first visible token and the first terminal of a frame handed to the client transport.
+
+        Uses the subscription path's TTFT classifier, so both paths count the
+        same events. A terminal finalizes a pending reasoning-summary delta at
+        its own instant and closes the window: frames after it change nothing.
+        ``payload`` may be ``None`` once the first token is stamped (only the
+        terminal type is needed then).
+        """
+
+        if self.terminal_at is not None:
+            return
+        now = self.clock.monotonic()
+        if self.first_token_at is None:
+            self.first_token_at = _ttft_event_visible_at(event_type, payload, self._ttft_pending, now=now)
+        if event_type in _RELAYED_TERMINAL_KINDS:
+            if self.first_token_at is None:
+                self.first_token_at = _finalize_ttft_reasoning_deltas(self._ttft_pending, now=now)
+            self.terminal_at = now
+
+    def _row_timings(self, timings: SourceTimings | None, *, finished_at: float) -> tuple[int | None, int | None]:
+        """``(latency_ms, latency_first_token_ms)`` for the row: the upstream pair, else the proxy measurement."""
+
+        if timings is not None:
+            return timings.latency_ms, timings.latency_first_token_ms
+        sent_at = self.sent_at
+        if sent_at is None:
+            return None, None
+        ended_at = self.terminal_at if self.terminal_at is not None else finished_at
+        first_token_at = self.first_token_at
+        if first_token_at is None:
+            first_token_at = _finalize_ttft_reasoning_deltas(self._ttft_pending, now=ended_at)
+        return (
+            max(0, int((ended_at - sent_at) * 1000)),
+            _ttft_latency_ms_from_visible_at(first_token_at, sent_at),
+        )
 
     @property
     def pin_failure_row_code(self) -> str:
@@ -662,7 +714,8 @@ class SourceDispatch:
         error_code: str | None,
         error_message: str | None,
         usage: SourceUsage | None,
-        timings: SourceTimings | None,
+        latency_ms: int | None,
+        latency_first_token_ms: int | None,
         upstream_status_code: int | None,
     ) -> None:
         if self._row_written:
@@ -694,8 +747,8 @@ class SourceDispatch:
                     reasoning_tokens=usage.reasoning_tokens if usage is not None else None,
                     request_kind=self.request_kind,
                     cost_usd=source_usage_cost_usd(self.source, self.model, usage),
-                    latency_ms=timings.latency_ms if timings is not None else None,
-                    latency_first_token_ms=timings.latency_first_token_ms if timings is not None else None,
+                    latency_ms=latency_ms,
+                    latency_first_token_ms=latency_first_token_ms,
                     status=status,
                     error_code=error_code,
                     error_message=error_message,
@@ -743,11 +796,15 @@ class SourceDispatch:
         if self.finished:
             return
         self.finished = True
+        # The attempt's end when no terminal was relayed: sampled before any
+        # cleanup or settlement await, so finalization cost is never timed.
+        finished_at = self.clock.monotonic()
         holder = self.observe_stream()
         if usage is None and holder is not None:
             usage = holder.usage
         if timings is None and holder is not None:
             timings = holder.timings
+        latency_ms, latency_first_token_ms = self._row_timings(timings, finished_at=finished_at)
         if upstream_status_code is None and self.stream is not None:
             upstream_status_code = self.stream.upstream_status_code
         try:
@@ -772,7 +829,8 @@ class SourceDispatch:
                             error_code=error_code,
                             error_message=error_message,
                             usage=usage,
-                            timings=timings,
+                            latency_ms=latency_ms,
+                            latency_first_token_ms=latency_first_token_ms,
                             upstream_status_code=upstream_status_code,
                         ),
                         scheduler=self.scheduler,
@@ -808,7 +866,7 @@ class SourceDispatch:
 
         if self.finished:
             return
-        pending_seconds = max(0.0, self.clock.monotonic() - self.sent_at) if self.sent_at else 0.0
+        pending_seconds = max(0.0, self.clock.monotonic() - self.sent_at) if self.sent_at is not None else 0.0
         stage = _ABANDON_STAGES.get(reason, "during_open")
         logger.warning(
             "source_dispatch_abandoned stage=%s reason=%s pending_seconds=%.3f frame_seen=%s "
@@ -952,8 +1010,9 @@ async def open_with_disconnect_watch(request: Request, owner: SourceDispatch, co
     caller's.
     """
 
-    if not owner.sent_at:
-        owner.sent_at = owner.clock.monotonic()
+    sent_at = owner.sent_at
+    if sent_at is None:
+        sent_at = owner.sent_at = owner.clock.monotonic()
     task = owner.scheduler.create_task(coro)
     consumed = False
     try:
@@ -964,7 +1023,7 @@ async def open_with_disconnect_watch(request: Request, owner: SourceDispatch, co
                 consumed = True
                 return task.result()
             if await request.is_disconnected():
-                pending_seconds = max(0.0, owner.clock.monotonic() - owner.sent_at)
+                pending_seconds = max(0.0, owner.clock.monotonic() - sent_at)
                 stall = owner.first_frame_at is None and pending_seconds >= STALL_EVIDENCE_SECONDS
                 raise ClientDisconnectedDuringOpen(pending_seconds=pending_seconds, stall=stall)
     finally:
@@ -1049,6 +1108,13 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
                         relayed_kind = frame_kind
                 if not owner.content_delivered and relayed_frame_delivers_content(chunk):
                     owner.content_delivered = True
+                if owner.terminal_at is None:
+                    # The payload is parsed only while the first token is
+                    # pending; afterwards only the terminal type matters.
+                    owner.observe_relayed_event(
+                        _relayed_event_type(chunk),
+                        parse_sse_data_json(chunk) if owner.first_token_at is None else None,
+                    )
             yield chunk
         completed_normally = True
         holder = owner.observe_stream()

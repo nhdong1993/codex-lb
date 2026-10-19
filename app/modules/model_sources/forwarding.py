@@ -100,8 +100,9 @@ class SourceTimings:
     Maps directly onto ``RequestLog.latency_first_token_ms`` /
     ``RequestLog.latency_ms`` so source-routed requests get the same TTFT and
     tokens-per-second dashboard reporting as subscription-backed ones, sourced
-    from the upstream's own measurements rather than proxy-side timers (the
-    proxy does not instrument source forwarding round trips itself).
+    from the upstream's own measurements. Upstream-reported only: when a
+    Responses source reports no valid pair, ``SourceDispatch`` records its own
+    proxy-measured values instead (chat and audio routes stay ``null``).
     """
 
     latency_first_token_ms: int

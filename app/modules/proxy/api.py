@@ -6484,6 +6484,7 @@ async def _finish_non_stream_source_dispatch(
             status="error",
             error_code="usage_unavailable",
             error_message="source response missing usage",
+            timings=result.timings,
             upstream_status_code=result.upstream_status_code,
         )
         error = openai_error(

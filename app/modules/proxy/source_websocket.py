@@ -234,6 +234,8 @@ class SourceWebSocketSession:
                     and not turn.owner.warmup
                 ):
                     turn.owner.content_delivered = True
+                # Timed at the same handoff point, for native and bridged turns alike.
+                turn.owner.observe_relayed_event(str(event["type"]), event)
             await self.scheduler.wait_for(
                 self.websocket.send_text(json.dumps(event, ensure_ascii=True, separators=(",", ":"))),
                 timeout=min(self.stream_idle_timeout, self.request_timeout, self.idle_timeout),

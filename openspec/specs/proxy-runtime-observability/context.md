@@ -12,6 +12,19 @@ See `openspec/specs/proxy-runtime-observability/spec.md` for normative requireme
 - **Request tracing is opt-in:** outbound request summary and payload tracing remain configurable because payload logs can be noisy or sensitive. Since issue #1340 phase 1 the switch is the single `CODEX_LB_TRACE` comma-separated channel list (`shape`, `shape_raw_cache_key`, `payload`, `service_tier`, `upstream_summary`, `upstream_payload`); empty default = all off. It is an incident-debugging knob for interactive use only.
 - **Error logs must be correlated:** request id, endpoint, status, code, and message are the minimum useful fields for debugging 4xx/5xx failures.
 - **Prewarm observability is outcome-only:** the Codex HTTP-bridge prewarm canary experiment finished, so its bucket/cohort dimensions were retired (issue #1340 phase 4). The `codex_lb_http_bridge_prewarm_total` counter is labelled by `outcome` only, request logs record `prewarm_status` / `prewarm_latency_ms` (statuses: `not_applicable`, `skipped`, `success`, `timeout`, `error` — `canary_miss` no longer occurs). The legacy `prewarm_canary_bucket` / `prewarm_eligible_reason` request-log columns stayed declared but unwritten through v1.22–v1.24; `retire-prewarm-canary-column-mappings` removed them from the ORM model and allow-listed the retained physical columns in the schema-drift gate, because a previous-release replica still maps them and renders explicit NULLs in its INSERTs while the migration Job runs ahead of the workload roll. The Alembic drop revision ships the release after (see the next-release queue in `openspec/specs/deployment-installation/context.md`).
+- **Source Responses timings fall back to proxy measurement** (`measure-source-response-timings`, 2026-10-19). A valid upstream vLLM-style `metrics` pair still wins. Otherwise `SourceDispatch` measures timing itself:
+  - Start: the send to the source.
+  - TTFT: the first visible frame, judged by the subscription classifier and stamped at handoff to the client. HTTP stamps after ownership publication; WebSocket stamps inside the send lock.
+  - End: the first relayed terminal. When no terminal was relayed, the end is `finish()` entry.
+
+  Chat-completions and audio routes stay metrics-only. Before this change, about 14,900 source rows a week carried no timing at all.
+
+  Consequences:
+  - Non-stream and compaction rows get `latency_ms` only.
+  - Source TTFT includes network time, relay queueing and ownership writes.
+  - Reports medians and the Grafana TTFT panels now include source rows. Only the 24-hour breakdown separates them by upstream transport.
+
+  Rationale, the blank-row list and a worked example are in `openspec/changes/archive/*-measure-source-response-timings/context.md`.
 - **TTFT datasource selection stays in Grafana:** the Helm chart packages the
   TTFT dashboard but does not provision a PostgreSQL datasource or its
   credentials. The visible, single-select `DS_SQL` variable keeps

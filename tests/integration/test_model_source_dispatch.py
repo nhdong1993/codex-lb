@@ -14,6 +14,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -295,6 +296,97 @@ async def test_limited_key_streams_live_and_settles_from_source_usage(async_clie
     assert row.transport == "http" and row.upstream_transport == "openai_compatible_http"
     assert row.service_tier is None
     assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_without_valid_metrics_records_proxy_ttft_and_a_positive_tps(
+    async_client, source_upstream
+) -> None:
+    """The source paces each frame on what the client received.
+
+    Per-frame persistence cost before each handoff can then never merge the delta with the terminal.
+    """
+
+    await _enable_api_key_auth(async_client)
+    usage = {**_USAGE, "output_tokens_details": {"reasoning_tokens": 0}}
+    completed = _sse(
+        {
+            "type": "response.completed",
+            "sequence_number": 3,
+            "response": {
+                "id": "resp_dispatch_1",
+                "object": "response",
+                "status": "completed",
+                "output": [],
+                "usage": usage,
+                # Malformed upstream timing: ignored, the proxy measures instead.
+                "metrics": {"time_to_first_token_ms": -5, "generation_time_ms": 10},
+            },
+        }
+    )
+    release_delta, release_completed, release_tail = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def responses(request: web.Request) -> web.StreamResponse:
+        await request.json()
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(_created())
+        await response.write(_ITEM_ADDED)
+        await release_delta.wait()
+        await response.write(_DELTA)
+        await release_completed.wait()
+        await response.write(completed)
+        # The source keeps its body open well after the terminal.
+        await release_tail.wait()
+        await response.write(b"data: [DONE]\n\n")
+        await response.write_eof()
+        return response
+
+    base_url = await source_upstream(responses)
+    model = "dispatch-proxy-timing"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, _key_id = await _create_unlimited_key(async_client, source_id, name=f"{model}-key")
+
+    stream = _AsgiStream(
+        app=_app(async_client),
+        path="/v1/responses",
+        headers={"authorization": f"Bearer {key}"},
+        body=json.dumps(_request_body(model)).encode(),
+    )
+    started = time.monotonic()
+    runner = asyncio.create_task(stream.run())
+    await stream.wait_for_text("response.output_item.added", timeout=60)
+    await asyncio.sleep(0.25)
+    release_delta.set()
+    await stream.wait_for_text("response.output_text.delta", timeout=60)
+    await asyncio.sleep(0.3)
+    release_completed.set()
+    await stream.wait_for_text("response.completed", timeout=60)
+    completed_seen = time.monotonic()
+    await asyncio.sleep(1.5)
+    release_tail.set()
+    await asyncio.wait_for(runner, timeout=60)
+    await _drain(async_client)
+
+    assert stream.status == 200
+    rows = await _source_rows(source_id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.status == "success"
+    assert row.latency_first_token_ms is not None and row.latency_ms is not None
+    assert row.latency_first_token_ms >= 250
+    # The delta was handed off before the client saw it; the terminal 0.3 s later at the earliest.
+    generation_ms = row.latency_ms - row.latency_first_token_ms
+    assert generation_ms >= 300
+    # Ends at the relayed terminal: within what the client had seen, never at the source EOF 1.5 s later.
+    assert row.latency_ms <= int((completed_seen - started) * 1000) + 1
+    # The dashboard's TPS: non-reasoning output tokens over the post-TTFT interval.
+    non_reasoning_output = (row.output_tokens or 0) - (row.reasoning_tokens or 0)
+    assert non_reasoning_output > 0
+    tps = non_reasoning_output / (generation_ms / 1000)
+    assert math.isfinite(tps) and tps > 0
 
 
 @pytest.mark.asyncio
@@ -674,7 +766,13 @@ async def test_non_stream_without_usage_releases_and_answers_502(async_client, s
     async def responses(request: web.Request) -> web.Response:
         state.requests.append(await request.json())
         return web.json_response(
-            {"id": "resp_json_no_usage", "object": "response", "status": "completed", "output": []}
+            {
+                "id": "resp_json_no_usage",
+                "object": "response",
+                "status": "completed",
+                "output": [],
+                "metrics": {"time_to_first_token_ms": 25, "generation_time_ms": 120},
+            }
         )
 
     base_url = await source_upstream(responses)
@@ -697,6 +795,8 @@ async def test_non_stream_without_usage_releases_and_answers_502(async_client, s
     rows = await _source_rows(source_id)
     assert [(row.status, row.error_code) for row in rows] == [("error", "usage_unavailable")]
     assert rows[0].request_id == "resp_json_no_usage"
+    # The error row keeps the source's valid timing pair.
+    assert (rows[0].latency_first_token_ms, rows[0].latency_ms) == (25, 145)
 
 
 @pytest.mark.asyncio
@@ -734,6 +834,8 @@ async def test_non_stream_success_settles_and_attributes_the_source_response_id(
     assert rows[0].requested_service_tier == "priority"
     assert rows[0].service_tier is None
     assert rows[0].input_tokens == 100
+    # A JSON body exposes no token timing: proxy-measured total latency only.
+    assert rows[0].latency_ms is not None and rows[0].latency_first_token_ms is None
 
 
 # -- abandonment (design §6.4, §13.4 a-e) --------------------------------------------------------
