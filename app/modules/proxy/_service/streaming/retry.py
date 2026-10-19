@@ -2671,7 +2671,9 @@ class _StreamingRetryMixin:
                                         outcome="owner_previsible_failure",
                                     )
                                     break
-                                if burst:
+                                # Burst and workspace failures defer keyed health
+                                # until settlement; other codes keep their policy.
+                                if burst or classified["failure_class"] == "account_unavailable":
                                     await _handle_or_defer_keyed_stream_health(
                                         account,
                                         _upstream_error_from_openai(error),
@@ -3413,7 +3415,7 @@ class _StreamingRetryMixin:
                                 continue
                             health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                             if health_write_allowed:
-                                if burst:
+                                if burst or classified["failure_class"] == "account_unavailable":
                                     await _handle_or_defer_keyed_stream_health(
                                         account,
                                         current_error_payload,

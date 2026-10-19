@@ -20,12 +20,21 @@ from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.time import utcnow
-from app.db.models import Account, DashboardSettings, RequestLog, StickySessionKind
+from app.db.models import (
+    Account,
+    AccountStatus,
+    ApiKeyUsageReservation,
+    DashboardSettings,
+    RequestLog,
+    StickySessionKind,
+)
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
+from tests.integration.test_codeless_usage_limit_routes import _account_status, _import_account
 
 pytestmark = pytest.mark.integration
 
@@ -2580,6 +2589,107 @@ async def test_backend_responses_terminal_disconnect_finalizes_settlement_and_su
         assert log.archive_request_id == request_id
         assert log.account_id == expected_account_id
         assert log.status == "success"
+
+
+_CLOSED_KEY_RESERVATION_STATUSES = frozenset({"finalized", "settled", "released"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["file_pinned", "last_attempt"])
+async def test_keyed_post_refresh_deactivated_workspace_settles_before_permanent_health(
+    async_client, app_instance, monkeypatch, scenario
+):
+    """401 -> forced refresh -> ``deactivated_workspace`` on a request that cannot move.
+
+    The surfaced rejection deactivates the account, but only after every reservation
+    for the key is closed, and it never reaches a sibling account.
+    """
+    letters = ("a", "b") if scenario == "file_pinned" else ("a",)
+    account_ids = {
+        f"acc_post_refresh_ws_{letter}": await _import_account(
+            async_client, f"acc_post_refresh_ws_{letter}", f"post-refresh-ws-{letter}@example.test"
+        )
+        for letter in letters
+    }
+    pinned_account_id = account_ids["acc_post_refresh_ws_a"]
+    configured = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert configured.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "post-refresh-deactivated-workspace",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000}],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    service = get_proxy_service_for_app(app_instance)
+    original_health = service._handle_stream_error
+    statuses_at_health: list[str] = []
+
+    async def health(account, error, code, http_status=None, **kwargs):
+        if code == "deactivated_workspace":
+            async with SessionLocal() as session:
+                statuses = list(
+                    await session.scalars(
+                        select(ApiKeyUsageReservation.status).where(ApiKeyUsageReservation.api_key_id == key_id)
+                    )
+                )
+            assert statuses and all(status in _CLOSED_KEY_RESERVATION_STATUSES for status in statuses)
+            statuses_at_health.extend(statuses)
+        return await original_health(account, error, code, http_status=http_status, **kwargs)
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                {"error": {"code": "invalid_api_key", "message": "token invalidated"}},
+            )
+        raise proxy_module.ProxyResponseError(
+            402,
+            {"error": {"code": "deactivated_workspace", "message": "Workspace has been deactivated"}},
+        )
+        yield ""
+
+    monkeypatch.setattr(service, "_handle_stream_error", health)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    if scenario == "file_pinned":
+
+        async def pin_to_owner(self, payload, headers):
+            del self, payload, headers
+            return pinned_account_id
+
+        monkeypatch.setattr(proxy_module.ProxyService, "_resolve_file_account_for_responses", pin_to_owner)
+    else:
+        monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    resp = await async_client.post(
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+    )
+    assert await service.drain_persistence_tasks(timeout_seconds=5)
+
+    # Nothing was visible yet, so the original upstream rejection is surfaced as-is.
+    assert resp.status_code == 402
+    assert resp.json()["error"]["code"] == "deactivated_workspace"
+    # Upstream sees the raw ChatGPT account id of the pinned owner on both dispatches.
+    assert seen_account_ids == ["acc_post_refresh_ws_a", "acc_post_refresh_ws_a"]
+    assert statuses_at_health
+    assert await _account_status(pinned_account_id) == AccountStatus.DEACTIVATED
+    for account_id in account_ids.values():
+        if account_id != pinned_account_id:
+            assert await _account_status(account_id) == AccountStatus.ACTIVE
 
 
 @pytest.mark.asyncio
