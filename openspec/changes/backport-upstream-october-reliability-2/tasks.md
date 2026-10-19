@@ -14,7 +14,7 @@
 ## 3. Reliability fixes (B)
 
 - [x] 3.1 Let the deletion scheduler exit its wait promptly (`c62bdd80`).
-- [ ] 3.2 Consume a shared future's exception when no waiter is left (`f94dd509`).
+- [x] 3.2 Consume a shared future's exception when no waiter is left (`f94dd509`).
 - [ ] 3.3 Retain failed immediate invalidations (`fbb97519`).
 - [ ] 3.4 Snapshot force-probe state before session cleanup (`e4bc88ff`).
 - [ ] 3.5 Recover a rate-limited account on any confirmed window reset (`3d501ac5`).
