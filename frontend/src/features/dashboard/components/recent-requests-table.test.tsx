@@ -408,6 +408,27 @@ describe("RecentRequestsTable", () => {
     expect(badge).not.toHaveClass("bg-zinc-500/15");
   });
 
+  it("gives current plans their own badge style instead of the Free fallback", () => {
+    const plans = [
+      ["go", "Go", "bg-lime-500/15"],
+      ["business", "Business", "bg-blue-500/15"],
+      ["enterprise", "Enterprise", "bg-indigo-500/15"],
+      ["edu", "Edu", "bg-teal-500/15"],
+      ["self_serve_business_usage_based", "Self serve business usage based", "bg-zinc-500/10"],
+    ] as const;
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={plans.map(([planType]) => ({ ...LAYOUT_REQUEST, planType, requestId: `req-${planType}` }))}
+      />,
+    );
+
+    for (const [, label, className] of plans) {
+      expect(screen.getByText(label)).toHaveClass(className);
+    }
+  });
+
   it("shows TTFT and output-token TPS beside tokens", () => {
     render(
       <RecentRequestsTable
