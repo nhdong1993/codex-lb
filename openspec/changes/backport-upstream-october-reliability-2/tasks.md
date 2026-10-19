@@ -20,7 +20,7 @@
 - [x] 3.5 Recover a rate-limited account on any confirmed window reset (`3d501ac5`).
 - [x] 3.6 Keep a soft sticky owner that is only request-locally unavailable (`81b9fbd5`).
 - [x] 3.7 Stop waiting on a hard affinity owner the caller excluded (`2c853992`).
-- [ ] 3.8 Reuse the reservation during local bridge recovery (`98d2256d`).
+- [x] 3.8 Reuse the reservation during local bridge recovery (`98d2256d`).
 - [ ] 3.9 Fork model-transition owner conflicts (`9db05a1b`).
 - [ ] 3.10 Keep safety-policy blocks account-neutral on HTTP, WebSocket and bridge (`b28d9afc`).
 - [ ] 3.11 Exclude deactivated workspaces and fail over safely, settling before health on both terminal sites (`3d8fa7ba`).

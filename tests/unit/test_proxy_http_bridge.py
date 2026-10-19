@@ -19582,8 +19582,10 @@ async def test_http_bridge_local_owner_rejects_aliases_for_distinct_live_session
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner_forward_failure(
+@pytest.mark.parametrize("local_submit_fails", [False, True])
+async def test_stream_via_http_bridge_reuses_api_key_reservation_after_pre_dispatch_owner_rejection(
     monkeypatch: pytest.MonkeyPatch,
+    local_submit_fails: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     started_at = time.monotonic()
@@ -19593,17 +19595,11 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         key_id=api_key.id,
         model="gpt-5.4",
     )
-    retried_reservation = proxy_service.ApiKeyUsageReservationData(
-        reservation_id="resv-retry",
-        key_id=api_key.id,
-        model="gpt-5.4",
-    )
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",
             "instructions": "hi",
             "input": "hello",
-            "previous_response_id": "resp_prev_1",
         }
     )
 
@@ -19616,20 +19612,18 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         started_at=started_at,
         event_queue=asyncio.Queue(),
         transport="http",
-        previous_response_id="resp_prev_1",
     )
-    request_state_initial.request_stage = "follow_up"
+    request_state_initial.request_stage = "first_turn"
     request_state_initial.preferred_account_id = "acc-1"
     request_state_retry = proxy_service._WebSocketRequestState(
         request_id="req-retry",
         model="gpt-5.4",
         service_tier=None,
         reasoning_effort=None,
-        api_key_reservation=retried_reservation,
+        api_key_reservation=initial_reservation,
         started_at=started_at,
         event_queue=asyncio.Queue(),
         transport="http",
-        previous_response_id="resp_prev_1",
     )
 
     prepare_reservations: list[proxy_service.ApiKeyUsageReservationData | None] = []
@@ -19677,7 +19671,18 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
 
     async def fake_forward_http_bridge_request_to_owner(**kwargs: object):
         del kwargs
-        raise ProxyResponseError(400, proxy_service.openai_error("previous_response_not_found", "missing"))
+        source = ProxyResponseError(
+            503,
+            proxy_service.openai_error(
+                "bridge_owner_unreachable",
+                "HTTP bridge owner is unreachable",
+                error_type="server_error",
+            ),
+        )
+        raise http_bridge_owner_forwarding_module._OwnerForwardRequestError(
+            source,
+            outcome=http_bridge_owner_forwarding_module._OwnerForwardOutcome.RECEIVER_REJECTED,
+        )
         yield ""
 
     async def fake_submit_http_bridge_request(
@@ -19689,6 +19694,8 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     ) -> None:
         del _session, text_data, queue_limit
         submitted_reservations.append(request_state.api_key_reservation)
+        if local_submit_fails:
+            raise RuntimeError("local submit failed")
         event_queue = request_state.event_queue
         assert event_queue is not None
 
@@ -19699,7 +19706,8 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
 
         asyncio.create_task(produce_after_reattach_delay())
 
-    reserve_retry = AsyncMock(return_value=retried_reservation)
+    reserve_retry = AsyncMock(side_effect=AssertionError("pre-dispatch replay must reuse the original reservation"))
+    release_reservation = AsyncMock()
     capacity_unavailable = ProxyResponseError(
         503,
         proxy_service.openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
@@ -19735,38 +19743,52 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_retry)
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
     monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_startup_keepalive_grace_seconds", lambda: 0.001)
     monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 20)
 
-    chunks = [
-        chunk
-        async for chunk in service._stream_via_http_bridge(
-            payload,
-            headers={"x-codex-session-id": "sid-123"},
-            codex_session_affinity=True,
-            propagate_http_errors=False,
-            openai_cache_affinity=False,
-            api_key=api_key,
-            api_key_reservation=initial_reservation,
-            suppress_text_done_events=False,
-            idle_ttl_seconds=120.0,
-            codex_idle_ttl_seconds=900.0,
-            max_sessions=8,
-            queue_limit=4,
-        )
-    ]
+    chunks: list[str] = []
+    stream_error: BaseException | None = None
+    try:
+        chunks = [
+            chunk
+            async for chunk in service._stream_via_http_bridge(
+                payload,
+                headers={"x-codex-session-id": "sid-123"},
+                codex_session_affinity=True,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=api_key,
+                api_key_reservation=initial_reservation,
+                suppress_text_done_events=False,
+                idle_ttl_seconds=120.0,
+                codex_idle_ttl_seconds=900.0,
+                max_sessions=8,
+                queue_limit=4,
+            )
+        ]
+    except RuntimeError as exc:
+        stream_error = exc
 
+    assert get_or_create.await_count == 3
+    assert prepare_reservations == [initial_reservation, initial_reservation]
+    assert submitted_reservations == [initial_reservation]
+    reserve_retry.assert_not_awaited()
+    # The transferred reservation is still the caller's api_key_reservation:
+    # its finalizer (success) or the caller (failure after transfer) settles
+    # it, so the bridge must not release it a second time.
+    release_reservation.assert_not_awaited()
+    if local_submit_fails:
+        assert isinstance(stream_error, RuntimeError)
+        return
+    assert stream_error is None
     keepalive = proxy_service.parse_sse_data_json(chunks[0])
     assert keepalive is not None
     assert keepalive["status"] == "waiting_for_account_capacity"
     assert any('"type":"codex.keepalive"' in chunk for chunk in chunks)
     assert chunks[-1] == 'data: {"type":"response.completed"}\n\n'
-    assert get_or_create.await_count == 3
-    assert prepare_reservations == [initial_reservation, retried_reservation]
-    assert submitted_reservations == [retried_reservation]
-    reserve_retry.assert_awaited_once()
 
 
 async def _run_owner_forward_recovery_with_session(
