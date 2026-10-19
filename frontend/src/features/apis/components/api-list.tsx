@@ -253,7 +253,7 @@ export function ApiList({
       <div
         className={
           detail
-            ? "max-h-[calc(100vh-16rem)] space-y-1 overflow-y-auto p-1"
+            ? "space-y-1 p-1 lg:max-h-[calc(100vh-16rem)] lg:overflow-y-auto"
             : "space-y-2"
         }
       >

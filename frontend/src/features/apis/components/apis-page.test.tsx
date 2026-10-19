@@ -141,6 +141,45 @@ describe("ApisPage", () => {
 		).toHaveTextContent("Key not used");
 	});
 
+	it.each([
+		{ layout: "stacked", desktop: false, scrolls: true },
+		{ layout: "desktop", desktop: true, scrolls: false },
+	])(
+		"brings the Detail panel into view only in the $layout layout",
+		async ({ desktop, scrolls }) => {
+			const user = userEvent.setup();
+			vi.spyOn(window, "matchMedia").mockImplementation(
+				(query) =>
+					({
+						matches: query === "(min-width: 64rem)" ? desktop : false,
+						media: query,
+						addEventListener: vi.fn(),
+						removeEventListener: vi.fn(),
+					}) as unknown as MediaQueryList,
+			);
+			const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView");
+			renderApisPage({
+				apiKeys: [
+					createApiKey({ id: "key_first", name: "First key" }),
+					createApiKey({ id: "key_second", name: "Second key" }),
+				],
+			});
+
+			await user.click(screen.getByRole("button", { name: /Second key/ }));
+
+			expect(
+				screen.getByRole("heading", { name: "Second key" }),
+			).toBeInTheDocument();
+			if (scrolls) {
+				expect(scrollIntoView).toHaveBeenCalledTimes(1);
+				const target = scrollIntoView.mock.contexts[0] as Element;
+				expect(target).toContainElement(screen.getByTestId("api-key-info"));
+			} else {
+				expect(scrollIntoView).not.toHaveBeenCalled();
+			}
+		},
+	);
+
 	it("closes the List dialog after deleting its key instead of showing another key", async () => {
 		const user = userEvent.setup();
 		localStorage.setItem("codex-lb-apis-view-mode", "list");

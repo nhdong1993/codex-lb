@@ -1,5 +1,5 @@
 import { List, PanelsTopLeft } from "lucide-react";
-import { lazy, Suspense, useCallback, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 import { AlertMessage } from "@/components/alert-message";
@@ -25,6 +25,7 @@ import {
 	useApiKeyUsage7Day,
 } from "@/features/apis/hooks/use-apis";
 import { useDialogState } from "@/hooks/use-dialog-state";
+import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const ApiKeyCreateDialog = lazy(() =>
@@ -77,6 +78,8 @@ export function ApisPage() {
 
 	const apiKeys = useMemo(() => apiKeysQuery.data ?? [], [apiKeysQuery.data]);
 	const selectedKeyId = searchParams.get("selected");
+	const detailPanelRef = useRef<HTMLDivElement>(null);
+	const reducedMotion = useReducedMotion();
 
 	const handleSelectKey = useCallback(
 		(keyId: string) => {
@@ -84,8 +87,18 @@ export function ApisPage() {
 			nextSearchParams.set("selected", keyId);
 			setSearchParams(nextSearchParams);
 			setDetailOpen(viewMode === "list");
+			// Below lg the detail panel is stacked under the key list, out of view.
+			if (
+				viewMode === "detail" &&
+				!window.matchMedia("(min-width: 64rem)").matches
+			) {
+				detailPanelRef.current?.scrollIntoView({
+					behavior: reducedMotion ? "auto" : "smooth",
+					block: "start",
+				});
+			}
 		},
-		[searchParams, setSearchParams, viewMode],
+		[reducedMotion, searchParams, setSearchParams, viewMode],
 	);
 
 	const resolvedSelectedKeyId = useMemo(() => {
@@ -247,7 +260,11 @@ export function ApisPage() {
 							/>
 						</div>
 
-						{viewMode === "detail" ? detailPanel : null}
+						{viewMode === "detail" ? (
+							<div ref={detailPanelRef} className="min-w-0 scroll-mt-20">
+								{detailPanel}
+							</div>
+						) : null}
 					</div>
 				</div>
 			)}

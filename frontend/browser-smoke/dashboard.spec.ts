@@ -480,6 +480,34 @@ test.describe("on a touch phone", () => {
     await expect(trigger).toHaveAttribute("aria-expanded", "true");
     await expect(page.getByRole("menu")).toBeVisible();
   });
+
+  test("tapping a key in Detail view brings its details into view", async ({ page }) => {
+    for (const name of ["smoke-phone-first", "smoke-phone-second"]) {
+      const created = await page.request.post("/api/api-keys/", { data: { name } });
+      expect(created.ok()).toBe(true);
+    }
+    await page.goto("/apis", { waitUntil: "networkidle" });
+    const item = page.getByRole("button", { name: /smoke-phone-second/ });
+    // A stacked selector that scrolls on its own traps page swipes on phones.
+    const scrollingAncestors = await item.evaluate((element) => {
+      const found: string[] = [];
+      for (let node = element.parentElement; node && node !== document.body; node = node.parentElement) {
+        if (["auto", "scroll"].includes(getComputedStyle(node).overflowY)) found.push(node.className);
+      }
+      return found;
+    });
+    expect(scrollingAncestors).toEqual([]);
+
+    await item.tap();
+    const heading = page.getByRole("heading", { name: "smoke-phone-second", level: 2 });
+    await expect(heading).toBeInViewport();
+    const headerBox = await page.getByRole("banner").boundingBox();
+    const headingBox = await heading.boundingBox();
+    if (!headerBox || !headingBox) {
+      throw new Error("Expected the header and detail heading to have bounding boxes");
+    }
+    expect(headingBox.y).toBeGreaterThanOrEqual(headerBox.y + headerBox.height);
+  });
 });
 
 test("the model source edit dialog keeps tool forwarding and save reachable", async ({ page }) => {
