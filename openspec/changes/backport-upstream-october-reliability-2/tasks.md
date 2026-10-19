@@ -18,7 +18,7 @@
 - [x] 3.3 Retain failed immediate invalidations (`fbb97519`).
 - [x] 3.4 Snapshot force-probe state before session cleanup (`e4bc88ff`).
 - [x] 3.5 Recover a rate-limited account on any confirmed window reset (`3d501ac5`).
-- [ ] 3.6 Keep a soft sticky owner that is only request-locally unavailable (`81b9fbd5`).
+- [x] 3.6 Keep a soft sticky owner that is only request-locally unavailable (`81b9fbd5`).
 - [ ] 3.7 Stop waiting on a hard affinity owner the caller excluded (`2c853992`).
 - [ ] 3.8 Reuse the reservation during local bridge recovery (`98d2256d`).
 - [ ] 3.9 Fork model-transition owner conflicts (`9db05a1b`).
