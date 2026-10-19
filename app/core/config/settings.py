@@ -412,9 +412,9 @@ class Settings(BaseSettings):
     model_registry_enabled: bool = True
     # Fallback Codex client version used when the live release lookup fails.
     # Must stay >= the highest ``minimal_client_version`` in the bootstrap
-    # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
+    # catalog (gpt-6-luna requires 0.155.0) or a degraded-startup refresh would
     # receive an upstream catalog without those models.
-    model_registry_client_version: str = "0.153.4"
+    model_registry_client_version: str = "0.163.0"
     # Persisted registry snapshots older than this are ignored at load time
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)

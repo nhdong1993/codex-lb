@@ -101,7 +101,7 @@ async def test_rejects_invalid_version_name():
         version = await cache.get_version()
 
     # Invalid name falls back to settings default
-    assert version == "0.153.4"
+    assert version == "0.163.0"
 
 
 @pytest.mark.asyncio
@@ -113,7 +113,7 @@ async def test_rejects_alpha_version_name():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == "0.163.0"
 
 
 @pytest.mark.asyncio
@@ -149,7 +149,7 @@ async def test_fallback_to_settings_default_when_no_cache():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session_fail):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == "0.163.0"
 
 
 @pytest.mark.asyncio
@@ -173,7 +173,7 @@ async def test_fallback_on_network_exception():
     ):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == "0.163.0"
 
 
 @pytest.mark.asyncio
@@ -204,7 +204,7 @@ async def test_missing_name_field_falls_back():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == "0.163.0"
 
 
 def test_ttl_must_be_positive():
@@ -250,7 +250,7 @@ async def test_npm_invalid_version_falls_back_to_settings_default():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == "0.163.0"
 
 
 @pytest.mark.asyncio
@@ -263,7 +263,7 @@ async def test_npm_missing_version_field_falls_back_to_settings_default():
     with patch("app.core.clients.codex_version.aiohttp.ClientSession", return_value=session):
         version = await cache.get_version()
 
-    assert version == "0.153.4"
+    assert version == "0.163.0"
 
 
 @pytest.mark.asyncio
@@ -329,3 +329,22 @@ def test_cached_version_or_default_falls_back_to_settings_default_when_empty():
         result = cache.cached_version_or_default()
 
     assert result == "0.101.0"
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def test_default_fallback_covers_bootstrap_minimal_client_versions():
+    from app.core.config.settings import Settings
+    from app.core.openai.model_registry import _BOOTSTRAP_STATIC_MODELS
+
+    minimal_versions = [
+        model.minimal_client_version for model in _BOOTSTRAP_STATIC_MODELS if model.minimal_client_version
+    ]
+    assert minimal_versions
+    fallback = Settings.model_fields["model_registry_client_version"].default
+
+    # A cold or failed lookup presents this fallback upstream; anything older
+    # than a bootstrap model's floor makes the refreshed catalog drop that model.
+    assert _version_tuple(fallback) >= max(_version_tuple(version) for version in minimal_versions)
