@@ -283,3 +283,13 @@ propagation. This documentation does not authorize applying live settings.
 Three qualified overload/processing failures within 120 seconds already establish sustained backoff. Later independently submitted requests may move a soft prompt-cache/thread/session mapping to an eligible sibling at that first trip; waiting for nine failures before isolation caused unnecessary repeated rejection during the October 12 incident. For example, failures interleaved with successes on A still move the next movable request to B when B passes the strategy, quota and cap checks. A lone owner or an all-unavailable alternative pool retains the existing fallback. Required response/file/bridge/turn-state ownership is unchanged; no accepted request is newly replayed. Burst-only cooldown does not release warm owners.
 
 This reduces repeated admissions to failing accounts; it cannot accelerate upstream generation or repair a provider-wide incident. Signals remain replica-local and writes retain settlement ordering. Isolation still controls the longer hold duration, including its existing disable setting.
+
+## Safety-policy blocks and deactivated workspaces (2026-10-19)
+
+Round 2 (`openspec/changes/backport-upstream-october-reliability-2`) ports two routing fixes:
+
+- **Safety-policy blocks (#2131).** A `misalignment_policy_violation` whose message starts with "This request was blocked by our safety systems." (status none or 400) reproduces on every account. It is forwarded unchanged and never written to account health. The fork keeps its message-aware penalty predicate, including round 1's code-less usage-limit recognition. `cyber_policy` and security-work routing are unchanged. The WebSocket and HTTP-bridge paths were already neutral for this code; route tests now pin it.
+- **Deactivated workspaces (#2573).** The exact `deactivated_workspace` code deactivates only the selected routing record. Unbound pre-visible requests fail over, and owner-bound ones surface the rejection.
+  - Fork extension: for API-key requests, the deactivation is written only after the reservation is settled, both on the first dispatch and on the redispatch after a forced token refresh. Upstream defers only the first site.
+  - Example: a file-pinned keyed request gets 401, refreshes, then gets HTTP 402 `deactivated_workspace`. The client receives the 402, every reservation for the key is closed, then the account becomes `deactivated`, and no sibling is tried.
+  - Delivery scope: HTTP 402 and status-less terminal frames. A pre-visible HTTP 500 keeps the generic server-error retry, as on upstream.

@@ -207,3 +207,7 @@ An instance with accounts `alice@corp.com` (workspace W1) + 12 others, a custom 
 - `senpi` traffic appears in `clients` under `other` and inflates `clients_other_ratio`
 - the strings `alice`, `corp.com`, `W1`, `corp-internal-gpt`, `senpi` appear nowhere in the
   serialized payload (schema snapshot test enforces this)
+
+## Codex CLI user-agent family (2026-10-19)
+
+The interactive Codex CLI sends `codex_cli_rs/<version>`, which now joins `codex_exec` and `codex-tui` in the `codex-cli` family instead of falling through to `other` (upstream #2517, `openspec/changes/backport-upstream-october-reliability-2`).

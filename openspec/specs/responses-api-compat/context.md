@@ -487,3 +487,14 @@ Archive caveat: the still-active change `add-model-source-websocket` carries
 older deltas for the same three requirements. Archive it with spec updates
 skipped, or re-apply this wording afterwards. History:
 `openspec/changes/archive/2026-10-15-route-source-only-models-off-subscription-owner-pin/`.
+
+## Early HTTP owner publication, bridge model-transition fork, typed file failover (2026-10-19)
+
+Round 2 (`openspec/changes/backport-upstream-october-reliability-2`) ports three upstream fixes:
+
+- **Early owner publication (#2111).** An HTTP Responses attempt publishes each upstream response ID to the bounded process owner cache before delivering the event that exposes it. A same-replica `previous_response_id` follow-up therefore resolves its account while the request-log write is still pending. Cross-replica readiness is unchanged.
+  - Locally generated IDs and events never count as ownership evidence.
+  - The shared lifecycle set now includes `response.queued` and `response.in_progress`. The WebSocket and bridge suites were rerun for that change.
+  - Fork adaptation: when the capacity-replay prelude hold discards an attempt, its ID is never published, neither from the held `response.created` nor from the capacity terminal that carries the same ID. Held lifecycle frames are published when the hold releases.
+- **Bridge model-transition fork (#2083).** A bridge model switch that meets `continuity_owner_conflict` forks once to a fresh account-neutral lane, but only for an account-neutral fresh replay with no `previous_response_id` and no file pin.
+- **Typed file failover (#2469).** File operations use typed dispatch provenance. A finalize whose poll already returned on account A never replays on another account.

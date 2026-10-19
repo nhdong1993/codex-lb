@@ -64,3 +64,7 @@ signal during close. Native HTTP queue limits and upstream quota/owner failures 
   constant validation only. They intentionally avoid request-scoped overrides,
   runtime-derived effective timeout values, payloads, API keys, access tokens,
   raw affinity keys, account emails, and other high-cardinality identifiers.
+
+## Abandoned shared waits (2026-10-19)
+
+A shared future whose every waiter has already given up (routine after an SSE keepalive timeout) has its exception consumed once, so it no longer surfaces as an "exception was never retrieved" ERROR log (upstream #2427, `openspec/changes/backport-upstream-october-reliability-2`). Waiter and cancellation semantics are unchanged.

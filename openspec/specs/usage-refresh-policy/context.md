@@ -193,3 +193,11 @@ Ordinary refreshes have no check generation, so evidence clearing checks the per
 Credit-aware status uses unlimited credits or a positive spendable balance, not the bare `credits_has` flag. For example, a persisted weekly quota block with `credits_has=true` and `credits_balance=0` stays blocked; a newer positive balance can clear it. Both exhausted windows without usable credits retain the secondary quota/reset guard. Foreground advisory usage rules, disabled accounts, and reset-credit coupons are unchanged.
 
 An upstream code-less message such as "The usage limit has been reached" requests the same tracked, coalesced usage refresh as `usage_limit_reached`. The existing fresh-session ownership, debounce, singleflight and eligibility checks remain responsible for bounded work. Explicit request errors quoting that sentence do not trigger this quota refresh. See [spec.md](spec.md).
+
+## Any-window reset recovery and workspace deactivation (2026-10-19)
+
+Round 2 (`openspec/changes/backport-upstream-october-reliability-2`) ports three upstream refresh behaviors:
+
+- **Reset-confirmed recovery (#2405).** Recovery is no longer limited to Free monthly windows. A `rate_limited` account returns to `active` when exactly one quota window (primary, secondary or monthly) has a reset matching the stored `reset_at` within 5 s, and usage history proves that window rolled. The account stays blocked when its own 5h window is still exhausted. The fork's reset-credit redemption benefits directly: a redeemed credit resets a window before the predicted deadline. History reads happen only for the refreshed account and only when it is rate-limited with both timestamps; they are time-filtered, not row-capped. The upstream dashboard-snapshot and refresh-policy plumbing (#2233, #2261) was not imported.
+- **Force Probe snapshot (#2524).** Probe settlement copies the account and usage rows before the read session closes, because session teardown expires ORM attributes.
+- **Workspace deactivation (#2573).** Refresh treats `deactivated_workspace` as a terminal signal for that record only.

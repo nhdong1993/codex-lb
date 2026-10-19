@@ -30,6 +30,6 @@
 
 ## 4. Verify and hand off
 
-- [ ] 4.1 Run the global gates and end-to-end scenarios; record results and limitations in `verification.md`.
-- [ ] 4.2 Sync delta specs and stable context into canonical specs; validate strictly.
+- [x] 4.1 Run the global gates and end-to-end scenarios; record results and limitations in `verification.md`.
+- [x] 4.2 Sync delta specs and stable context into canonical specs; validate strictly.
 - [ ] 4.3 Archive the change after the operator accepts and requests it.

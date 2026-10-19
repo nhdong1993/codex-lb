@@ -139,7 +139,7 @@ unchanged. Benchmark methodology and limitations are recorded in the archived
 
 ## Selective HA fingerprint and routing backport (2026-09-10)
 
-Every enabled model-scheduler replica warms the existing hourly client-version cache before leader-gated model refresh. This prevents HA followers from indefinitely presenting a stale non-native fingerprint. The fallback is 0.153.4, while explicit overrides, failed-lookup fallback, and scheduler disablement retain their existing meanings. No request-path version fetch or extra detached task is added.
+Every enabled model-scheduler replica warms the existing hourly client-version cache before leader-gated model refresh. This prevents HA followers from indefinitely presenting a stale non-native fingerprint. The fallback was then 0.153.4 (raised to 0.163.0 on 2026-10-19, below), while explicit overrides, failed-lookup fallback, and scheduler disablement retain their existing meanings. No request-path version fetch or extra detached task is added.
 
 Subscription routing hints now come from the final normalized model and requested tier, independent of inbound LB API-key credentials or the optional ChatGPT account header. For example, a Fast request emits `model=gpt-5.4;tier=priority`; an actual response reporting another tier still uses that actual tier for bookkeeping. Inbound hints are discarded, custom providers and model-less preconnects receive none, and reused sockets retain their original handshake. HTTP fallback, bridge reconnect, and compaction carry the same trusted intent. See [spec.md](spec.md) for the contracts.
 
@@ -150,3 +150,9 @@ The initial selective backport brought upstream #2174 and #2242 without the beta
 The selective security backport pins Rustls 0.23.45, rustls-webpki 0.103.15, aws-lc-rs 1.18.1 and aws-lc-sys 0.45.0 together in the lockfile. This excludes the Rustls handshake-level issue tracked by RUSTSEC-2026-0285 without importing release schema or transport refactors. For example, a locked helper build now uses the patched Rustls version while preserving TLS verification and the existing WebSocket/byte-budget protocol described in [spec.md](spec.md).
 
 The helper must be rebuilt during a separately authorized deployment; editing the lockfile alone does not update a running production binary. Validation uses the repository's Rust toolchain in an isolated build and synthetic local wire probes, never production credentials or account quota.
+
+## Round 2 security and fallback version (2026-10-19)
+
+Round 2 of the selective backport (`openspec/changes/backport-upstream-october-reliability-2`) moves the locked Rustls pin to 0.23.46 for RUSTSEC-2026-0346..0349 (secret-bearing Debug output, ECH buffered data, Brotli certificate decompression allocation, ServerHello key-exchange downgrade). It also requires urllib3 >= 2.8.0 (CVE-2026-97687/97689) and upgrades the installed `gzip`, `libpcre2-8-0`, `libsqlite3-0` and `perl-base` packages in the runtime image with an upgrade-only apt step.
+
+The unconfigured client-version fallback is now 0.163.0. It must stay at least the highest bootstrap `minimal_client_version`; gpt-6-luna needs 0.155.0, and a unit test enforces the floor numerically. It only matters on a cold or failed version lookup; live and cached versions, and operator overrides, still win. For example, with GitHub unreachable at startup, the old 0.153.4 fingerprint made the upstream catalog drop gpt-6-luna.

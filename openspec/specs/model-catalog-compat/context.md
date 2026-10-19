@@ -93,3 +93,7 @@ removal; future endpoint drift may require a new fallback correction. Source
 models remain separate even when names collide. Static catalog metadata does
 not configure the example three-model Free routing policy or alter live CLI
 catalog files.
+
+## GPT-6 output budget fallback (2026-10-19)
+
+`/v1/models` advertises `max_output_tokens: 128000` for gpt-6-astra, gpt-6-sol, gpt-6-luna and the fork-only gpt-6.1-sol when the upstream catalog carries no integer value; a catalog integer always wins (upstream #2528, `openspec/changes/backport-upstream-october-reliability-2`). gpt-6.1-sol was added because production observed exactly 128000 output tokens on it. The fallback is a conservative advertised budget, not a proof of the backend ceiling.

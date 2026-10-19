@@ -13,3 +13,7 @@ invokes its handler or leaves an in-flight registration behind. An already
 admitted Responses turn retains its finalization and reservation ownership until
 completion or the existing shared drain deadline. No shutdown timeout, HA
 rollout procedure, or active-session replay policy changes with this backport.
+
+## Deletion worker stop (2026-10-19)
+
+Stopping the account-deletion worker sets its wake event before cancelling, so a worker parked in its idle wait exits at once instead of holding shutdown for one interval (upstream #2362, `openspec/changes/backport-upstream-october-reliability-2`).

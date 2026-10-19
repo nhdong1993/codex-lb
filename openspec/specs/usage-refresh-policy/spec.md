@@ -219,7 +219,9 @@ The system MUST treat stored `prolite` account plan types as Pro-equivalent when
 
 Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exceeded` accounts back to `active` after it writes fresh usage snapshots that prove the blocked window has recovered. This reconciliation SHALL be recovery-only and SHALL NOT promote `active` accounts into blocked statuses. For `rate_limited` accounts, recovery evidence SHALL come from the most recently recorded main-window row: when a post-block refresh no longer reports a short primary window and the last primary sample's own reset deadline has elapsed (or no primary sample exists), a fresh long-window row recorded after the block that still reports usage below `100%` proves recovery. While the last primary sample still claims an unexpired window (or omits reset metadata), or the newer long-window row is itself exhausted, primary freshness SHALL keep gating recovery.
 
-A future persisted `reset_at` SHALL continue to block ordinary recovery except for a `rate_limited` Free account whose monthly usage history proves that the specific monthly window associated with the current block reset. This exception MUST require `blocked_at` and a future persisted `reset_at`, at least 30 seconds elapsed after `blocked_at`, a monthly baseline recorded strictly after `blocked_at` whose `reset_at` matches the persisted marker within five seconds, a real temporal reset in an adjacent monthly pair at or after that baseline, and both the transition's after sample and the latest monthly sample recorded after `blocked_at` with usage below `100%`. The reset pair MAY come from the current refresh or be selected from adjacent persisted post-block samples so recovery survives a process restart and tolerates sliding reset deadlines without comparing non-neighboring rows. Availability without that matching anchored transition, reset timestamp jitter, an exhausted latest window, or evidence for a non-Free account MUST NOT override the persisted cooldown.
+A future persisted `reset_at` SHALL continue to block ordinary recovery except for a `rate_limited` account whose usage history proves that the specific quota window associated with the current block reset. The exception SHALL be bound to a window, not to the account's plan: the scheduler MUST search each quota-window slot (`primary`, `secondary`, `monthly`) for post-block history containing a baseline whose `reset_at` matches the persisted marker within five seconds. The anchor MUST be unique, judged from the matching baselines themselves rather than from which slots went on to reset: when more than one slot carries a matching baseline the deadline does not identify which window the 429 came from, and the exception MUST NOT apply. Evidence resolved for reset-confirmed warm-up MUST NOT be reused as recovery evidence, because it carries no proof about which window produced the block. This exception MUST require `blocked_at` and a future persisted `reset_at`, at least 30 seconds elapsed after `blocked_at`, a baseline recorded strictly after `blocked_at` in the anchored slot, a real temporal reset in an adjacent pair from that same slot at or after that baseline, and both the transition's after sample and the latest sample of that slot recorded after `blocked_at` with usage below `100%`.
+
+When the anchored window is not the short window, recovery MUST additionally be withheld while the account's short (`primary`) window reports usage at or above `100%` and has not itself elapsed. This is the only cross-window condition: it prevents a long-window reset from releasing an account whose own short window is still spent. A primary-slot row is excluded from this rule only when it reports a recognized long window's duration, because upstream also delivers a weekly quota through the primary slot and that row is a long window in the short window's slot. An unrecognized duration MUST be treated as the short window, so a change to the short window's length cannot silently disable this rule. A slot known to carry zero quota capacity for the plan is likewise not a window for this rule, because the Free primary row is a normalization artifact of the monthly-only payload rather than a live short window; an unknown capacity for an unrecognized stored plan is NOT evidence that a reported window does not exist and MUST NOT exclude the slot. A long window at `100%` MUST NOT withhold recovery, because whether such a window still permits traffic depends on credit-backed quota and weekly-shape normalization that the quota layer owns; if it truly is spent, upstream re-blocks the account with a fresh deadline rather than a stale one. A short window whose own `reset_at` has already passed is stale exhaustion evidence and MUST NOT withhold recovery, which also covers upstream having stopped reporting it. The reset pair MAY come from the current refresh or be selected from adjacent persisted post-block samples so recovery survives a process restart and tolerates sliding reset deadlines without comparing non-neighboring rows. Availability without that matching anchored transition, reset timestamp jitter, an exhausted latest window, or a transition in a slot that does not anchor the persisted marker MUST NOT override the persisted cooldown.
 
 Every recovery write MUST compare the current status, deactivation reason, `reset_at`, and `blocked_at`. A successful write SHALL set the account to `active` and clear the deactivation reason and both block markers. A compare-and-set miss MUST preserve the newer row and MUST NOT make the stale account snapshot eligible for warm-up.
 
@@ -251,8 +253,8 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 - **WHEN** an account is persisted as `rate_limited`
 - **AND** the last primary usage sample predates the block but still claims an unexpired reset deadline
 - **AND** a later refresh recorded only a fresh long-window row
-- **AND** no qualifying reset-confirmed Free monthly transition matches the current block
-- **THEN** the account stays `rate_limited` until fresh primary evidence arrives, the primary sample's reset deadline elapses, or a qualifying monthly reset is confirmed
+- **AND** no qualifying anchored reset transition in any quota window matches the current block
+- **THEN** the account stays `rate_limited` until fresh primary evidence arrives, the primary sample's reset deadline elapses, or a qualifying anchored window reset is confirmed
 
 #### Scenario: Scheduler recovers a legacy rate-limited account without a block marker
 - **WHEN** an account is persisted as `rate_limited`
@@ -274,7 +276,7 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 - **WHEN** an account is persisted as `rate_limited`
 - **AND** its persisted rate-limit reset deadline is still in the future
 - **AND** a later background usage refresh writes fresh available usage
-- **AND** no qualifying reset-confirmed Free monthly transition matches the current block
+- **AND** no qualifying anchored reset transition in any quota window matches the current block
 - **THEN** the scheduler leaves the account `rate_limited`
 
 #### Scenario: Confirmed Free monthly reset recovers before a stale deadline
@@ -328,9 +330,31 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 
 #### Scenario: Plus primary exhaustion is not released by monthly evidence
 - **GIVEN** a Plus account is persisted as `rate_limited`
-- **AND** its current primary usage reports `100%`
+- **AND** its current primary usage reports `100%` with an unelapsed reset deadline
 - **WHEN** background usage refresh observes available long-window usage or an unrelated reset transition
-- **THEN** the account remains `rate_limited`
+- **THEN** the account remains `rate_limited`, because the primary window carries plan quota and is still exhausted
+
+#### Scenario: Paid account recovers after an anchored early window reset
+- **GIVEN** a Pro account is persisted as `rate_limited` with a future deadline matching its exhausted 7d window
+- **AND** upstream re-anchors that window early and reports it at `0%`
+- **WHEN** background usage refresh records the post-block transition in that window's slot
+- **AND** no other window carrying plan quota is currently exhausted
+- **THEN** the scheduler marks the account `active`
+- **AND** it clears persisted `reset_at` and `blocked_at`
+
+#### Scenario: A reset in a slot that does not anchor the block is not evidence
+- **GIVEN** an account is persisted as `rate_limited` with a deadline matching one quota window
+- **AND** a different quota window records a real reset transition
+- **WHEN** background usage refresh evaluates recovery
+- **THEN** the unanchored transition is not treated as evidence for the current block
+- **AND** the account remains `rate_limited`
+
+#### Scenario: An elapsed exhausted short window does not withhold recovery
+- **GIVEN** an account qualifies for anchored reset recovery in its long window
+- **AND** its short window reports `100%` but that window's own reset deadline has already passed
+- **WHEN** background usage refresh evaluates recovery
+- **THEN** the stale short-window sample does not withhold the transition
+- **AND** the scheduler marks the account `active`
 
 #### Scenario: Scheduler recovers a stale quota-exceeded account from fresh secondary usage
 - **WHEN** an account is persisted as `quota_exceeded`
@@ -357,6 +381,69 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 #### Scenario: Scheduler clears stale deactivation reasons on recovery
 - **WHEN** background usage refresh recovers a `rate_limited` or `quota_exceeded` account to `active`
 - **THEN** the scheduler writes `deactivation_reason` as `NULL`
+
+#### Scenario: An obsolete row from a previous plan does not withhold recovery
+- **GIVEN** an account was downgraded from a paid plan to Free
+- **AND** its newest `secondary` row is an exhausted, unelapsed sample left over from the paid era
+- **WHEN** background usage refresh evaluates anchored monthly reset evidence
+- **THEN** the leftover paid long-window sample does not withhold recovery
+- **AND** the scheduler marks the account `active`
+
+#### Scenario: A leftover long-window sample does not withhold recovery
+- **GIVEN** a Free account whose live quota is reported in a slot other than `monthly`
+- **AND** an exhausted, unelapsed `monthly` row remains from an earlier quota shape
+- **WHEN** background usage refresh evaluates anchored reset evidence in the live slot
+- **THEN** the leftover long-window row does not withhold recovery
+- **AND** the scheduler marks the account `active`
+
+#### Scenario: A spent long window does not withhold a short-window recovery
+- **GIVEN** an account qualifies for anchored reset recovery in its short window
+- **AND** its long window reports `100%` with an unelapsed deadline
+- **WHEN** background usage refresh evaluates recovery
+- **THEN** the scheduler marks the account `active`
+
+#### Scenario: An exhausted short window withholds a long-window recovery
+- **GIVEN** an account qualifies for anchored reset recovery in its long window
+- **AND** its short window reports `100%` with an unelapsed deadline
+- **WHEN** background usage refresh evaluates recovery
+- **THEN** the account remains `rate_limited`
+
+#### Scenario: An unrecognized plan still honors a reported exhausted short window
+- **GIVEN** an account's stored plan is unrecognized, so no window capacity is known
+- **AND** upstream reports its short window at `100%` with an unelapsed deadline
+- **WHEN** background usage refresh evaluates anchored long-window reset evidence
+- **THEN** the account remains `rate_limited`
+
+#### Scenario: A weekly row in the primary slot does not withhold recovery
+- **GIVEN** an account whose weekly quota is reported in the `primary` slot at `100%` with an unelapsed deadline
+- **WHEN** background usage refresh evaluates anchored long-window reset evidence
+- **THEN** that row is treated as a long window rather than the short window
+- **AND** the scheduler marks the account `active`
+
+#### Scenario: An ambiguous reset anchor does not override the cooldown
+- **GIVEN** a blocked account whose persisted deadline matches a post-block reset baseline in more than one quota slot
+- **WHEN** background usage refresh resolves anchored reset evidence
+- **THEN** no slot is treated as the anchor
+- **AND** the account keeps its persisted cooldown
+
+#### Scenario: An unrecognized short-window duration still withholds recovery
+- **GIVEN** an account's `primary` row reports `100%` with an unelapsed deadline and a duration that is neither the short window's default nor a recognized long window
+- **WHEN** background usage refresh evaluates anchored long-window reset evidence
+- **THEN** the row is treated as the short window
+- **AND** the account remains `rate_limited`
+
+#### Scenario: A matching baseline in an unreset slot still makes the anchor ambiguous
+- **GIVEN** a blocked account whose persisted deadline matches post-block baselines in two quota slots
+- **AND** only one of those slots recorded a reset transition
+- **WHEN** background usage refresh resolves anchored reset evidence
+- **THEN** the anchor is ambiguous and no slot is treated as the anchor
+- **AND** the account keeps its persisted cooldown
+
+#### Scenario: Warm-up evidence never overrides a cooldown
+- **GIVEN** a blocked account whose current monthly pair confirms a reset that does not match its persisted deadline
+- **WHEN** background usage refresh resolves reset evidence
+- **THEN** that pair is available to reset-confirmed warm-up
+- **AND** it is not available as recovery evidence
 
 ### Requirement: Usage refresh does not trust elapsed reset windows
 
@@ -1668,7 +1755,7 @@ On the HTTP bridge / forwarded compact path the caller passes an `api_key_reserv
 
 ### Requirement: Force Probe settles replica-local probing health
 
-After the operator Force Probe request and its immediate usage refresh complete, the system MUST report the result to the process-local load balancer. Before settling an HTTP 2xx response, the load balancer MUST reload the refreshed standard usage rows and apply the same elapsed-window, weekly-only-primary, zero-primary-capacity, plan-applicable monthly-window, and long-window normalization used by ordinary account selection. The settlement MUST apply only when replica-local runtime state has not changed since snapshot loading began, so a newer failure or other health observation cannot be cleared by an older probe result. An accepted 2xx settlement MUST count as one successful probe observation, clear replica-local transient error state, and advance the existing fixed probe-success state machine only when the normalized status and usage remain eligible to probe. Reaching the fixed success-streak requirement MUST return the account to `HEALTHY` routing.
+After the operator Force Probe request and its immediate usage refresh complete, the system MUST report the result to the process-local load balancer. Before settling an HTTP 2xx response, the load balancer MUST reload the refreshed standard usage rows and apply the same elapsed-window, weekly-only-primary, zero-primary-capacity, plan-applicable monthly-window, and long-window normalization used by ordinary account selection. The loaded account and usage snapshot MUST remain usable after its repository session rolls back and closes, without lazy database reads during settlement. The settlement MUST apply only when the replica-local health-observation version has not changed since snapshot loading began, so a newer failure or other health observation cannot be cleared by an older probe result. An accepted 2xx settlement MUST count as one successful probe observation, clear replica-local transient error state, and advance the existing fixed probe-success state machine only when the normalized status and usage remain eligible to probe. Reaching the fixed success-streak requirement MUST return the account to `HEALTHY` routing.
 
 A non-2xx upstream response or the network-failure sentinel MUST NOT count as a successful observation and MUST reset an in-progress probe-success streak. Probe settlement MUST NOT override a persisted hard-blocked status or usage condition, invent a persistent account error, or change the Force Probe response schema.
 
@@ -1722,6 +1809,22 @@ A non-2xx upstream response or the network-failure sentinel MUST NOT count as a 
 - **WHEN** the older successful probe attempts to settle
 - **THEN** settlement is rejected as stale
 - **AND** the newer transient error state and reset success streak remain intact
+
+#### Scenario: Repository teardown does not discard accepted probe settlement
+
+- **GIVEN** an accepted Force Probe has completed its usage refresh
+- **AND** its settlement read session rolls back and closes before the account lock is reacquired
+- **WHEN** refreshed usage is absent, partially populated, or includes both short and applicable long windows
+- **THEN** settlement uses loaded account and usage snapshots without accessing expired ORM attributes
+- **AND** eligible probing accounts advance the existing success streak
+- **AND** blocked or draining accounts retain the existing status and usage protections
+
+#### Scenario: Lease-only activity preserves accepted probe settlement
+
+- **GIVEN** an accepted Force Probe has loaded its account and usage snapshot
+- **AND** another request acquires and releases a lease without recording new health evidence
+- **WHEN** Force Probe settles after its repository session closes
+- **THEN** the lease-only version changes do not discard the successful probe observation
 
 ### Requirement: Implausible persisted rate-limit deadlines do not block recovery
 
@@ -2393,3 +2496,20 @@ Routine token rotation MUST NOT prevent a recognized paid sample from clearing e
 - **WHEN** routine rotation commits after recording the first Free sample but before requesting priority verification
 - **THEN** the same credential generation can enqueue or reopen verification within the existing budget
 - **AND** a genuine replacement, including one with unchanged token values, still fences the stale enqueue
+
+### Requirement: Explicit workspace deactivation is a scoped terminal refresh signal
+
+Usage refresh MUST recognize the exact structured `deactivated_workspace` error code through the existing permanent-failure status policy and mark only the selected workspace account record `deactivated`. Bare HTTP 402 or 404 responses without a recognized permanent code or an explicit account-deactivation message MUST NOT change account status or routing availability.
+
+#### Scenario: Workspace rejection during refresh excludes the selected record
+
+- **GIVEN** two workspace account records for one identity
+- **WHEN** usage refresh for one record returns `deactivated_workspace`
+- **THEN** only that record is marked `deactivated`
+- **AND** the other workspace record retains its status
+
+#### Scenario: Ambiguous payment status preserves the account
+
+- **WHEN** usage refresh receives HTTP 402 with no terminal code or explicit account-deactivation message
+- **THEN** the account retains its status and routing availability
+- **AND** the failure remains eligible for the existing later refresh retry policy
