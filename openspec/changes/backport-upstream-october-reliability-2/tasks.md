@@ -16,7 +16,7 @@
 - [x] 3.1 Let the deletion scheduler exit its wait promptly (`c62bdd80`).
 - [x] 3.2 Consume a shared future's exception when no waiter is left (`f94dd509`).
 - [x] 3.3 Retain failed immediate invalidations (`fbb97519`).
-- [ ] 3.4 Snapshot force-probe state before session cleanup (`e4bc88ff`).
+- [x] 3.4 Snapshot force-probe state before session cleanup (`e4bc88ff`).
 - [ ] 3.5 Recover a rate-limited account on any confirmed window reset (`3d501ac5`).
 - [ ] 3.6 Keep a soft sticky owner that is only request-locally unavailable (`81b9fbd5`).
 - [ ] 3.7 Stop waiting on a hard affinity owner the caller excluded (`2c853992`).
