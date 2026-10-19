@@ -8,7 +8,7 @@
 
 - [x] 2.1 Advertise GPT-6 max output tokens, including `gpt-6.1-sol` (`13ddf396`).
 - [x] 2.2 Raise the fallback Codex client version to 0.163.0, with a bootstrap-floor invariant test.
-- [ ] 2.3 Map the `codex_cli_rs` user agent to the `codex-cli` family (`402c2f51`).
+- [x] 2.3 Map the `codex_cli_rs` user agent to the `codex-cli` family (`402c2f51`).
 - [ ] 2.4 Port the base-instruction edge-case tests only (`d617212a`).
 
 ## 3. Reliability fixes (B)
