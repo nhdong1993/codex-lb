@@ -78,3 +78,12 @@ The following fork behaviors must survive:
 **Fallback:** revert the #2205 commit and redeploy. This stops future initial warm-ups. It does not undo warm-ups already sent, and no data cleanup is needed.
 
 The initial warm-ups start monthly windows for many Free accounts within a few hours, so their monthly resets may cluster about a month later. Confirm this from later monthly samples; do not assume it.
+
+## Screenshots
+
+Captured with `frontend/screenshots/upstream-backport-round3.spec.ts`, which uses synthetic fixtures through a Vite dev server: no credentials, no live upstream. Each "before" image is taken on the tree before the UI commit, and the spec asserts the old behavior there.
+
+- **#2060, Resume for deactivated accounts:**
+  - `screenshots/before-dashboard-list-1440.png` / `screenshots/after-dashboard-list-1440.png`: dashboard list; the deactivated row gains Resume, the re-auth-required row does not.
+  - `screenshots/before-dashboard-cards-640.png` / `screenshots/after-dashboard-cards-640.png` and the `-1024` pair: responsive cards.
+  - `screenshots/before-accounts-deactivated-1440.png` / `screenshots/after-accounts-deactivated-1440.png`: Accounts page actions.
