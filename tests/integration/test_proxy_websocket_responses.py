@@ -7161,6 +7161,99 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     assert fake_upstream.closed is True
 
 
+def test_backend_responses_websocket_attributes_anonymous_output_to_created_response(app_instance, monkeypatch):
+    """An anonymous output frame belongs to the created response, not the pipelined sibling (#2357)."""
+
+    def _event(payload: dict[str, object]) -> _FakeUpstreamMessage:
+        return _FakeUpstreamMessage("text", text=json.dumps(payload, separators=(",", ":")))
+
+    usage = {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+    fake_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [_event({"type": "response.created", "response": {"id": "resp_r3_owner", "status": "in_progress"}})],
+            [
+                # Item frames carry no response id; this one belongs to resp_r3_owner,
+                # which upstream already created, while the sibling still waits.
+                _event(
+                    {
+                        "type": "response.output_text.delta",
+                        "item_id": "msg_r3_owner",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": "owner text",
+                    }
+                ),
+                _event(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_r3_owner", "status": "completed", "usage": usage},
+                    }
+                ),
+                _event({"type": "response.created", "response": {"id": "resp_r3_sibling", "status": "in_progress"}}),
+                _event(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_r3_sibling", "status": "completed", "usage": usage},
+                    }
+                ),
+            ],
+        ],
+    )
+    log_calls: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return SimpleNamespace(id="acct_ws_r3_pipelined"), fake_upstream
+
+    async def fake_write_request_log(self, **kwargs):
+        del self
+        log_calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    def _create(text: str) -> str:
+        return json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "instructions": "",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": text}]}],
+                "stream": True,
+            }
+        )
+
+    completed: list[str] = []
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(_create("owner"))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            websocket.send_text(_create("sibling"))
+            while len(completed) < 2:
+                event = json.loads(websocket.receive_text())
+                if event["type"] == "response.completed":
+                    completed.append(event["response"]["id"])
+
+    assert completed == ["resp_r3_owner", "resp_r3_sibling"]
+    rows = {call["request_id"]: call for call in log_calls if call.get("status") == "success"}
+    assert rows["resp_r3_owner"]["latency_first_token_ms"] is not None
+    assert rows["resp_r3_sibling"]["latency_first_token_ms"] is None
+
+
 def test_backend_responses_websocket_masks_top_level_previous_response_not_found_from_chatgpt_backend(
     app_instance,
     monkeypatch,
