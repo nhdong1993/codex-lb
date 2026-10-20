@@ -2122,8 +2122,7 @@ def _build_states(
     soft_drain_enabled: bool | None = None,
 ) -> tuple[list[AccountState], dict[str, Account]]:
     now = REAL_CLOCK.time() if now is None else now
-    # Background callers (quota planner, usage refresh) build from an empty
-    # runtime, where these knobs scale nothing; request paths pass the snapshot.
+    # Request and background callers pass their snapshot's values; None (tests, tools) = environment layer.
     tunables = routing_tunables or effective_routing_tunables()
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
@@ -2538,11 +2537,9 @@ def _state_from_account(
         else None
     )
 
-    settings = get_settings()
     if soft_drain_enabled is None:
-        # C2-3 resilience toggles: callers on the request path pass the
-        # dashboard value; anything else inherits the env alias / default.
-        soft_drain_enabled = resolve_resilience_toggles(None, startup_settings=settings).soft_drain_enabled
+        # C2-3 resilience toggles: callers pass the dashboard value; None (tests, tools) = env alias / default.
+        soft_drain_enabled = resolve_resilience_toggles(None, startup_settings=get_settings()).soft_drain_enabled
     new_tier = _sync_runtime_health_tier(
         account_id=account.id,
         status=status,
@@ -2735,11 +2732,13 @@ def background_recovery_state_from_account(
     account: Account,
     primary_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
+    routing_tunables: RoutingTunables | None = None,
+    soft_drain_enabled: bool | None = None,
 ) -> AccountState:
     """Evaluate recovery without live runtime state.
 
     Seed a throwaway runtime from the persisted block marker so post-block usage
-    can clear stale reset guards after a balancer restart.
+    can clear stale reset guards after a balancer restart, using the caller's dashboard-snapshot tunables.
     """
 
     runtime = RuntimeState()
@@ -2759,6 +2758,8 @@ def background_recovery_state_from_account(
         secondary_entry=secondary_entry,
         runtime=runtime,
         now=now,
+        routing_tunables=routing_tunables,
+        soft_drain_enabled=soft_drain_enabled,
     )
     if account.status == AccountStatus.RATE_LIMITED:
         freshness_entry = _rate_limited_freshness_entry(
