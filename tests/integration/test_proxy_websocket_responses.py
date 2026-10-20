@@ -6379,6 +6379,122 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
     assert replay_payload["client_metadata"] == {"x-codex-installation-id": "account-installation"}
 
 
+def test_backend_responses_websocket_retires_denied_injected_anchor(app_instance, monkeypatch):
+    """A proxy-injected anchor upstream denied without a safe replay is not injected into the next turn (#2248)."""
+    from app.modules.proxy._service.websocket import helpers as websocket_helpers_module
+
+    def _event(payload: dict[str, object]) -> _FakeUpstreamMessage:
+        return _FakeUpstreamMessage("text", text=json.dumps(payload, separators=(",", ":")))
+
+    def _completed_turn(response_id: str, *, call_id: str | None = None) -> list[_FakeUpstreamMessage]:
+        messages = [_event({"type": "response.created", "response": {"id": response_id, "status": "in_progress"}})]
+        if call_id is not None:
+            messages.append(
+                _event(
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": {
+                            "type": "function_call",
+                            "id": f"fc_{call_id}",
+                            "call_id": call_id,
+                            "name": "shell",
+                            "arguments": "{}",
+                        },
+                    }
+                )
+            )
+        messages.append(_event({"type": "response.completed", "response": {"id": response_id, "status": "completed"}}))
+        return messages
+
+    denial = _event(
+        {
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "code": "previous_response_not_found",
+                "message": "Previous response with id 'resp_r3_anchor' not found.",
+                "param": "previous_response_id",
+            },
+        }
+    )
+    # A reconnect after the fail-closed turn gets a socket that completes the next
+    # turn, so the scenario does not depend on whether the proxy reconnects.
+    upstreams = [
+        _SequencedUpstreamWebSocket(
+            [],
+            deferred_message_batches=[
+                _completed_turn("resp_r3_anchor", call_id="call_1"),
+                [denial],
+                _completed_turn("resp_r3_after"),
+            ],
+        )
+    ]
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        if upstreams[-1].sent_text:
+            upstreams.append(
+                _SequencedUpstreamWebSocket([], deferred_message_batches=[_completed_turn("resp_r3_after")])
+            )
+        return SimpleNamespace(id="acct_ws_r3_anchor", codex_installation_id="account-installation"), upstreams[-1]
+
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    user_one = {"role": "user", "content": [{"type": "input_text", "text": "one"}]}
+    call_output = {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+    user_two = {"role": "user", "content": [{"type": "input_text", "text": "two"}]}
+
+    def _create(input_items: list[dict[str, object]]) -> str:
+        return json.dumps({"type": "response.create", "model": "gpt-5.4", "input": input_items, "stream": True})
+
+    def _receive_until_terminal(websocket) -> dict[str, object]:
+        while True:
+            event = json.loads(websocket.receive_text())
+            if event.get("type") in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                return event
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(_create([user_one]))
+            assert _receive_until_terminal(websocket)["type"] == "response.completed"
+
+            # Incremental Codex form: the output for call_1 without its function_call
+            # item is not a self-contained fresh replay, so the denial fails closed.
+            websocket.send_text(_create([user_one, call_output]))
+            assert _receive_until_terminal(websocket)["type"] != "response.completed"
+            assert websocket_helpers_module._is_websocket_stale_previous_response(
+                previous_response_id="resp_r3_anchor",
+                api_key_id=None,
+            )
+
+            websocket.send_text(_create([user_one, call_output, user_two]))
+            assert _receive_until_terminal(websocket)["type"] == "response.completed"
+
+    sent_frames = [json.loads(text) for upstream in upstreams for text in upstream.sent_text]
+    denied_turn = [frame for frame in sent_frames if frame.get("input") == [call_output]]
+    assert denied_turn and denied_turn[0]["previous_response_id"] == "resp_r3_anchor"
+    final_turn = [frame for frame in sent_frames if user_two in cast(list[object], frame.get("input") or [])]
+    assert len(final_turn) == 1
+    assert "previous_response_id" not in final_turn[0]
+    assert final_turn[0]["input"] == [user_one, call_output, user_two]
+
+
 def test_v1_responses_websocket_masks_invalid_request_previous_response_not_found_without_retry(
     app_instance,
     monkeypatch,
