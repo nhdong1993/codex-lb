@@ -3,7 +3,7 @@
 - [x] 1.1 Retire a denied proxy-injected WebSocket anchor instead of re-injecting it (`6b3d031e`, #2248), with a WebSocket route regression.
 - [x] 1.2 Bound the aggregate detached-retirement lock wait (`09b8e891`, #2315).
 - [x] 1.3 Route anonymous output frames to the created response (`976d20b7`, #2357).
-- [ ] 1.4 Reuse system trust for Python WSS (`bb98cdf4`, #2110).
+- [x] 1.4 Reuse system trust for Python WSS (`bb98cdf4`, #2110).
 - [ ] 1.5 Skip unused HTTP preparation serialization (`ff6f6a17`, #2113), with the fork's settings-based budget in its test.
 
 ## 2. Warm-up
