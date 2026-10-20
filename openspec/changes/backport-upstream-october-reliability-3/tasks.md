@@ -13,7 +13,7 @@
 ## 3. Dashboard reads
 
 - [x] 3.1 Bound the conversation presence raw tail (`a408b57a`, #2235).
-- [ ] 3.2 Memoize the trailing-demand aggregate (`913c6eb5`, #2236).
+- [x] 3.2 Memoize the trailing-demand aggregate (`913c6eb5`, #2236).
 
 ## 4. UI
 
