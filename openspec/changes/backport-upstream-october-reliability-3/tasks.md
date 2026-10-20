@@ -8,7 +8,7 @@
 
 ## 2. Warm-up
 
-- [ ] 2.1 Warm unused Free quota once (`a7785a80`, #2205), with a background-repository guard test and the routing doc sentence.
+- [x] 2.1 Warm unused Free quota once (`a7785a80`, #2205), with a background-repository guard test and the routing doc sentence.
 
 ## 3. Dashboard reads
 
