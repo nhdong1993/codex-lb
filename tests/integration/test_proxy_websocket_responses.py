@@ -6460,7 +6460,7 @@ def test_backend_responses_websocket_retires_denied_injected_anchor(app_instance
     call_output = {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
     user_two = {"role": "user", "content": [{"type": "input_text", "text": "two"}]}
 
-    def _create(input_items: list[dict[str, object]]) -> str:
+    def _create(input_items: list[Any]) -> str:
         return json.dumps({"type": "response.create", "model": "gpt-5.4", "input": input_items, "stream": True})
 
     def _receive_until_terminal(websocket) -> dict[str, object]:
