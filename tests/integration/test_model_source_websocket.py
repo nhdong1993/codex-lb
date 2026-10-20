@@ -235,7 +235,9 @@ async def test_source_websocket_terminal_accounting(async_client, app_instance, 
         elif mode == "truncated":
             await ws.close()
         elif mode == "failed":
-            await ws.send_json({"type": "error", "error": {"message": "token-native https://secret.invalid"}})
+            await ws.send_json(
+                {"type": "error", "error": {"code": "upstream_eof", "message": "token-native https://secret.invalid"}}
+            )
         elif mode == "incomplete":
             await ws.send_json(
                 {
@@ -281,6 +283,8 @@ async def test_source_websocket_terminal_accounting(async_client, app_instance, 
         assert len(reservations) == len(rows) == 1
         assert reservations[0].status == expected_status
         assert "token-native" not in json.dumps(events)
+        assert rows[0].upstream_error_code == ("upstream_eof" if mode == "failed" else None)
+        assert "secret.invalid" not in json.dumps({column: str(value) for column, value in vars(rows[0]).items()})
         if mode == "warmup_output":
             assert not any(event["type"] == "response.output_text.delta" for event in events)
         if mode == "warmup":

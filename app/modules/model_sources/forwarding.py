@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractContextManager, AsyncExitStack, nullcontext
 from dataclasses import dataclass, field
@@ -199,6 +200,8 @@ class SourceUsageHolder:
     # from the frames it hands to the transport and never mirrored from here.
     content_delivered: bool = False
     terminal_kind: Literal["completed", "incomplete", "failed", "error"] | None = None
+    # Sanitized code of the first failure terminal that carried one; never its message.
+    terminal_error_code: str | None = None
     delta_chars: int = 0
 
 
@@ -210,6 +213,7 @@ _NON_CONTENT_EVENT_TYPES = frozenset({"response.created", "response.in_progress"
 _SUCCESS_TERMINAL_EVENT_TYPES = frozenset({"response.completed", "response.incomplete"})
 _FAILURE_TERMINAL_EVENT_TYPES = frozenset({"response.failed", "error"})
 _FAILURE_TERMINAL_KINDS = frozenset({"failed", "error"})
+_SOURCE_FAILURE_CODE = re.compile(r"[a-z0-9][a-z0-9_.:-]{0,63}")
 _SOURCE_STREAM_CHUNK_BYTES = 4096
 
 
@@ -1473,6 +1477,8 @@ class SourceStreamUsageParser:
             return
         if kind == "failure_terminal":
             holder.terminal_kind = "error" if event_type == "error" else "failed"
+            if holder.terminal_error_code is None:
+                holder.terminal_error_code = _source_failure_code(event, event_type)
             return
         holder.first_content_seen = True
         if kind == "success_terminal":
@@ -1485,6 +1491,32 @@ class SourceStreamUsageParser:
             delta = event.get("delta")
             if isinstance(delta, str):
                 holder.delta_chars += len(delta)
+
+
+def _source_failure_code(event: Mapping[str, JsonValue], event_type: str | None) -> str | None:
+    """The failure's ``code`` (else its type) as a request-log identifier, or ``None`` when unsafe.
+
+    Reads the fields the WebSocket error normalizer reads: ``response.error``
+    for ``response.failed``, the ``error`` object of an ``error`` record, or a
+    top-level ``code``/``error_type`` on an ``error`` event without one. The
+    message is never read, so provider text cannot reach the request log.
+    """
+
+    if event_type == "response.failed":
+        response = event.get("response")
+        error = response.get("error") if is_json_mapping(response) else None
+        if not is_json_mapping(error):
+            return None
+        source, keys = error, ("code", "type")
+    else:
+        error = event.get("error")
+        source, keys = (error, ("code", "type")) if is_json_mapping(error) else (event, ("code", "error_type"))
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            code = value.strip().lower()
+            return code if _SOURCE_FAILURE_CODE.fullmatch(code) else None
+    return None
 
 
 def _usage_from_responses_event(payload: Mapping[str, JsonValue]) -> SourceUsage | None:

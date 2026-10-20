@@ -753,6 +753,9 @@ class SourceDispatch:
                     error_code=error_code,
                     error_message=error_message,
                     upstream_status_code=upstream_status_code,
+                    upstream_error_code=(
+                        holder.terminal_error_code if holder is not None and status != "success" else None
+                    ),
                     transport=self.transport,
                     upstream_transport=self.upstream_transport,
                     source=self.request_log_source,

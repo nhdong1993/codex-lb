@@ -664,6 +664,46 @@ def test_responses_parser_classifies_a_typeless_error_record_as_a_failure_termin
     assert other.first_content_seen is False
 
 
+@pytest.mark.parametrize(
+    ("event", "code"),
+    [
+        ({"type": "error", "error": {"type": "server_error", "code": "upstream_eof", "message": "m"}}, "upstream_eof"),
+        ({"type": "error", "code": "Rate_Limit_Exceeded", "message": "m"}, "rate_limit_exceeded"),
+        ({"type": "error", "error_type": "Invalid_Request_Error", "message": "m"}, "invalid_request_error"),
+        ({"type": "error", "error": {"type": "Server_Error"}}, "server_error"),
+        ({"error": {"type": "server_error", "code": " overloaded "}}, "overloaded"),
+        (
+            {"type": "response.failed", "response": {"error": {"code": "context_length_exceeded"}}},
+            "context_length_exceeded",
+        ),
+        ({"type": "response.failed", "response": {"error": {"code": "bad code with spaces"}}}, None),
+        ({"type": "response.failed", "response": {"error": {"code": "x" * 65}}}, None),
+        ({"type": "response.failed", "response": {"error": {"code": 42, "type": "server_error"}}}, "server_error"),
+        ({"type": "response.failed", "response": {"status": "failed"}}, None),
+    ],
+)
+def test_responses_parser_records_a_sanitized_failure_code(event: dict[str, object], code: str | None) -> None:
+    holder = SourceUsageHolder()
+    SourceStreamUsageParser(holder, response_shape="responses").feed(_sse(event))
+
+    assert holder.terminal_kind in {"error", "failed"}
+    assert holder.terminal_error_code == code
+
+
+def test_responses_parser_keeps_the_first_failure_code() -> None:
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="responses")
+
+    parser.feed(_sse({"type": "response.output_text.delta", "delta": "x"}))
+    assert holder.terminal_error_code is None
+    parser.feed(_sse({"type": "error", "error": {"code": "upstream_eof", "message": "https://private.example"}}))
+    parser.feed(_sse({"type": "response.failed", "response": {"error": {"code": "server_error"}}}))
+    parser.feed(_sse({"type": "response.incomplete", "response": {"incomplete_details": {"reason": "upstream_eof"}}}))
+
+    assert holder.terminal_kind == "incomplete"
+    assert holder.terminal_error_code == "upstream_eof"
+
+
 def test_responses_parser_falls_back_to_any_response_id_when_created_was_not_seen() -> None:
     holder = SourceUsageHolder()
     parser = SourceStreamUsageParser(holder, response_shape="responses")

@@ -68,3 +68,14 @@ signal during close. Native HTTP queue limits and upstream quota/owner failures 
 ## Abandoned shared waits (2026-10-19)
 
 A shared future whose every waiter has already given up (routine after an SSE keepalive timeout) has its exception consumed once, so it no longer surfaces as an "exception was never retrieved" ERROR log (upstream #2427, `openspec/changes/backport-upstream-october-reliability-2`). Waiter and cancellation semantics are unchanged.
+
+## Source failure codes (2026-10-21)
+
+Source-routed Responses rows used to keep only codex-lb's own `model_source_response_failed`, so a relay's failure frame (for example a 169-byte `error` frame from `ch-relay`) left no trace and triage needed a packet capture. The shared Responses stream parser (`SourceStreamUsageParser`) now keeps the first valid failure code in `SourceUsageHolder.terminal_error_code`. `SourceDispatch.write_row()` stores that code in `upstream_error_code` for non-success rows. Because the code is captured in the shared parser, it covers the HTTP SSE stream, the native source WebSocket session and the WebSocket→HTTP bridge.
+
+- Only the code (or the type, if no code is present) is kept, and only when it matches `^[a-z0-9][a-z0-9_.:-]{0,63}$`. The message is never read, because WebSocket clients must keep seeing the redacted `Model source failed the response` (see `model-source-websocket`).
+- The first valid failure wins. A relay that sends `error` and then a synthesized `response.incomplete` still records the `error` code.
+- Telemetry maps codes outside `_SAFE_UPSTREAM_ERROR_CODES` to `other`, so source-specific codes stay on the instance.
+
+Example row: `status=error`, `error_code=model_source_response_failed`, `upstream_error_code=upstream_eof`, `upstream_status_code=200`.
+

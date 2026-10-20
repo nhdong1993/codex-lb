@@ -276,9 +276,46 @@ async def test_bridge_failed_response_is_sanitized_and_not_continuable(async_cli
                 }
             )
             assert (await ws.receive())["error"]["code"] == "stream_incomplete"
-        _, reservations = await _rows(source_id)
+        rows, reservations = await _rows(source_id)
     assert len(bodies) == 2
     assert [reservation.status for reservation in reservations] == ["released", "finalized"]
+    assert [(row.status, row.upstream_error_code) for row in rows] == [("error", "server_error"), ("success", None)]
+    assert "private.example" not in json.dumps({column: str(value) for column, value in vars(rows[0]).items()})
+
+
+async def test_bridge_error_event_records_the_source_code_but_not_its_message(async_client, app_instance):
+    async def handler(request: web.Request) -> web.StreamResponse:
+        await request.json()
+        return await _sse(
+            request,
+            [
+                {"type": "response.created", "response": _envelope("resp_eof", "in_progress", [])},
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "server_error",
+                        "code": "upstream_eof",
+                        "message": "token at https://private.example",
+                    },
+                },
+            ],
+        )
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            event = (await _receive_turn(ws))[-1]
+            assert event["type"] == "error" and event["status"] == 502
+            assert event["error"]["code"] == "model_source_response_failed"
+            assert "private.example" not in json.dumps(event)
+        rows, reservations = await _rows(source_id)
+    assert [(row.status, row.error_code, row.upstream_error_code) for row in rows] == [
+        ("error", "model_source_response_failed", "upstream_eof")
+    ]
+    assert "private.example" not in json.dumps({column: str(value) for column, value in vars(rows[0]).items()})
+    assert [reservation.status for reservation in reservations] == ["released"]
 
 
 async def test_bridge_turn_records_proxy_measured_timing(async_client, app_instance):
