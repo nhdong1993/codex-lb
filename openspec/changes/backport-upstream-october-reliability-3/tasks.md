@@ -23,7 +23,7 @@
 ## 5. Planner and routing
 
 - [x] 5.1 Validate quota planner timezones (`a3aa8caa`, #2468).
-- [ ] 5.2 Reject invalid planner clock times (`6ed4c44f`, #2540).
+- [x] 5.2 Reject invalid planner clock times (`6ed4c44f`, #2540).
 - [ ] 5.3 Build background account states from the dashboard snapshot (`6cdf29ef`, #2233), keeping `load_balancer_lines` at 3021.
 
 ## 6. Verify and hand off
