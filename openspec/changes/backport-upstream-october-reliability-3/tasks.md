@@ -18,7 +18,7 @@
 ## 4. UI
 
 - [x] 4.1 Offer Resume for deactivated accounts (`0f6a31c5`, #2060), with before/after screenshots and the browser smoke suite.
-- [ ] 4.2 Preserve quota chart samples and per-account display state (`ec994599`, #2489), with before/after screenshots.
+- [x] 4.2 Preserve quota chart samples and per-account display state (`ec994599`, #2489), with before/after screenshots.
 
 ## 5. Planner and routing
 

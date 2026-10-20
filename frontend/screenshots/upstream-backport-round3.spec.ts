@@ -79,3 +79,45 @@ test("deactivated accounts and the Resume action", async ({ page }) => {
   await detail.getByRole("button", { name: "Re-authenticate", exact: true }).scrollIntoViewIfNeeded();
   await shoot(page, "accounts-deactivated-1440");
 });
+
+const NOW = Date.parse("2026-10-20T08:00:00Z");
+const hoursAgo = (hours: number) => new Date(NOW - hours * 3_600_000).toISOString();
+const sparseAccount = createAccountSummary({
+  accountId: "acc_sparse", email: "sparse@example.com", displayName: "Sparse samples",
+});
+const monthlyAccount = createAccountSummary({
+  accountId: "acc_monthly", email: "monthly@example.com", displayName: "Monthly free", planType: "free",
+  usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, monthlyRemainingPercent: 100 },
+  resetAtPrimary: null, resetAtSecondary: null, resetAtMonthly: hoursAgo(-24 * 20),
+  windowMinutesPrimary: null, windowMinutesSecondary: null, windowMinutesMonthly: 43_200,
+  capacityCreditsPrimary: null, remainingCreditsPrimary: null,
+  capacityCreditsSecondary: null, remainingCreditsSecondary: null,
+});
+const trendFixtures: Record<string, AccountTrendsResponse> = {
+  // Weekly is sampled every 6 h; the 5h window only three times, off the weekly grid.
+  acc_sparse: createAccountTrends("acc_sparse", {
+    primary: [151, 91, 31].map((hours, index) => ({ t: hoursAgo(hours), v: [70, 40, 85][index] })),
+    secondary: Array.from({ length: 28 }, (_, index) => ({ t: hoursAgo((27 - index) * 6), v: 90 - index })),
+  }),
+  acc_monthly: createAccountTrends("acc_monthly", {
+    primary: [],
+    secondary: Array.from({ length: 28 }, (_, index) => ({ t: hoursAgo((27 - index) * 6), v: 100 })),
+  }),
+};
+
+test("quota trend samples and the monthly-only legend", async ({ page }) => {
+  await mockApi(page, [sparseAccount, monthlyAccount], trendFixtures);
+  for (const [account, name] of [[sparseAccount, "trend-sparse-1440"], [monthlyAccount, "trend-monthly-1440"]] as const) {
+    await page.goto(`${BASE_URL}/accounts?selected=${account.accountId}`);
+    const detail = page.getByTestId("accounts-inline-detail");
+    await expect(detail.getByText(account.displayName).first()).toBeVisible({ timeout: 15_000 });
+    const trend = detail.locator("div.pt-3").filter({ has: page.getByRole("heading", { name: "7-day trend" }) });
+    await expect(trend.locator(".recharts-surface").first()).toBeVisible({ timeout: 15_000 });
+    if (account === monthlyAccount) {
+      // A monthly-only account has no 5h samples, so its 5h legend entry is gone after the fix.
+      await expect(trend.getByText("5h", { exact: true })).toHaveCount(before ? 1 : 0);
+    }
+    await trend.scrollIntoViewIfNeeded();
+    await shoot(trend, name);
+  }
+});

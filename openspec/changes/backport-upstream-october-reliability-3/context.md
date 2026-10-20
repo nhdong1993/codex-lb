@@ -87,3 +87,6 @@ Captured with `frontend/screenshots/upstream-backport-round3.spec.ts`, which use
   - `screenshots/before-dashboard-list-1440.png` / `screenshots/after-dashboard-list-1440.png`: dashboard list; the deactivated row gains Resume, the re-auth-required row does not.
   - `screenshots/before-dashboard-cards-640.png` / `screenshots/after-dashboard-cards-640.png` and the `-1024` pair: responsive cards.
   - `screenshots/before-accounts-deactivated-1440.png` / `screenshots/after-accounts-deactivated-1440.png`: Accounts page actions.
+- **#2489, quota chart samples and panel state:**
+  - `screenshots/before-trend-sparse-1440.png` / `screenshots/after-trend-sparse-1440.png`: a 5h series sampled off the weekly grid. Before, the weekly line was drawn as 0%. After, both series are merged by instant, gaps are interpolated, and time before the first 5h sample stays empty.
+  - `screenshots/before-trend-monthly-1440.png` / `screenshots/after-trend-monthly-1440.png`: a monthly-only Free account no longer shows a 5h legend entry without 5h samples.
