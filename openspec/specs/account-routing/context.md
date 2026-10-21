@@ -278,6 +278,37 @@ their existing behavior; a configured mapping cannot manufacture entitlement.
 Removing the model key restores ordinary selection after existing settings
 propagation. This documentation does not authorize applying live settings.
 
+### Service tiers the allowed Plans do not offer (2026-10-20)
+
+Selection narrows the pool to accounts whose catalog offers the requested
+service tier before it applies the Plan restriction. In production, Codex
+Desktop Fast mode sent `service_tier: "priority"` for `gpt-6-luna`, which was
+restricted to Free. Only the 27 Plus accounts advertised `priority`, so every
+Fast request failed with `no_accounts` ("Service is operating in degraded
+mode"). Fast requests that had reached Free earlier came back with
+`actual_service_tier = default`.
+
+`apply_model_plan_service_tier_fallback` (`app/modules/proxy/request_policy.py`)
+removes the tier for a configured model when an authoritative catalog
+recognizes the model and no allowed Plan offers the tier. The request is then
+served at the default tier.
+
+- The fallback is per model and needs evidence. Missing or non-authoritative
+  catalogs, models unknown to the catalog, unconfigured models and policy
+  lookup failures all keep the tier.
+- It is decided from Plan capability, not availability. If an allowed Plan
+  offers the tier, the tier is kept even when those accounts are exhausted or
+  outside the API key's scope.
+- It runs after model-source dispatch and API-key enforcement, at the same
+  preparation sites as the enforced-tier fallback: `_stream_responses` (never
+  for owner-forwarded requests), `_collect_responses`, Chat Completions,
+  compact and websocket preparation.
+- It differs from the #1248/#1409 enforced-tier fallback, which never removes
+  an explicit client tier, and from the global `prohibitFastMode` switch.
+- Request logs record the effective tier (`requested_service_tier = null`).
+  The info line `model_plan_service_tier_fallback ... removed_service_tier=...`
+  keeps the removed tier.
+
 ## Earlier movement of soft affinity after sustained upstream failure
 
 Three qualified overload/processing failures within 120 seconds already establish sustained backoff. Later independently submitted requests may move a soft prompt-cache/thread/session mapping to an eligible sibling at that first trip; waiting for nine failures before isolation caused unnecessary repeated rejection during the October 12 incident. For example, failures interleaved with successes on A still move the next movable request to B when B passes the strategy, quota and cap checks. A lone owner or an all-unavailable alternative pool retains the existing fallback. Required response/file/bridge/turn-state ownership is unchanged; no accepted request is newly replayed. Burst-only cooldown does not release warm owners.
