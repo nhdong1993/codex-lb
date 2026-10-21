@@ -125,3 +125,7 @@ Counts represent local account slots, including separate workspace credentials f
 For example, two Plus accounts (one active, one requiring re-authentication) and one deactivated Pro account show Plus 2/3, Pro 1/3; status groups each show 1/3. The center of both charts reads 3.
 
 These charts summarize inventory, not available routing capacity or remaining quota. They add no network requests, dependencies, settings or stored counters. Loading and error states follow the page, while a successful empty response shows neutral rings and zero. Percentages are rounded for display; exact counts remain visible. Existing themes, languages and reduced-motion preferences apply.
+
+## Resume for deactivated accounts
+
+The reactivate endpoint accepts `deactivated` accounts and refuses only `reauth_required`. The dashboard list, the dashboard cards and the Accounts page therefore offer Resume for `paused` and `deactivated` accounts, next to Re-authenticate (#2060). This matters on this fork because a `deactivated_workspace` signal deactivates accounts, and an operator may need to undo a stale one.

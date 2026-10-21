@@ -81,3 +81,8 @@ usage_history(window='primary', account_id='acc_1', recorded_at='2026-03-08T11:0
 ```
 
 `latest_by_account("primary")` should return only the later row while still treating both rows as part of the same logical primary window.
+
+## Index-bounded conversation raw tail and trailing-demand memo
+
+- **Conversation reads (#2235).** The distinct-conversation union reads the rollup watermark as an uncorrelated scalar subquery and clamps it into the requested window. The raw `request_logs` branch then becomes `requested_at` index ranges instead of a per-row filter over the whole window. Upstream measured 401k rows in 322 ms before the change and 9.5k rows in 31 ms after, on 800k rows.
+- **Trailing-demand memo (#2236).** The weekly-pace trailing-demand aggregate is memoized per process for 60 seconds per window span and account-to-window signature, with at most 16 entries. Tests zero the TTL with an autouse fixture.

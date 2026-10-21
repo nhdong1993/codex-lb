@@ -156,3 +156,21 @@ The helper must be rebuilt during a separately authorized deployment; editing th
 Round 2 of the selective backport (`openspec/changes/backport-upstream-october-reliability-2`) moves the locked Rustls pin to 0.23.46 for RUSTSEC-2026-0346..0349 (secret-bearing Debug output, ECH buffered data, Brotli certificate decompression allocation, ServerHello key-exchange downgrade). It also requires urllib3 >= 2.8.0 (CVE-2026-97687/97689) and upgrades the installed `gzip`, `libpcre2-8-0`, `libsqlite3-0` and `perl-base` packages in the runtime image with an upgrade-only apt step.
 
 The unconfigured client-version fallback is now 0.163.0. It must stay at least the highest bootstrap `minimal_client_version`; gpt-6-luna needs 0.155.0, and a unit test enforces the floor numerically. It only matters on a cold or failed version lookup; live and cached versions, and operator overrides, still win. For example, with GitHub unreachable at startup, the old 0.153.4 fingerprint made the upstream catalog drop gpt-6-luna.
+
+## Python WSS system verification context
+
+The Python `websockets` path uses a separate cached `_shared_system_ssl_context()` for upstream `wss://` server verification (#2110):
+- It calls `ssl.create_default_context()` with the system and environment trust inputs, keeping certificate and hostname checking.
+- It does not add the certifi bundle used by the aiohttp context.
+- Outbound-client initialization warms it, and a full close and reinitialization rebuilds it.
+- Plain `ws://` gets no server-TLS context.
+
+This removes repeated trust loading when separate Python WSS connections open. Retained turns already reuse their upstream connection, so they are unaffected.
+
+## Responses HTTP preparation
+
+`_stream_responses_with_session` decides whether HTTP is certain before it computes a WebSocket size estimate (#2113):
+- Explicit HTTP, non-streaming requests, and auto requests with an image-generation tool skip that estimate.
+- Eligible WebSocket selection keeps its exact-byte budget, which on this fork is sized from `settings.max_sse_event_bytes`.
+- The selected payload string is built only for native egress request bytes or enabled `upstream_payload` tracing.
+- Python HTTP clients still serialize their payload dictionaries through the existing request owner, so the upstream body is byte-identical.

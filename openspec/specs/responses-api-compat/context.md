@@ -498,3 +498,14 @@ Round 2 (`openspec/changes/backport-upstream-october-reliability-2`) ports three
   - Fork adaptation: when the capacity-replay prelude hold discards an attempt, its ID is never published, neither from the held `response.created` nor from the capacity terminal that carries the same ID. Held lifecycle frames are published when the hold releases.
 - **Bridge model-transition fork (#2083).** A bridge model switch that meets `continuity_owner_conflict` forks once to a fresh account-neutral lane, but only for an account-neutral fresh replay with no `previous_response_id` and no file pin.
 - **Typed file failover (#2469).** File operations use typed dispatch provenance. A finalize whose poll already returned on account A never replays on another account.
+
+## Detached retirement sweep deadline
+
+Upstream #2315 bounds aggregate detached-session lock waiting during request finalization. One sweep shares five seconds: if its first attempt uses three seconds, the next gets two, and later attempts stop once the deadline passes and log `skipped_sessions=N`. Deferred generations stay tracked for later requests and their lifecycle owners. The deadline does not cancel resource-close owners or replace their close timeout.
+
+## Denied WebSocket session anchors and anonymous output ownership
+
+- **Denied anchors (#2248).** On a direct WebSocket session, a proxy-injected `previous_response_id` that upstream denied without a retry-safe fresh replay is remembered as stale. The next turn retires that anchor from session continuity and goes upstream unanchored with the client's full context.
+  - Example: an incremental Codex turn `[user, function_call_output call_1]` is not self-contained, so the denial fails closed. Before this change, the following turn was re-anchored to the same dead id.
+- **Anonymous output frames (#2357).** On a pipelined upstream socket, anonymous `response.*` output frames go to the single pending request whose response upstream already created. Errors, terminals, vendor telemetry and every other created-owner count keep the earlier matching rules.
+  - On direct WebSocket the downstream stream is shared, so a misattribution showed up in the request log (TTFT and attribution) rather than in the client bytes.

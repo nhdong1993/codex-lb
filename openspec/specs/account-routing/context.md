@@ -293,3 +293,11 @@ Round 2 (`openspec/changes/backport-upstream-october-reliability-2`) ports two r
   - Fork extension: for API-key requests, the deactivation is written only after the reservation is settled, both on the first dispatch and on the redispatch after a forced token refresh. Upstream defers only the first site.
   - Example: a file-pinned keyed request gets 401, refreshes, then gets HTTP 402 `deactivated_workspace`. The client receives the 402, every reservation for the key is closed, then the account becomes `deactivated`, and no sibling is tried.
   - Delivery scope: HTTP 402 and status-less terminal frames. A pre-visible HTTP 500 keeps the generic server-error retry, as on upstream.
+
+## Background account-state builds
+
+The quota planner tick, the quota planner forecast endpoint and the usage-refresh recovery reconciliation resolve soft drain and the routing tunables from one dashboard-settings snapshot, taken outside runtime locks (#2233):
+- the planner reads the settings cache once per tick or request;
+- recovery reuses the detached row the refresh cycle already read.
+
+Without this, an operator who turned soft drain off in the dashboard still saw these background paths compute the draining tier from the environment default.

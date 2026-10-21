@@ -836,7 +836,7 @@ The system SHALL maintain a permanent conversation presence satellite `request_c
 
 ### Requirement: Distinct-conversation reads combine the presence rollup with a raw live tail in one statement
 
-The dashboard conversation activity metrics (`conversation_count`, `conversation_request_count`) and hour-multiple conversation trend buckets MUST serve folded history from the conversation presence satellite and the remainder from raw `request_logs` in one statement. The watermark and both UNION branches MUST share a database snapshot, and `COUNT(DISTINCT ...)` MUST deduplicate across the fold boundary. Missing or epoch watermarks MUST degrade to raw reads. Non-hour-multiple dashboard buckets MUST keep the full-raw path.
+The dashboard conversation activity metrics (`conversation_count`, `conversation_request_count`) and hour-multiple conversation trend buckets MUST serve folded history from the conversation presence satellite and the remainder from raw `request_logs` in one statement. The watermark and both UNION branches MUST share a database snapshot: the watermark is read from the state row inside the same statement as an uncorrelated scalar subquery in each branch, never joined into the branches as a column. The raw complement MUST be expressed as bounds on `requested_at` — the sub-hour leading edge below the first folded hour, or the tail at or above the watermark clamped into the window's folded range — so the raw branch is served by bounded index ranges on `requested_at` (a BitmapOr of the two ranges on PostgreSQL), never by a per-row filter over a joined watermark column. `COUNT(DISTINCT ...)` MUST deduplicate across the fold boundary. Missing or epoch watermarks MUST degrade to raw reads (the tail start clamps to the first folded hour, so the raw branch covers the whole window). Non-hour-multiple dashboard buckets MUST keep the full-raw path.
 
 Reports summary and daily conversation counts, including account, API-key, model and User-Agent filtered reads, MUST use the permanent report history source specified by `report-aggregation`. Their distinct counts and daily row membership MUST survive raw retention after the report fold has covered the period, subject to the documented partial-hour edge limitation.
 
@@ -845,6 +845,20 @@ Reports summary and daily conversation counts, including account, API-key, model
 - **GIVEN** a corpus with conversations spanning hours, blank and NULL conversation ids, warmup kinds, and soft-deleted rows
 - **WHEN** each switched conversation read runs with the conversation watermark at epoch, mid-history on an hour boundary, and at the fold target — including states where the hourly and conversation watermarks differ
 - **THEN** every result equals the legacy raw-only implementation exactly
+
+#### Scenario: Results do not depend on where the watermark sits relative to the window
+
+- **GIVEN** aligned, unaligned and open-ended read windows over a corpus whose conversations straddle hour boundaries and display buckets
+- **WHEN** the union is aggregated with the state row missing, with the watermark at epoch, below the window, inside the window, and above the window
+- **THEN** the distinct-conversation counts, conversation request totals and per-bucket counts equal the raw-only aggregation in every state
+
+#### Scenario: Raw complement is index-bounded
+
+- **GIVEN** a PostgreSQL corpus folded through a watermark a few hours before the window end, with an unaligned window start
+- **WHEN** `EXPLAIN (ANALYZE)` runs on the conversation union statement as the application sends it (bind parameters, not literals)
+- **THEN** every `request_logs` node is an index or bitmap scan whose Index Cond is on `requested_at` and removes no rows by filter
+- **AND** the rows it produces equal the sub-hour leading edge plus the un-folded tail exactly, not the whole window — with the watermark below the window, at the window's first folded hour, inside the window, at the window end, and past the window end
+- **AND** for a fully folded hour-aligned window the `request_logs` node returns no rows
 
 #### Scenario: Conversation statistics survive raw pruning
 
@@ -1056,3 +1070,31 @@ empty conversation ID and return a detail not-found response.
 - **WHEN** the API handles `GET /api/conversations/`
 - **THEN** it returns the same collection envelope as `GET /api/conversations`
 - **AND** it does not invoke detail lookup for an empty conversation ID
+
+### Requirement: Weekly credit pace trailing demand is memoized per process
+
+The dashboard MUST NOT re-run the trailing positive used-percent delta aggregate over `usage_history` on every poll; `GET /api/dashboard/overview` and `GET /api/dashboard/projections` MUST reuse the result for the same trailing window span and `account -> window` signature from a process-local cache within a fixed 60-second TTL (an application constant, not an operator tunable). The window span (`until - since`) is part of the cache identity; the bounds themselves are not, because both callers anchor the window at the current time, so within the TTL the window drifts by at most the TTL. The cached figure is display-only, gates no security, authorization, or routing decision, and its documented maximum cross-replica staleness is the 60-second TTL; it therefore does not register a cache-invalidation namespace. The cache MUST be bounded and MUST return a copy so callers cannot alter the cached value.
+
+#### Scenario: Overview and projections polls share one aggregate within the TTL
+
+- **GIVEN** the latest usage rows yield the same `account -> window` signature for two dashboard requests within 60 seconds
+- **WHEN** `/api/dashboard/overview` and then `/api/dashboard/projections` are served
+- **THEN** the `weekly_demand_samples` aggregate is executed once and both responses carry the same trailing-demand figure
+
+#### Scenario: A different account signature is aggregated on its own
+
+- **GIVEN** a cached trailing-demand result for one `account -> window` signature
+- **WHEN** a request resolves a different signature (an account added or removed, or an account's weekly window remapped)
+- **THEN** its trailing demand comes from its own aggregate, not from another signature's cache entry
+
+#### Scenario: A different window span is aggregated on its own
+
+- **GIVEN** a cached trailing-demand result for a seven-day span and one `account -> window` signature
+- **WHEN** a caller requests the same signature over a different trailing span
+- **THEN** its trailing demand comes from its own aggregate, not from the seven-day entry
+
+#### Scenario: Expired entries are recomputed
+
+- **GIVEN** a cached trailing-demand result whose 60-second TTL has elapsed
+- **WHEN** a dashboard request with the same signature arrives
+- **THEN** the aggregate is executed again and the cache entry is refreshed

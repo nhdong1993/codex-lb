@@ -133,3 +133,8 @@ The routes use dashboard session authentication and write settings changes to th
 Decision responses include `details` parsed from the planner audit JSON when available. Current scheduler details
 include `target_peak_at`, `expected_gain`, `scenario_gain`, `expected_cost`, `net_score`, `warmup_cycle`,
 `scheduled_at`, `skip_reason`, `noop_reason`, and `unmet_demand`. Older rows may have `details = null`.
+
+## Timezone and working-hour validation
+
+- **Timezones (#2468).** Updates trim timezone names and reject unknown or malformed non-empty keys with HTTP 400 (`invalid_quota_planner`) before saving. Blank or omitted values keep the current timezone. Legacy invalid stored values fall back to UTC for forecast and routing and stay stored, so an operator can correct them.
+- **Working hours (#2540).** Writes accept only `00:00` through `23:59`. For example, `24:00` returns HTTP 422 and nothing is saved.

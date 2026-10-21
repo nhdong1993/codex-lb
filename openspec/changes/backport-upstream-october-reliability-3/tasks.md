@@ -28,6 +28,6 @@
 
 ## 6. Verify and hand off
 
-- [ ] 6.1 Run the global gates and end-to-end scenarios; record results and limitations in `verification.md`.
-- [ ] 6.2 Sync delta specs and stable context into canonical specs; validate strictly and check block equality.
+- [x] 6.1 Run the global gates and end-to-end scenarios; record results and limitations in `verification.md`.
+- [x] 6.2 Sync delta specs and stable context into canonical specs; validate strictly and check block equality.
 - [ ] 6.3 Archive the change after the operator accepts and requests it.

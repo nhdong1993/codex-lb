@@ -201,3 +201,20 @@ Round 2 (`openspec/changes/backport-upstream-october-reliability-2`) ports three
 - **Reset-confirmed recovery (#2405).** Recovery is no longer limited to Free monthly windows. A `rate_limited` account returns to `active` when exactly one quota window (primary, secondary or monthly) has a reset matching the stored `reset_at` within 5 s, and usage history proves that window rolled. The account stays blocked when its own 5h window is still exhausted. The fork's reset-credit redemption benefits directly: a redeemed credit resets a window before the predicted deadline. History reads happen only for the refreshed account and only when it is rate-limited with both timestamps; they are time-filtered, not row-capped. The upstream dashboard-snapshot and refresh-policy plumbing (#2233, #2261) was not imported.
 - **Force Probe snapshot (#2524).** Probe settlement copies the account and usage rows before the read session closes, because session teardown expires ORM attributes.
 - **Workspace deactivation (#2573).** Refresh treats `deactivated_workspace` as a terminal signal for that record only.
+
+## Initial warm-up for unused Free quota
+
+A Free account's monthly `reset_at` slides with every sample, so it is never confirmed as a reset, and opted-in Free accounts never received a warm-up before #2205.
+
+**Eligibility.** After a successful refresh, an account receives exactly one initial warm-up when it is:
+- active and opted in;
+- Free both before and after the refresh;
+- showing a monthly sample recorded in this refresh, with exactly 0% use and a reset deadline;
+- without any earlier warm-up attempt.
+
+**Claim.** The claim adds an account-wide `NOT EXISTS` guard. On PostgreSQL it is serialized by a per-account advisory lock that also takes every window lock in a fixed order (`monthly`, `primary`, `primary_idle`, `secondary`). This lets an in-flight claim from an older replica commit first during a rolling upgrade.
+
+**Operations.**
+- The first refresh cycle after deploying this change sends the backlog serially. Production on 2026-10-19 had about 1,800 eligible accounts, at a mean of 2.7 s per send, so one refresh cycle stretches by roughly 82 minutes.
+- Watch warm-up attempts by status, upstream 429s, request latency, and monthly-window freshness.
+- Reverting the change stops future initial warm-ups. It does not undo attempts already sent.
