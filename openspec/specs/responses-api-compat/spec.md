@@ -4835,7 +4835,8 @@ Completions-compatible sources MAY serve `/v1/chat/completions`.
 Responses-compatible sources MAY serve `/v1/responses` and
 `/backend-api/codex/responses`. Audio-transcriptions-compatible sources MAY
 serve `/v1/audio/transcriptions`. Responses sources MAY also serve HTTP compact
-endpoints and terminal triggers under the source compaction requirements. File upload,
+endpoints, and terminal triggers on HTTP and on Responses WebSocket source
+sessions, under the source compaction requirements. File upload,
 control-plane, and websocket bridge paths MUST remain subscription-backed unless
 a later requirement explicitly defines OpenAI-compatible source behavior for
 those paths.
@@ -4867,7 +4868,8 @@ those paths.
 
 - **GIVEN** a Responses-compatible source exposes the requested model
 - **AND** retained continuity is recorded for a subscription account
-- **WHEN** the client sends a Codex terminal compaction trigger
+- **WHEN** the client sends a Codex terminal compaction trigger over HTTP, or over
+  the direct Responses WebSocket for a model that is not source-only
 - **THEN** it MUST remain on the subscription owner and MUST NOT contact the source
 
 #### Scenario: HTTP compaction request retains source routing
@@ -4919,7 +4921,7 @@ For the direct Responses WebSocket transport, a recorded subscription owner MUST
 
 A requested model is source-only when an enabled or disabled Responses-capable model source claims it under the ordinary source-selection rules and none of the request's model candidates (the raw client model, or the API key's enforced model when one is set, and the normalized model) is in the subscription model registry. On the direct Responses WebSocket transport, recorded subscription-account continuity MUST NOT dispatch a source-only turn to a subscription account. Recorded continuity means the recorded subscription owner of `previous_response_id`, or the subscription account that owns the request's client-supplied turn-state alias under the requesting API key. This MUST hold on the first turn of a socket and on a socket already bound to a subscription account by an earlier turn, including a `generate:false` warmup. On a socket bound to a native or bridged source session, such a turn is not a source/subscription backend change and MUST receive the same refusal instead of `websocket_reconnect_required`. The proxy MUST refuse such a turn with the service-level failure `model_source_requires_http_transport` (status 503), MUST NOT forward it to a model source over WebSocket, and MUST NOT leave a usage reservation held for it.
 
-When any model candidate is in the subscription model registry, including a registry slug that a source-scoped API key routes to an assigned source, a recorded subscription owner MUST keep the owner-bound subscription precedence above and the proxy MUST NOT emit `model_source_requires_http_transport` for that reason. Structural subscription exclusions (a terminal `compaction_trigger` and uploaded `input_file` references) and required-capability security routing MUST retain their precedence over the source-only refusal. HTTP Responses routes MUST keep the recorded-owner veto as specified above.
+When any model candidate is in the subscription model registry, including a registry slug that a source-scoped API key routes to an assigned source, a recorded subscription owner MUST keep the owner-bound subscription precedence above and the proxy MUST NOT emit `model_source_requires_http_transport` for that reason. Uploaded `input_file` references (the structural subscription exclusion) and required-capability security routing MUST retain their precedence over the source-only refusal. A terminal `compaction_trigger` is not a structural exclusion on the direct Responses WebSocket: a compaction turn MUST follow the same recorded-owner precedence and source-only refusal as any other turn. HTTP Responses routes MUST keep the recorded-owner veto as specified above.
 
 #### Scenario: Recorded subscription owner overrides an HTTP model source
 
@@ -5008,9 +5010,17 @@ When any model candidate is in the subscription model registry, including a regi
 
 - **GIVEN** a Responses-capable source serves model `m`, which is not in the subscription model registry
 - **AND** request logs record a subscription account as the owner of `previous_response_id`
-- **WHEN** a direct Responses WebSocket client sends `response.create` for `m` whose input ends with a terminal `compaction_trigger`
+- **WHEN** a direct Responses WebSocket client sends `response.create` for `m` whose input references an uploaded `input_file` `file_id`
 - **THEN** the proxy does not emit `model_source_requires_http_transport`
 - **AND** the turn follows the recorded subscription owner
+
+#### Scenario: A subscription-anchored source-only compaction falls back to HTTP
+
+- **GIVEN** a Responses-capable source serves model `m`, which is not in the subscription model registry
+- **AND** request logs record a subscription account as the owner of `previous_response_id`
+- **WHEN** a direct Responses WebSocket client sends `response.create` for `m` whose input ends with a terminal `compaction_trigger`
+- **THEN** the turn is refused with the service-level `model_source_requires_http_transport` failure and status 503
+- **AND** neither a subscription account nor the source receives the turn, and no usage reservation remains held
 
 ### Requirement: Source-routed chat payloads are sanitized before forwarding
 
@@ -9933,10 +9943,10 @@ assigned to, a chat-only source asked for a Responses route, and a
 subscription-registry slug that an unscoped API key never source-routes.
 
 Requests pinned to the subscription account that received an uploaded file
-MUST retain their subscription route. WebSocket structural compaction exclusions
-remain unchanged. HTTP terminal triggers MUST follow the source enablement check.
+MUST retain their subscription route. Terminal compaction triggers on HTTP and on
+the direct Responses WebSocket MUST follow the source enablement check.
 
-The WebSocket source preflight SHALL refuse an opted-in source or model that is disabled with `model_source_disabled` before reservation. Sources without native capability SHALL retain `model_source_requires_http_transport`. An established native source session SHALL revalidate enablement before dispatching another turn. Structural subscription exclusions SHALL retain their precedence. Recorded subscription owners SHALL retain their precedence, except that a WebSocket turn for a source-only model MUST be refused with `model_source_requires_http_transport` as defined in "Previous-response source routing follows proven ownership".
+The WebSocket source preflight SHALL refuse an opted-in source or model that is disabled with `model_source_disabled` before reservation. Sources without native capability SHALL retain `model_source_requires_http_transport`. An established native source session SHALL revalidate enablement before dispatching another turn. Uploaded-file pins SHALL retain their precedence. Recorded subscription owners SHALL retain their precedence, except that a WebSocket turn for a source-only model MUST be refused with `model_source_requires_http_transport` as defined in "Previous-response source routing follows proven ownership".
 
 The refusal MUST happen before any usage reservation is taken, so a refused
 request strands no reservation, and MUST NOT create a request log entry for a
@@ -9983,6 +9993,13 @@ dispatch that never happened.
 - **WHEN** a client continues with model `m` over the WebSocket transport
 - **THEN** the turn is refused with the service-level `model_source_requires_http_transport` failure
 - **AND** the turn is not forwarded to a subscription account upstream
+
+#### Scenario: A WebSocket compaction for a disabled source's model is refused
+
+- **GIVEN** an HTTP-only streaming Responses source exposes model `m`, which is not in the subscription model registry, and is disabled
+- **WHEN** a direct Responses WebSocket client sends `response.create` for `m` whose input ends with a terminal `compaction_trigger`
+- **THEN** the turn is refused with status `503` and error code `model_source_disabled`
+- **AND** no subscription account receives the turn and no usage reservation is left held
 
 #### Scenario: A subscription slug shadowed by a disabled source is unaffected
 

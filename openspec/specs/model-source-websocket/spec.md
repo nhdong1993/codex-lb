@@ -20,7 +20,7 @@ Each source SHALL expose a persisted `supports_responses_websocket` boolean thro
 
 ### Requirement: Source WebSocket routes retain source authorization and payload semantics
 
-Both `/v1/responses` and `/backend-api/codex/responses`, including explicit trailing-slash equivalents without redirect, SHALL support opted-in source requests. Routing MUST apply raw/enforced public-model policy, source assignments, per-source overrides and aliases before dispatch. It MUST preserve source HTTP reasoning/instruction/tool semantics and validate original and effective ownership references. Subscription-owned anchors, uploaded-file ownership, structural compaction exclusions and required-capability security rules MUST retain their precedence over source dispatch. Unless a structural subscription exclusion or required-capability security routing applies, which keep their precedence, a subscription-owned anchor for a source-only model MUST NOT route the turn to a subscription account and MUST yield `model_source_requires_http_transport` as defined in `responses-api-compat`. Lookup failure MUST fail closed before reservation or upstream dispatch.
+Both `/v1/responses` and `/backend-api/codex/responses`, including explicit trailing-slash equivalents without redirect, SHALL support opted-in source requests. Routing MUST apply raw/enforced public-model policy, source assignments, per-source overrides and aliases before dispatch. It MUST preserve source HTTP reasoning/instruction/tool semantics and validate original and effective ownership references. Subscription-owned anchors, uploaded-file ownership and required-capability security rules MUST retain their precedence over source dispatch. A terminal `compaction_trigger` MUST NOT by itself exclude a turn from source dispatch: on native and bridged source sessions a compaction turn MUST follow the same routing, ownership, continuation, admission, reservation, settlement and relay rules as any other turn, except that a completed bridged compaction response MUST NOT become continuation state, MUST stay on the socket's bound source session without `websocket_reconnect_required`, and its request log MUST record `request_kind=compaction`. Unless a structural subscription exclusion or required-capability security routing applies, which keep their precedence, a subscription-owned anchor for a source-only model MUST NOT route the turn to a subscription account and MUST yield `model_source_requires_http_transport` as defined in `responses-api-compat`. Lookup failure MUST fail closed before reservation or upstream dispatch.
 
 Domain errors raised during shared preparation or source quota reservation MUST retain the existing WebSocket error status, type, code, message and supplied parameter. This contract MUST also apply when the eventual backend is subscription and when no model source is configured.
 
@@ -70,6 +70,23 @@ Shared source ownership preparation MUST preserve the existing HTTP error envelo
 - **AND** no structural subscription exclusion or required-capability routing applies
 - **THEN** the turn MUST receive the service-level `model_source_requires_http_transport` failure
 - **AND** neither a subscription account nor the source receives the turn, and no usage reservation remains held
+
+#### Scenario: A first-turn compaction reaches an HTTP-only source
+- **GIVEN** a source-only key permitted to a streaming Responses model whose only source lacks native WebSocket support
+- **WHEN** the first `response.create` on a socket for that model has input ending with a terminal `compaction_trigger`
+- **THEN** the source receives one streaming HTTP Responses request whose input ends with that trigger
+- **AND** the client receives the source's compaction output item and `response.completed` with the public model identity
+- **AND** no subscription account receives the turn, and the request log records `transport=websocket`, `upstream_transport=openai_compatible_http` and `request_kind=compaction`
+
+#### Scenario: A compaction continues a bound bridged session
+- **GIVEN** a bridged socket whose last completed response `resp_1` had input `[U1]` and delivered output item `M1`
+- **WHEN** the client sends `response.create` with `previous_response_id` `resp_1` and input `[compaction_trigger]`
+- **THEN** the same source receives input `[U1, M1, compaction_trigger]` without `previous_response_id`
+- **AND** the client does not receive `websocket_reconnect_required`
+
+#### Scenario: A native source session serves a compaction turn
+- **WHEN** a create whose input ends with a terminal `compaction_trigger` is routed to a source that declares native Responses WebSocket support
+- **THEN** the native source session forwards it to that source and relays its terminal event to the client
 
 #### Scenario: An invalid first subscription create is corrected
 - **WHEN** shared or subscription-specific payload validation rejects the first create before backend preparation succeeds
@@ -425,7 +442,7 @@ The bridged HTTP request MUST NOT carry `type`, `generate` or a client-supplied 
 
 ### Requirement: Bridged continuation reconstructs full context per connection
 
-A bridged session SHALL keep connection-local continuation state containing the response identifier of its most recently completed response, the complete input that turn was prepared from, and the output items of that response's `response.output_item.done` events as delivered. State MUST be replaced only by a `response.completed` terminal. Any other terminal, an error or a size overflow MUST clear it. When a later `response.create` on the same socket carries `previous_response_id` equal to that identifier, the proxy MUST replace the field by setting `input` to the stored input, then the stored output items, then the new input items, before routing, ownership validation and quota estimation run. A string input MUST be treated as one user message. After subscription-anchor, security-routing and ownership checks, which keep their precedence, any other client-supplied `previous_response_id` on a bridged turn MUST fail with the route's continuity classifier (`previous_response_not_found` on `/backend-api/codex/responses`, `stream_incomplete` on `/v1/responses`) with status 502, without contacting a source or reserving quota. The stored state MUST NOT exceed the Responses HTTP request-body limit, and an expanded request above it MUST be rejected with `invalid_request_error` before dispatch. State MUST NOT be shared across sockets or replicas.
+A bridged session SHALL keep connection-local continuation state containing the response identifier of its most recently completed response, the complete input that turn was prepared from, and the output items of that response's `response.output_item.done` events as delivered. State MUST be replaced only by a `response.completed` terminal of a turn whose input does not end with a terminal `compaction_trigger`. Any other terminal, a completed compaction turn, an error or a size overflow MUST clear it. When a later `response.create` on the same socket carries `previous_response_id` equal to that identifier, the proxy MUST replace the field by setting `input` to the stored input, then the stored output items, then the new input items, before routing, ownership validation and quota estimation run. A string input MUST be treated as one user message. After subscription-anchor, security-routing and ownership checks, which keep their precedence, any other client-supplied `previous_response_id` on a bridged turn MUST fail with the route's continuity classifier (`previous_response_not_found` on `/backend-api/codex/responses`, `stream_incomplete` on `/v1/responses`) with status 502, without contacting a source or reserving quota. The stored state MUST NOT exceed the Responses HTTP request-body limit, and an expanded request above it MUST be rejected with `invalid_request_error` before dispatch. State MUST NOT be shared across sockets or replicas.
 
 #### Scenario: A tool result continues a bridged response
 - **GIVEN** a bridged turn with input `[U1]` completed as `resp_1` after delivering output items `rs_1` and `fc_1` with `call_id` `call_1`
@@ -440,6 +457,12 @@ A bridged session SHALL keep connection-local continuation state containing the 
 #### Scenario: A failed response cannot be continued
 - **WHEN** a bridged response ends with `response.failed` or `response.incomplete` and the client then references it
 - **THEN** the reference fails with the continuity error
+
+#### Scenario: A compaction response cannot be continued
+- **GIVEN** a bridged compaction turn with input `[U1, compaction_trigger]` completed as `resp_c` after delivering compaction item `C1`
+- **WHEN** the client sends `response.create` with `previous_response_id` `resp_c` and input `[U2]`
+- **THEN** the client receives the route's continuity error with status 502 and no source request or reservation is made
+- **AND** a full resend of `[C1, U2]` without `previous_response_id` reaches the source unchanged
 
 ### Requirement: Bridged warmups are answered locally
 
