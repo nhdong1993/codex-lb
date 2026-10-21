@@ -506,6 +506,7 @@ from app.modules.proxy.load_balancer import AccountLease, effective_account_conc
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
+    apply_model_plan_service_tier_fallback,
     model_alias_requests_fast_mode,
     normalize_responses_request_payload,
     openai_client_payload_error,
@@ -3289,6 +3290,7 @@ class _WebSocketMixin:
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,
         )
+        await apply_model_plan_service_tier_fallback(responses_payload)
         # Judged on the full client input, before the websocket-specific
         # trimming and anchor injection below rewrite it — the same payload
         # the HTTP route evaluates for its source-selection gate.

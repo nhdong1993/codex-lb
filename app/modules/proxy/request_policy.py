@@ -6,6 +6,7 @@ from typing import NamedTuple
 
 from pydantic import ValidationError
 
+from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
@@ -23,12 +24,14 @@ from app.core.openai.strict_schema import (
     validate_strict_json_schema,
 )
 from app.core.openai.v1_requests import V1ResponsesRequest
+from app.core.plan_types import normalize_account_plan_type
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.db.models import ModelSource
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.model_sources.catalog import source_model_reasoning_levels
+from app.modules.proxy import model_admission
 
 logger = logging.getLogger(__name__)
 
@@ -426,6 +429,57 @@ def apply_enforced_service_tier_model_fallback(
         get_request_id(),
         payload.model,
         service_tier,
+    )
+    payload.service_tier = None
+    return True
+
+
+async def apply_model_plan_service_tier_fallback(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    *,
+    registry: ModelRegistry | None = None,
+) -> bool:
+    """Drop a tier that none of an operator Plan restriction's Plans offers.
+
+    Unlike the enforced-tier fallback this also removes a tier the client asked
+    for, but only for a model the operator restricted to some Plans: there the
+    tier filter and the Plan filter together would empty the pool, while the
+    allowed accounts can serve the default tier. Like that fallback it runs
+    after model-source dispatch on subscription routes and never on
+    owner-forwarded requests, so selection, accounting, logs and the wire agree.
+    It acts only on positive authoritative catalog evidence; anything less keeps
+    the tier and the existing routing outcome.
+    """
+    service_tier = payload.service_tier
+    if service_tier is None or canonical_service_tier_value(service_tier) in {"", "auto", "default"}:
+        return False
+    try:
+        _, policies = await model_admission.routing_policy_snapshot()
+    except ProxyResponseError:
+        # Selection reads the same policy and fails closed with its own error.
+        return False
+    allowed_plans = policies.get(payload.model)
+    if allowed_plans is None:
+        return False
+
+    model_registry = registry or get_model_registry()
+    snapshot = model_registry.get_snapshot()
+    if snapshot is None or not snapshot.account_catalogs_authoritative:
+        return False
+    # An operator may map a model before the catalog knows it. Selection does
+    # not tier-filter such a model, so its tier must not be dropped either.
+    if not model_registry.plan_types_for_model(payload.model):
+        return False
+    tier_plans = model_registry.plan_types_for_model_service_tier(payload.model, service_tier) or frozenset()
+    if any(normalize_account_plan_type(plan) in allowed_plans for plan in tier_plans):
+        return False
+
+    logger.info(
+        "model_plan_service_tier_fallback request_id=%s model=%s removed_service_tier=%s allowed_plans=%s",
+        get_request_id(),
+        payload.model,
+        service_tier,
+        allowed_plans,
     )
     payload.service_tier = None
     return True

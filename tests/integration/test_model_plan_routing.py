@@ -275,3 +275,109 @@ async def test_model_plan_cannot_manufacture_unique_conversation_owner(native_po
         required_continuity_owner=True,
     )
     assert pinned.account is None
+
+
+UNCONFIGURED_MODEL = "gpt-5.4"
+_TIER_KEYS = ("service_tiers", "additional_speed_tiers", "default_service_tier")
+
+
+@pytest.fixture
+async def tier_pool(native_pool, monkeypatch):
+    """Authoritative catalog where only the paid account offers ``priority``."""
+    from dataclasses import replace
+
+    from app.core.openai.model_registry import get_model_registry
+
+    accounts, seen, service = native_pool
+    registry = get_model_registry()
+    fallback = registry.get_models_with_fallback()
+
+    def catalog_model(slug, *, tiers):
+        raw = {key: value for key, value in fallback[slug].raw.items() if key not in _TIER_KEYS}
+        if tiers:
+            raw["service_tiers"] = [{"id": "priority", "name": "Fast"}]
+        return replace(fallback[slug], raw=raw)
+
+    plus_models = [catalog_model(slug, tiers=True) for slug in (MODELS[0], UNCONFIGURED_MODEL)]
+    free_models = [catalog_model(slug, tiers=False) for slug in (MODELS[0], UNCONFIGURED_MODEL)]
+    plans = {accounts["paid"]: "plus", accounts["free-a"]: "free", accounts["free-b"]: "free"}
+    await registry.update(
+        {"plus": plus_models, "free": free_models},
+        per_account_results={
+            account_id: (plan, plus_models if plan == "plus" else free_models) for account_id, plan in plans.items()
+        },
+        active_account_plans=plans,
+    )
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None and snapshot.account_catalogs_authoritative
+    payloads = []
+
+    async def stream(payload, headers, access_token, account_id, **kwargs):
+        seen.append(account_id)
+        payloads.append(payload.to_payload())
+        yield _success_sse_event()
+
+    async def compact(payload, headers, access_token, account_id):
+        seen.append(account_id)
+        payloads.append(payload.to_payload())
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", stream)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+    return accounts, seen, payloads
+
+
+@pytest.mark.parametrize("service_tier", ["priority", "fast"])
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+async def test_plan_restricted_model_drops_a_tier_no_allowed_plan_offers(
+    async_client, tier_pool, path, stream, service_tier
+):
+    _, seen, payloads = tier_pool
+    response = await async_client.post(
+        path, json={"model": MODELS[0], "input": "hello", "stream": stream, "service_tier": service_tier}
+    )
+    assert response.status_code == 200, response.text
+    assert seen and seen[-1] in {"free-a", "free-b"}, response.text
+    assert "service_tier" not in payloads[-1]
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/backend-api/codex/responses/compact"])
+async def test_plan_restricted_tier_fallback_covers_chat_and_compact(async_client, tier_pool, path):
+    _, seen, payloads = tier_pool
+    payload = {"model": MODELS[0], "instructions": "hi", "input": "hello", "service_tier": "priority"}
+    if path.endswith("completions"):
+        payload = {
+            "model": MODELS[0],
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+            "service_tier": "priority",
+        }
+    response = await async_client.post(path, json=payload)
+    assert response.status_code == 200, response.text
+    assert seen and seen[-1] in {"free-a", "free-b"}, response.text
+    assert "service_tier" not in payloads[-1]
+
+
+async def test_unconfigured_model_keeps_an_explicit_tier(async_client, tier_pool):
+    _, seen, payloads = tier_pool
+    response = await async_client.post(
+        "/v1/responses",
+        json={"model": UNCONFIGURED_MODEL, "input": "hello", "stream": True, "service_tier": "priority"},
+    )
+    assert response.status_code == 200, response.text
+    assert seen == ["paid"]
+    assert payloads[-1]["service_tier"] == "priority"
+
+
+async def test_plan_restricted_model_keeps_a_tier_an_allowed_plan_offers(async_client, tier_pool):
+    _, seen, payloads = tier_pool
+    saved = await async_client.put("/api/settings", json={"modelPlanRoutingPolicies": {MODELS[0]: ["free", "plus"]}})
+    assert saved.status_code == 200, saved.text
+    get_account_selection_cache().invalidate()
+    response = await async_client.post(
+        "/v1/responses", json={"model": MODELS[0], "input": "hello", "stream": True, "service_tier": "priority"}
+    )
+    assert response.status_code == 200, response.text
+    assert seen == ["paid"]
+    assert payloads[-1]["service_tier"] == "priority"

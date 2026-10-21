@@ -322,6 +322,7 @@ from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
     apply_enforced_service_tier_model_fallback,
+    apply_model_plan_service_tier_fallback,
     apply_prohibit_fast_mode,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
@@ -4930,6 +4931,7 @@ async def v1_chat_completions(
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,
         )
+        await apply_model_plan_service_tier_fallback(responses_payload)
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
         # not reject them.
@@ -7621,6 +7623,7 @@ async def _stream_responses(
             payload,
             service_tier_was_enforced=service_tier_was_enforced,
         )
+        await apply_model_plan_service_tier_fallback(payload)
     apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
     validate_model_access(api_key, payload.model)
     compact_payload: ResponsesCompactRequest | None = None
@@ -8138,6 +8141,7 @@ async def _collect_responses(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,
     )
+    await apply_model_plan_service_tier_fallback(payload)
     validate_model_access(api_key, payload.model)
     admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
     if admission_denial is not None:
@@ -8446,6 +8450,7 @@ async def _compact_responses(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,
     )
+    await apply_model_plan_service_tier_fallback(payload)
     validate_model_access(api_key, payload.model)
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)

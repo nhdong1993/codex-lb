@@ -653,3 +653,56 @@ def test_pause_during_create_lease_wait_releases_unsent_request(app_instance, ro
     assert reservations_released == ["unsent-reservation"]
     assert any(log.get("error_code") == "upstream_unavailable" for log in route.logs)
     assert not route.health_writes
+
+
+async def install_free_only_tier_catalog():
+    """Authoritative catalog: ``account_a`` (plus) offers priority, ``account_b`` (free) does not."""
+    from dataclasses import replace
+
+    from app.core.openai.model_registry import get_model_registry
+
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == "account_b").values(plan_type="free"))
+        await session.commit()
+    await set_plan_policy(["free"])
+    registry = get_model_registry()
+    base = registry.get_models_with_fallback()["gpt-5.4"]
+    raw = {key: value for key, value in base.raw.items() if key not in {"service_tiers", "additional_speed_tiers"}}
+    plus = replace(base, raw={**raw, "service_tiers": [{"id": "priority", "name": "Fast"}]})
+    free = replace(base, raw=raw)
+    await registry.update(
+        {"plus": [plus], "free": [free]},
+        per_account_results={"account_a": ("plus", [plus]), "account_b": ("free", [free])},
+        active_account_plans={"account_a": "plus", "account_b": "free"},
+    )
+
+
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+def test_plan_restricted_model_drops_an_unoffered_tier_on_websocket(app_instance, route, monkeypatch, path):
+    connected = []
+
+    async def fresh(self, account, **kwargs):
+        return account
+
+    async def connect(headers, access_token, account_id, **kwargs):
+        connected.append(account_id)
+        return route.second if account_id == "account_b" else route.first
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", route.real_connect)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fresh)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    with TestClient(app_instance) as client:
+        assert client.portal is not None
+        client.portal.call(route.seed)
+        client.portal.call(install_free_only_tier_catalog)
+        with client.websocket_connect(path) as websocket:
+            payload = _websocket_response_create("fast mode")
+            payload["service_tier"] = "priority"
+            websocket.send_json(payload)
+            created = websocket.receive_json()
+            assert created["type"] == "response.created", created
+            assert websocket.receive_json()["type"] == "response.completed"
+    assert connected == ["account_b"]
+    assert len(route.second.sent_text) == 1
+    assert "service_tier" not in json.loads(route.second.sent_text[0])
+    assert not route.health_writes
