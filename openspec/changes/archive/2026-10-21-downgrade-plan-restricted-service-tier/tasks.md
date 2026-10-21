@@ -28,4 +28,4 @@
 - [x] 4.1 Run the targeted suites sequentially, plus ruff, ruff format and ty on the touched files.
 - [x] 4.2 Run `/review-impl`.
 - [x] 4.3 Sync the deltas into the main specs and the `account-routing` context. Run `openspec validate --specs`.
-- [ ] 4.4 Archive after the operator accepts the result.
+- [x] 4.4 Archive after the operator accepts the result.
