@@ -1496,7 +1496,9 @@ async def _try_source_responses_websocket(
         if prohibit_fast and _is_fast_mode_model_alias(original_model):
             original_model = payload.model
         validate_model_access(refreshed, payload.model)
-        if responses_source_route_excluded(payload):
+        # Compaction turns follow source ownership as over HTTP; the
+        # subscription path cannot serve a source-only model's compaction.
+        if responses_source_route_excluded(payload, exclude_compaction=False):
             return None
         # This callback precedes the subscription worker's hard owner checks.
         # Resolve explicit aliases here on first and reused source turns.
@@ -1669,6 +1671,7 @@ async def _try_source_responses_websocket(
                 claims=claims,
                 admission_budget=budget,
                 requested_service_tier=payload.service_tier,
+                request_kind="compaction" if strip_terminal_compaction_trigger_input(payload) is not None else "normal",
                 cleanup_scheduler=_responses_cleanup_scheduler(context.service),
                 scheduler=scheduler,
                 clock=clock,

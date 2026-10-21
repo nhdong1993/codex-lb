@@ -545,6 +545,10 @@ class SourceWebSocketSession:
         response = terminal.get("response")
         if terminal.get("type") != "response.completed" or not isinstance(response, dict):
             return
+        # A compaction's input ends with its request-only trigger and holds the
+        # history it replaced; Codex resends its compacted history instead.
+        if turn.owner.request_kind == "compaction":
+            return
         response_id = response.get("id")
         if isinstance(response_id, str) and response_id:
             self._store_transcript(response_id, turn.client_input, output_items)

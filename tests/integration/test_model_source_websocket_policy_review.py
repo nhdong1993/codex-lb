@@ -418,7 +418,34 @@ async def test_disabled_source_only_model_bypasses_subscription_previous_owner(
 
 
 @pytest.mark.parametrize("path", ROUTES)
-async def test_compaction_trigger_keeps_subscription_previous_owner_for_source_only_model(
+async def test_file_reference_keeps_subscription_previous_owner_for_source_only_model(
+    async_client, app_instance, monkeypatch, path
+):
+    provider, calls, subscription_calls = anchored_turn_fixtures(monkeypatch)
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(provider, shutdown_timeout=1))
+        key = await create_key(async_client, source_id)
+        await register_subscription_owner(async_client, app_instance, key, previous_response_id="resp_subscription")
+        async with websocket_client(app_instance, path, key["key"]) as ws:
+            await ws.send(
+                {
+                    "type": "response.create",
+                    "model": "source-ws-model",
+                    "previous_response_id": "resp_subscription",
+                    "input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file_subscription"}]}],
+                }
+            )
+            event = await ws.receive()
+        # A structural exclusion keeps the turn on its owner-bound
+        # subscription path ahead of the source-only refusal.
+        assert event["error"]["code"] == "subscription_probe"
+        assert not calls
+        assert len(subscription_calls) == 1
+        assert not await key_reservations(key["id"])
+
+
+@pytest.mark.parametrize("path", ROUTES)
+async def test_compaction_trigger_for_subscription_anchored_source_only_model_requires_http(
     async_client, app_instance, monkeypatch, path
 ):
     provider, calls, subscription_calls = anchored_turn_fixtures(monkeypatch)
@@ -436,11 +463,12 @@ async def test_compaction_trigger_keeps_subscription_previous_owner_for_source_o
                 }
             )
             event = await ws.receive()
-        # A structural exclusion keeps the turn on its owner-bound
-        # subscription path ahead of the source-only refusal.
-        assert event["error"]["code"] == "subscription_probe"
+        # No subscription account can serve a source-only model, so a
+        # compaction turn meets the same HTTP fallback as any other turn.
+        assert event["status"] == 503
+        assert event["error"]["code"] == "model_source_requires_http_transport"
         assert not calls
-        assert len(subscription_calls) == 1
+        assert not subscription_calls
         assert not await key_reservations(key["id"])
 
 

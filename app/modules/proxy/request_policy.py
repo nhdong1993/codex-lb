@@ -967,9 +967,10 @@ def responses_source_route_excluded(
 ) -> bool:
     """True when a Responses request must stay on subscription accounts.
 
-    WebSocket callers retain their structural compaction exclusion. HTTP
-    callers set ``exclude_compaction=False`` so compact requests follow source
-    ownership. An ``input_file``/``input_image`` file reference is
+    The subscription WebSocket guards retain the compaction exclusion. HTTP
+    routes and source WebSocket preparation set ``exclude_compaction=False``
+    so compact requests follow source ownership. An
+    ``input_file``/``input_image`` file reference is
     pinned to the subscription account that received the upload. Previous
     response ownership is resolved separately from recorded continuity
     evidence because response identifier syntax is provider-opaque.

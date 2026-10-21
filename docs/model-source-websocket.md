@@ -27,6 +27,8 @@ The rebuilt context lives only on that socket and that replica. A `previous_resp
 
 Request logs show `transport=websocket` with `upstream_transport=openai_compatible_http` for bridged turns, and `openai_compatible_websocket` for native ones.
 
+Codex auto-compaction over WebSocket is a `response.create` whose input ends with `{"type":"compaction_trigger"}`. It goes to the socket's source like any other turn, native or bridged, including a continuation of the last completed response. The source must support the trigger on its Responses endpoint. Request logs record these turns with `request_kind=compaction`. A compaction response cannot be continued with `previous_response_id`. Codex gets the usual continuity error and resends its compacted history. If the request is anchored to a subscription account and the model exists only on a source, the turn fails with `model_source_requires_http_transport`, and Codex retries over HTTP.
+
 ## Limits, installers and rollout
 
 Each source message, including the first create, is limited to 16 MiB of UTF-8 JSON text. Whitespace and JSON escapes count toward this limit. An oversized create returns `invalid_request_error`; a smaller corrected request can use the same socket.
