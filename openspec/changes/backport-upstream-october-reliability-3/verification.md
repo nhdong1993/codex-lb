@@ -141,4 +141,8 @@ Fallback: revert `55f64f62`. This does not undo warm-ups already sent.
 - `review-think-20261019-003`: consensus on buckets and adaptations.
 - `review-plan-20261020-001`: APPROVE after 3 rounds (9 issues fixed).
 - `review-impl-20261020-001` (Phases 1–7, `4940aad2..55f64f62`): APPROVE in round 1, no findings.
-- The final cumulative review is recorded below.
+- `review-impl-20261021-001` (cumulative `4940aad2..3d7aefb9`): APPROVE in round 1, no findings.
+  - Product patches for Phases 8–13 match their upstream patch-ids.
+  - Phase 14 keeps `reset_evidence` and stays at 3021 lines.
+  - The test-conflict resolutions, the extra typing commit, the integration-test placement and the screenshot fixtures were accepted.
+  - The canonical spec changes stay within the approved scope.
