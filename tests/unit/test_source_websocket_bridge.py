@@ -88,7 +88,7 @@ async def test_send_observes_timing_only_after_taking_the_send_lock() -> None:
     websocket = _RecordingWebSocket()
     session.websocket = cast(Any, websocket)
     owner = _ObservingOwner()
-    turn = cast(Any, SimpleNamespace(owner=owner, terminal_handed_off=False))
+    turn = cast(Any, SimpleNamespace(owner=owner, terminal_handed_off=False, trace=None))
     delta: dict[str, Any] = {"type": "response.output_text.delta", "delta": "hi"}
 
     async with session.send_lock:
