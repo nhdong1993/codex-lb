@@ -79,3 +79,15 @@ Source-routed Responses rows used to keep only codex-lb's own `model_source_resp
 
 Example row: `status=error`, `error_code=model_source_response_failed`, `upstream_error_code=upstream_eof`, `upstream_status_code=200`.
 
+
+## Bridged source stream trace (2026-10-23)
+
+Non-success rows of WebSocket turns bridged to an HTTP/SSE source carry a payload-free `failure_detail`, for example `source_bridge events=created,in_progress,metadata handed_off=none replay=eligible`.
+
+- `events`: up to eight event kinds from a fixed vocabulary, with consecutive repeats collapsed and `+` marking that more followed.
+- `handed_off`: the furthest class handed to the client transport (`none`, `prefix` or `content`), latched at the transport-handoff point.
+- `replay`: whether the attempt qualified for the single pre-content replay. A failure before the relay started reads `events=none handed_off=none replay=none`.
+
+Each started replay logs `source_bridge_replay request_id=… replacement_request_id=… reason=…`. A replay that could not be prepared logs `source_bridge_replay_unavailable`.
+
+Query: `select failure_detail, count(*) from request_logs where failure_detail like 'source_bridge %' group by 1`. See the change `replay-pre-content-bridged-source-failures`.

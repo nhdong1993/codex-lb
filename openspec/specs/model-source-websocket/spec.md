@@ -197,7 +197,7 @@ All response, item, call, encrypted and hosted-resource references introduced by
 
 ### Requirement: Source WebSocket attempts preserve settlement and safe retry boundaries
 
-Source admission MUST precede quota reservation. Each attempt MUST settle or release exactly once and produce one source-attributed log. Existing source usage policy MUST apply: successful limited-key responses without usage settle an estimate; cancellation after content delivery follows the existing estimate policy; pre-content cancellation and failure/truncated responses release. A portable initial request MAY try at most five distinct eligible sources only for proven pre-send connection failure or eligible handshake rejection. After send begins, ambiguous delivery MUST NOT cause automatic replay. Owned continuations MUST NOT switch sources. Prior settlement/admission release MUST finish before cooldown writes or another reservation. A source WebSocket MUST retain transport-level keepalive pings without treating a delayed pong as a response-stream failure; first-frame, stream-idle and total-turn deadlines remain authoritative bounds for stalled work.
+Source admission MUST precede quota reservation. Each attempt MUST settle or release exactly once and produce one source-attributed log. Existing source usage policy MUST apply: successful limited-key responses without usage settle an estimate; cancellation after content delivery follows the existing estimate policy; pre-content cancellation and failure/truncated responses release. A portable initial request MAY try at most five distinct eligible sources only for proven pre-send connection failure or eligible handshake rejection. After send begins, ambiguous delivery MUST NOT cause automatic replay, except the single same-source replay of a bridged turn that failed before any event was handed to the client, as defined by "Bridged turns replay one pre-content source failure". Owned continuations MUST NOT switch sources. Prior settlement/admission release MUST finish before cooldown writes or another reservation. A source WebSocket MUST retain transport-level keepalive pings without treating a delayed pong as a response-stream failure; first-frame, stream-idle and total-turn deadlines remain authoritative bounds for stalled work.
 
 #### Scenario: Admission changes during effective-policy lookup
 - **WHEN** another request fills a portable initial request's selected source while its effective policy is being checked
@@ -480,3 +480,41 @@ A bridged `response.create` with `generate:false` SHALL complete routing, policy
 #### Scenario: Warmup policy errors are preserved
 - **WHEN** a bridged warmup uses a forbidden model or a revoked key
 - **THEN** it receives the same WebSocket domain error as a generating create
+
+### Requirement: Bridged turns replay one pre-content source failure
+
+The first attempt of a WebSocket turn bridged to an HTTP/SSE source MUST hold back its lifecycle prefix: `response.created`, `response.in_progress` and `response.queued` events whose `response.output` is absent or empty, and `response.metadata` events carrying no fields other than `type`, `metadata`, `headers`, `response_id` and `sequence_number`. A held-back event MUST NOT be published to source ownership or handed to the client. When any other `error` or `response.*` event arrives, or when the held-back events exceed the existing 2 MiB withheld-bytes bound, the held-back events MUST be published and delivered first, in source order, the attempt MUST no longer be replayable, and the turn MUST continue as before. A terminal observed while the prefix is being delivered MUST NOT count as handed off until that terminal itself is handed to the client transport. While the prefix is held back, after the source response has delivered its first body bytes, a source body that resets or ends without a terminal event, or a failure terminal whose sanitized upstream error code is `server_is_overloaded`, MUST finalize the attempt as failed (closed response, released reservation and admission, one request log) without delivering its events, and MUST re-send the turn once to the same source, source revision and public model with the same reconstructed request body. The replacement MUST be prepared through regular turn preparation bound to the session identity; when that preparation yields a different effective request body, the replacement MUST be discarded without a request log and the original failure returned. The replacement MUST take a fresh admission claim and reservation, MUST remain bounded by the original turn deadline, and MUST relay its events without holding them back or being replayed again. A `2xx` source response whose body fails before its first chunk MUST keep the existing open-failure handling. No replay MAY occur after any event of the attempt was handed to the client, for any other failure code or error class, for native source sessions, warmups, timeouts, client disconnect, ownership or settlement failure, or while the server drains. When the replacement cannot be prepared, the client MUST receive the original failure as a WebSocket `error` event; a replacement whose reservation is refused MUST be finalized and reported like any refused turn.
+
+#### Scenario: A reset before content is replayed invisibly
+- **GIVEN** a bridged session whose source sends `response.created`, `response.in_progress` and `response.metadata` and then resets the connection
+- **WHEN** the source answers the replayed request with a complete response
+- **THEN** the client receives only the replacement's events, including exactly one `response.created`
+- **AND** the source received two identical request bodies, the request log has an error row with `model_source_stream_truncated` followed by a success row, and the first reservation is released while the second is settled
+
+#### Scenario: An overloaded failure before content is replayed
+- **WHEN** the first attempt's source stream sends `response.created` followed by `response.failed` with error code `server_is_overloaded`
+- **THEN** the client does not receive that failure, the turn is re-sent once, and the first row records `upstream_error_code = server_is_overloaded`
+
+#### Scenario: A failure after content is not replayed
+- **WHEN** the source resets the connection after an `response.output_item.added` event was relayed
+- **THEN** the client receives `model_source_stream_truncated` and the source receives no second request
+
+#### Scenario: Other failure codes are not replayed
+- **WHEN** the first attempt fails before content with a failure terminal whose code is `server_error`
+- **THEN** the client receives the held-back events followed by the sanitized failure, and no replay occurs
+
+#### Scenario: The replacement fails too
+- **WHEN** both the first attempt and its replacement reset before content
+- **THEN** the client receives the replacement's `response.created` and `model_source_stream_truncated`, the source receives exactly two requests, and both rows are errors with released reservations
+
+#### Scenario: The replacement cannot be admitted
+- **WHEN** the first attempt resets before content and the bound source has no free admission for the replacement
+- **THEN** the client receives the original `model_source_stream_truncated` error and only the first attempt is logged
+
+#### Scenario: Refreshed policy changes the replacement body
+- **WHEN** the first attempt resets before content and the source's request overrides changed after it was dispatched
+- **THEN** no second request is sent and the client receives the original `model_source_stream_truncated` error
+
+#### Scenario: An outsized prefix is relayed
+- **WHEN** the held-back lifecycle events exceed the withheld-bytes bound and the source then resets
+- **THEN** the client has received those events in order followed by `model_source_stream_truncated`, and no replay occurs
