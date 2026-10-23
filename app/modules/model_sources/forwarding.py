@@ -717,6 +717,11 @@ async def _source_stream_body(
                         yield pending
                 elif withheld_bytes > SOURCE_STREAM_WITHHELD_CAP_BYTES:
                     raise _withheld_cap_error(withheld_bytes)
+            if usage_holder.terminal_kind is not None:
+                # The chunk completing the terminal was relayed. A source may
+                # keep its body open after it (ch-relay does); nothing a client
+                # needs follows, so end here rather than idle out waiting for EOF.
+                break
             chunk = None
         if withheld:
             if usage_holder.first_content_seen:

@@ -222,6 +222,110 @@ def _request_body(model: str, **extra: Any) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "failed"])
+async def test_source_stream_ends_at_its_terminal_while_the_source_keeps_its_body_open(
+    async_client, source_upstream, terminal
+) -> None:
+    # ch-relay keeps its SSE body open after the terminal (2026-10-23): the
+    # client stream, the settlement and the admission must not wait for its EOF.
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    never = asyncio.Event()
+    final = (
+        _completed(_USAGE)
+        if terminal == "completed"
+        else _sse(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_dispatch_1",
+                    "object": "response",
+                    "status": "failed",
+                    "output": [],
+                    "error": {"code": "server_is_overloaded", "message": "overloaded"},
+                },
+            }
+        )
+    )
+    base_url = await source_upstream(
+        _sse_handler(
+            state,
+            before_hold=[_created(), _ITEM_ADDED, _DELTA, final],
+            hold=never,
+            after_hold=[b"data: [DONE]\n\n"],
+        ),
+        handler_cancellation=True,
+        shutdown_timeout=1,
+    )
+    model = f"dispatch-terminal-open-{terminal}"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
+
+    stream = _AsgiStream(
+        app=_app(async_client),
+        path="/v1/responses",
+        headers={"authorization": f"Bearer {key}"},
+        body=json.dumps(_request_body(model)).encode(),
+    )
+    await asyncio.wait_for(stream.run(), timeout=10)
+    await _drain(async_client)
+    for _ in range(100):
+        if state.cancelled:
+            break
+        await asyncio.sleep(0.05)
+
+    assert stream.status == 200
+    assert f"response.{terminal}" in stream.received().decode()
+    # The source response was closed at the terminal instead of drained to an EOF that never comes.
+    assert state.cancelled == 1 and state.finished == 0
+    rows = await _source_rows(source_id)
+    reservations = await _reservations(key_id)
+    if terminal == "completed":
+        assert [row.status for row in rows] == ["success"]
+        assert [reservation.status for reservation in reservations] == ["finalized"]
+        assert reservations[0].input_tokens == 100 and reservations[0].output_tokens == 20
+    else:
+        assert [(row.status, row.upstream_error_code) for row in rows] == [("error", "server_is_overloaded")]
+        assert [reservation.status for reservation in reservations] == ["released"]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_source_stream_relays_the_rest_of_its_terminal_chunk(async_client, source_upstream) -> None:
+    state = _StubState()
+    never = asyncio.Event()
+    base_url = await source_upstream(
+        _sse_handler(
+            state,
+            before_hold=[_created(), _ITEM_ADDED, _completed(_USAGE) + b"data: [DONE]\n\n"],
+            hold=never,
+        ),
+        handler_cancellation=True,
+        shutdown_timeout=1,
+    )
+    model = "dispatch-terminal-chunk-tail"
+    source_id = await _create_model_source(
+        async_client, name=model, model=model, base_url=base_url, supports_responses=True
+    )
+    key, _key_id = await _create_unlimited_key(async_client, source_id, name=f"{model}-key")
+
+    stream = _AsgiStream(
+        app=_app(async_client),
+        path="/v1/responses",
+        headers={"authorization": f"Bearer {key}"},
+        body=json.dumps(_request_body(model)).encode(),
+    )
+    await asyncio.wait_for(stream.run(), timeout=10)
+    await _drain(async_client)
+
+    text = stream.received().decode()
+    assert text.index("response.completed") < text.index("[DONE]")
+    assert [row.status for row in await _source_rows(source_id)] == ["success"]
+
+
+@pytest.mark.asyncio
 async def test_limited_key_streams_live_and_settles_from_source_usage(async_client, source_upstream) -> None:
     await _enable_api_key_auth(async_client)
     state = _StubState()
