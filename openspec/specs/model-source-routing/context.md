@@ -254,3 +254,15 @@ backend before testing continuation across replicas. Local regression tests use
 a real HTTP source fixture and reset process-local selection while retaining the
 shared ownership database; they are not evidence of a production rollout. See
 [spec.md](spec.md) for the normative contract.
+
+## Source streams end at their terminal (2026-10-23)
+
+`ch-relay` keeps its SSE body open after `response.completed`; one probe was still open at 420 s. Codex 0.163 reads SSE in a background task that also waits for EOF, so neither side hung up. The HTTP source path read until its 300 s idle timer fired. That produced three problems:
+
+- a delivered answer was recorded as `error model_source_idle_timeout`, 741 rows in 14 h on that source;
+- a limited key's reservation was released instead of settled;
+- admission and the relay connection were held for the full 300 s. The gateway logged 186 requests over 290 s in 6.5 h.
+
+`_source_stream_body` now stops after the chunk that completes the first Responses terminal and closes the source response. Bytes sharing that chunk are still relayed, and settlement keeps its existing rules, including failure precedence. Chat-completions streams are unchanged. The WebSocket→HTTP bridge already closed at its terminal.
+
+Example: the source sends `created`, an output item, a delta and `completed`, then keeps the body open. The client stream now ends right after `completed`, the row is `success` with usage, and the reservation is settled at once. See the change `end-source-streams-at-terminal`.
