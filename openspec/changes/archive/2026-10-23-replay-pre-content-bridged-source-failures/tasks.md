@@ -19,5 +19,6 @@
 
 - [x] 4.1 Run the targeted suites serially, `ruff check` / `ruff format --check`, and `ty`.
 - [x] 4.2 Run `/review-impl`, then sync the deltas into the main specs and `context.md`. Run `openspec validate --specs`.
-- [ ] 4.3 Deploy. Confirm `source_bridge` traces and replays in production rows. Compare against the relay A/B baseline.
-- [ ] 4.4 Archive after the operator accepts the result.
+- [x] 4.3 Deploy. Confirm `source_bridge` traces and replays in production rows. Compare against the relay A/B baseline.
+  - Deployed 999dad5aa at 2026-10-23 21:45 HCM. In the first 2.3 h there were 177 replays and 125 replacements succeeded. Every trace read `events=created,in_progress,metadata,error handed_off=none replay=eligible`.
+- [x] 4.4 Archive after the operator accepts the result. Accepted 2026-10-24 HCM.
