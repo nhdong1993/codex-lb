@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 from uuid import uuid4
 
@@ -36,6 +36,7 @@ from app.modules.model_sources.aliases import source_request_payload
 from app.modules.model_sources.catalog import source_model_upstream_id
 from app.modules.model_sources.forwarding import (
     SOURCE_FIRST_FRAME_DEADLINE_SECONDS,
+    SOURCE_STREAM_WITHHELD_CAP_BYTES,
     ModelSourceForwardingError,
     SourceStreamUsageParser,
     SourceUsageHolder,
@@ -53,7 +54,12 @@ from app.modules.proxy._service.websocket.helpers import (
     _WebSocketJsonObject,
 )
 from app.modules.proxy.helpers import _normalize_error_code
-from app.modules.proxy.source_dispatch import CleanupScheduler, SourceDispatch, error_code_from_payload
+from app.modules.proxy.source_dispatch import (
+    ERROR_MODEL_SOURCE_STREAM_TRUNCATED,
+    CleanupScheduler,
+    SourceDispatch,
+    error_code_from_payload,
+)
 from app.modules.proxy.source_ownership import SourceOwnershipError, source_revision
 from app.modules.proxy.source_pool import MAX_SOURCE_ATTEMPTS, get_source_pool, retryable_source_error
 from app.modules.proxy.websocket_input import WebSocketInputBuffer, WebSocketInputOverflow
@@ -64,6 +70,26 @@ _TRANSPORT_CLOSE_TIMEOUT_SECONDS = 2.0
 _SESSION_CLEANUP_TIMEOUT_SECONDS = 5.0
 # WebSocket-only envelope fields an HTTP Responses source must not receive.
 _BRIDGE_DROPPED_FIELDS = frozenset({"type", "generate"})
+# Lifecycle bookkeeping a bridged attempt holds back while it may still be
+# replayed: nothing before the first other event reaches the client.
+_BRIDGE_LIFECYCLE_EVENT_TYPES = frozenset({"response.created", "response.in_progress", "response.queued"})
+_BRIDGE_LIFECYCLE_FIELDS = frozenset({"type", "response", "sequence_number"})
+_BRIDGE_METADATA_FIELDS = frozenset({"type", "metadata", "headers", "response_id", "sequence_number"})
+# Pre-content failure terminals worth one more attempt; other codes are answers.
+_BRIDGE_REPLAYABLE_FAILURE_CODES = frozenset({"server_is_overloaded"})
+_BRIDGE_TRACE_LIMIT = 8
+_BRIDGE_TRACE_KINDS: dict[str, str] = {
+    "response.created": "created",
+    "response.in_progress": "in_progress",
+    "response.queued": "queued",
+    "response.metadata": "metadata",
+    "response.output_item.added": "output_item",
+    "response.output_item.done": "output_item",
+    "response.completed": "completed",
+    "response.incomplete": "incomplete",
+    "response.failed": "failed",
+    "error": "error",
+}
 
 type SourceUpstream = Literal["websocket", "http"]
 
@@ -89,6 +115,17 @@ class SourceWebSocketTurn:
     upstream_status_code: int = 101
     terminal_handed_off: bool = False
     terminal_error: ModelSourceForwardingError | None = None
+    # A bridged turn's first attempt holds its lifecycle prefix back and may be
+    # replayed once; ``replay_eligible`` records that it failed before delivery.
+    replayable: bool = False
+    replay_eligible: bool = False
+    # Bridged attempts only; a failure before the relay starts keeps the empty trace.
+    trace: _BridgeTrace | None = None
+
+    def __post_init__(self) -> None:
+        if self.upstream == "http":
+            self.trace = _BridgeTrace()
+            self.owner.failure_detail = self.trace.detail(replay=False)
 
     @property
     def identity(self) -> SourceSocketIdentity:
@@ -126,6 +163,50 @@ class _BridgeTranscript:
     response_id: str
     items_json: str
     size: int
+
+
+@dataclass(slots=True)
+class _BridgeTrace:
+    """Payload-free event kinds of one bridged attempt for its request-log row."""
+
+    kinds: list[str] = field(default_factory=list)
+    overflow: bool = False
+    handed_off: Literal["none", "prefix", "content"] = "none"
+
+    def observe(self, event_type: str) -> None:
+        kind = _BRIDGE_TRACE_KINDS.get(event_type) or ("delta" if event_type.endswith(".delta") else "other")
+        if self.kinds and self.kinds[-1] == kind:
+            return
+        if len(self.kinds) < _BRIDGE_TRACE_LIMIT:
+            self.kinds.append(kind)
+        else:
+            self.overflow = True
+
+    def hand_off(self, *, prefix: bool) -> None:
+        if not prefix:
+            self.handed_off = "content"
+        elif self.handed_off == "none":
+            self.handed_off = "prefix"
+
+    def detail(self, *, replay: bool) -> str:
+        events = ",".join(self.kinds) + ("+" if self.overflow else "") if self.kinds else "none"
+        return f"source_bridge events={events} handed_off={self.handed_off} replay={'eligible' if replay else 'none'}"
+
+
+def _bridge_prefix_event(event: dict[str, JsonValue]) -> bool:
+    """Whether ``event`` is lifecycle bookkeeping carrying no output, held back while a replay is possible."""
+    event_type = event["type"]
+    if event_type in _BRIDGE_LIFECYCLE_EVENT_TYPES:
+        response = event.get("response")
+        return event.keys() <= _BRIDGE_LIFECYCLE_FIELDS and isinstance(response, dict) and not response.get("output")
+    return event_type == "response.metadata" and event.keys() <= _BRIDGE_METADATA_FIELDS
+
+
+def _bridge_truncation(error: BaseException) -> bool:
+    """A source body that reset or ended without a terminal (``_generation`` maps both to truncation)."""
+    if isinstance(error, ModelSourceForwardingError):
+        return error_code_from_payload(error.payload) == ERROR_MODEL_SOURCE_STREAM_TRUNCATED
+    return isinstance(error, (ConnectionClosed, OSError)) and not isinstance(error, TimeoutError)
 
 
 def _bridge_input_items(value: JsonValue) -> list[JsonValue] | None:
@@ -225,14 +306,15 @@ class SourceWebSocketSession:
     async def send(self, event: dict[str, JsonValue], *, turn: SourceWebSocketTurn | None = None) -> None:
         async with self.send_lock:
             if turn is not None:
-                holder = turn.owner.usage_holder
+                kind = classify_responses_frame(str(event["type"]))
                 # Mark the transport handoff only after obtaining the write
                 # lock: cancellation while queued has not delivered a frame.
-                turn.terminal_handed_off = holder is not None and holder.terminal_kind is not None
-                if (
-                    classify_responses_frame(str(event["type"])) in {"content", "success_terminal"}
-                    and not turn.owner.warmup
-                ):
+                # The event itself decides: a bridged prefix flushed ahead of
+                # an already observed terminal does not deliver that terminal.
+                turn.terminal_handed_off = turn.terminal_handed_off or kind in {"success_terminal", "failure_terminal"}
+                if turn.trace is not None:
+                    turn.trace.hand_off(prefix=_bridge_prefix_event(event))
+                if kind in {"content", "success_terminal"} and not turn.owner.warmup:
                     turn.owner.content_delivered = True
                 # Timed at the same handoff point, for native and bridged turns alike.
                 turn.owner.observe_relayed_event(str(event["type"]), event)
@@ -435,6 +517,12 @@ class SourceWebSocketSession:
         assert events is not None
         holder, parser = self._observe(turn)
         output_items: list[JsonValue] = []
+        trace = turn.trace
+        assert trace is not None
+        # Until the first other event nothing of a replayable attempt has
+        # reached the client or source ownership, so its failure stays invisible.
+        withheld: list[dict[str, JsonValue]] | None = [] if turn.replayable else None
+        withheld_bytes = 0
         try:
             async for block in events.blocks:
                 data = extract_sse_data(block)
@@ -451,21 +539,51 @@ class SourceWebSocketSession:
                     # Vendor events such as ``codex.rate_limits`` describe the
                     # source's own upstream, not this client's session.
                     continue
-                delivered = await self._relay_event(turn, holder, parser, event)
+                trace.observe(event_type)
+                prefix = _bridge_prefix_event(event)
+                if withheld is not None and prefix:
+                    withheld.append(self._observe_event(turn, holder, parser, event))
+                    withheld_bytes += len(data.encode("utf-8"))
+                    if withheld_bytes <= SOURCE_STREAM_WITHHELD_CAP_BYTES:
+                        continue
+                    # An outsized prefix is relayed as before; it is no longer replayable.
+                    released, withheld = withheld, None
+                    for pending in released:
+                        await self._deliver(turn, pending)
+                    continue
+                delivered = self._observe_event(turn, holder, parser, event)
+                if withheld is not None:
+                    if (
+                        holder.terminal_kind in {"failed", "error"}
+                        and holder.terminal_error_code in _BRIDGE_REPLAYABLE_FAILURE_CODES
+                    ):
+                        assert turn.terminal_error is not None
+                        turn.replay_eligible = True
+                        raise turn.terminal_error
+                    released, withheld = withheld, None
+                    for pending in released:
+                        await self._deliver(turn, pending)
+                await self._deliver(turn, delivered)
                 item = delivered.get("item")
                 if event_type == "response.output_item.done" and isinstance(item, dict):
                     output_items.append(item)
                 if holder.terminal_kind is not None:
+                    turn.owner.failure_detail = trace.detail(replay=False)
                     self._remember(turn, delivered, output_items)
                     # Close the response before finishing returns admission.
                     await self._close_http()
                     await self._finish_relayed(turn)
                     return
+            raise source_ws_error(
+                "model_source_stream_truncated", "Model source disconnected before completing the response", status=502
+            )
+        except BaseException as error:
+            if withheld is not None and _bridge_truncation(error):
+                turn.replay_eligible = True
+            turn.owner.failure_detail = trace.detail(replay=turn.replay_eligible)
+            raise
         finally:
             await _await_cleanup_deferring_cancellation(events.blocks.aclose(), scheduler=self.scheduler)
-        raise source_ws_error(
-            "model_source_stream_truncated", "Model source disconnected before completing the response", status=502
-        )
 
     async def _relay_event(
         self,
@@ -475,6 +593,18 @@ class SourceWebSocketSession:
         event: dict[str, JsonValue],
     ) -> dict[str, JsonValue]:
         """Validate, observe, publish and deliver one upstream event; returns the event as delivered."""
+        delivered = self._observe_event(turn, holder, parser, event)
+        await self._deliver(turn, delivered)
+        return delivered
+
+    def _observe_event(
+        self,
+        turn: SourceWebSocketTurn,
+        holder: SourceUsageHolder,
+        parser: SourceStreamUsageParser,
+        event: dict[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        """Validate and observe one upstream event; returns the event as it is delivered."""
         owner = turn.owner
         event_type = str(event["type"])
         if event_type in {"response.created", "response.completed", "response.incomplete", "response.failed"}:
@@ -519,11 +649,15 @@ class SourceWebSocketSession:
                 }
             else:
                 event = {"type": "error", "status": 502, **error.payload}
+        return event
+
+    async def _deliver(self, turn: SourceWebSocketTurn, event: dict[str, JsonValue]) -> None:
+        """Publish ownership of an observed event, then hand it to the client."""
+        owner = turn.owner
         if owner.ownership is not None:
             await owner.ownership.record_event(event)
         owner.observe_stream()
         await self.send(event, turn=turn)
-        return event
 
     async def _finish_relayed(self, turn: SourceWebSocketTurn) -> None:
         owner = turn.owner
@@ -707,6 +841,53 @@ class SourceWebSocketSession:
         except TimeoutError:
             raise source_ws_error("model_source_timeout", "Source reservation timed out", status=504) from None
 
+    async def _bridged_replacement(
+        self, turn: SourceWebSocketTurn, error: ModelSourceForwardingError, raw: _QueuedTurn
+    ) -> SourceWebSocketTurn | None:
+        """Prepare the single same-source replay of a bridged attempt that failed before any delivery.
+
+        The failed attempt is already finalized: its response closed, its
+        reservation released and its row written. ``None`` leaves the original
+        failure to the client.
+        """
+        owner = turn.owner
+        if (
+            not turn.replay_eligible
+            or not owner.finished
+            or owner.settlement_failed
+            or owner.reservation_release_failed
+        ):
+            return None
+        task = asyncio.current_task()
+        if (task is not None and task.cancelling()) or shutdown.is_draining():
+            return None
+        holder = owner.usage_holder
+        reason = error_code_from_payload(error.payload)
+        if holder is not None and holder.terminal_error_code in _BRIDGE_REPLAYABLE_FAILURE_CODES:
+            reason = holder.terminal_error_code
+        try:
+            replacement = await self.scheduler.wait_for(
+                self.prepare(raw.payload, bound=self.identity, excluded=set(), received_at=raw.received_at),
+                timeout=max(0, raw.received_at + self.request_timeout - self.clock.monotonic()),
+            )
+        except (TimeoutError, ModelSourceForwardingError):
+            replacement = None
+        if replacement is not None and replacement.payload != turn.payload:
+            # Refreshed policy changed the effective request: a transparent
+            # retry must not silently become a different generation.
+            await replacement.owner.discard()
+            replacement = None
+        if replacement is None:
+            logger.warning("source_bridge_replay_unavailable request_id=%s reason=%s", owner.request_id, reason)
+            return None
+        logger.info(
+            "source_bridge_replay request_id=%s replacement_request_id=%s reason=%s",
+            owner.request_id,
+            replacement.owner.request_id,
+            reason,
+        )
+        return replacement
+
     async def _worker(
         self, first: SourceWebSocketTurn, first_payload: dict[str, JsonValue], received_at: float
     ) -> None:
@@ -721,67 +902,84 @@ class SourceWebSocketSession:
                 if turn.local_warmup:
                     await self._answer_local_warmup(turn)
                 else:
-                    await self._reserve(turn)
-                    # Only an unbound portable initial turn may try another
-                    # source after a retryable open failure. Bound sessions never move.
+                    replayed = False
                     while True:
-                        attempted.add(turn.owner.source.id)
-                        try:
-                            if turn.upstream == "http":
-                                await self._open_http(turn)
-                            elif self.upstream is None:
-                                self.upstream = await open_source_websocket(
-                                    turn.owner.source,
-                                    timeout=max(
-                                        0.001, min(self.connect_timeout, turn.deadline - self.clock.monotonic())
-                                    ),
-                                )
-                            break
-                        except ModelSourceForwardingError as error:
-                            await turn.owner.finish_with_forwarding_error(error)
-                            task = asyncio.current_task()
-                            if task is not None and task.cancelling():
-                                raise asyncio.CancelledError
-                            if turn.owner.settlement_failed or turn.owner.reservation_release_failed:
-                                raise source_ws_error(
-                                    "usage_settlement_failed", "Unable to finalize source usage; reconnect", status=502
-                                ) from None
-                            get_source_pool().failed(turn.owner.source, error)
-                            if (
-                                self.identity is not None
-                                or not turn.portable
-                                or not retryable_source_error(error)
-                                or len(attempted) >= MAX_SOURCE_ATTEMPTS
-                            ):
-                                raise
+                        await self._reserve(turn)
+                        # Only an unbound portable initial turn may try another
+                        # source after a retryable open failure. Bound sessions never move.
+                        while True:
+                            attempted.add(turn.owner.source.id)
                             try:
-                                prepared = await self.scheduler.wait_for(
-                                    self.prepare(
-                                        raw.payload, bound=None, excluded=attempted, received_at=raw.received_at
-                                    ),
-                                    timeout=max(0, raw.received_at + self.request_timeout - self.clock.monotonic()),
-                                )
-                            except TimeoutError:
-                                raise source_ws_error(
-                                    "model_source_timeout", "Source retry preparation timed out", status=504
-                                ) from None
-                            except ModelSourceForwardingError as retry_error:
-                                # Like the HTTP pool, report the source's own
-                                # failure when no replacement is selectable.
+                                if turn.upstream == "http":
+                                    await self._open_http(turn)
+                                elif self.upstream is None:
+                                    self.upstream = await open_source_websocket(
+                                        turn.owner.source,
+                                        timeout=max(
+                                            0.001, min(self.connect_timeout, turn.deadline - self.clock.monotonic())
+                                        ),
+                                    )
+                                break
+                            except ModelSourceForwardingError as error:
+                                await turn.owner.finish_with_forwarding_error(error)
+                                task = asyncio.current_task()
+                                if task is not None and task.cancelling():
+                                    raise asyncio.CancelledError
+                                if turn.owner.settlement_failed or turn.owner.reservation_release_failed:
+                                    raise source_ws_error(
+                                        "usage_settlement_failed",
+                                        "Unable to finalize source usage; reconnect",
+                                        status=502,
+                                    ) from None
+                                get_source_pool().failed(turn.owner.source, error)
                                 if (
-                                    turn.upstream == "http"
-                                    and error_code_from_payload(retry_error.payload) == "model_source_busy"
+                                    self.identity is not None
+                                    or not turn.portable
+                                    or not retryable_source_error(error)
+                                    or len(attempted) >= MAX_SOURCE_ATTEMPTS
                                 ):
-                                    raise error from None
+                                    raise
+                                try:
+                                    prepared = await self.scheduler.wait_for(
+                                        self.prepare(
+                                            raw.payload, bound=None, excluded=attempted, received_at=raw.received_at
+                                        ),
+                                        timeout=max(0, raw.received_at + self.request_timeout - self.clock.monotonic()),
+                                    )
+                                except TimeoutError:
+                                    raise source_ws_error(
+                                        "model_source_timeout", "Source retry preparation timed out", status=504
+                                    ) from None
+                                except ModelSourceForwardingError as retry_error:
+                                    # Like the HTTP pool, report the source's own
+                                    # failure when no replacement is selectable.
+                                    if (
+                                        turn.upstream == "http"
+                                        and error_code_from_payload(retry_error.payload) == "model_source_busy"
+                                    ):
+                                        raise error from None
+                                    raise
+                                if prepared is None:
+                                    raise error
+                                turn = prepared
+                                self.turn = turn
+                                self.deadline = turn.deadline
+                                await self._reserve(turn)
+                        self.identity = turn.identity
+                        turn.replayable = turn.upstream == "http" and not replayed
+                        try:
+                            generated = await self._generation(turn)
+                        except ModelSourceForwardingError as error:
+                            replacement = await self._bridged_replacement(turn, error, raw)
+                            if replacement is None:
                                 raise
-                            if prepared is None:
-                                raise error
-                            turn = prepared
+                            replayed = True
+                            turn = replacement
                             self.turn = turn
                             self.deadline = turn.deadline
-                            await self._reserve(turn)
-                    self.identity = turn.identity
-                    if not await self._generation(turn):
+                            continue
+                        break
+                    if not generated:
                         return
             except ModelSourceForwardingError as error:
                 if not turn.owner.finished:
@@ -809,13 +1007,10 @@ class SourceWebSocketSession:
                 # Waiting in the queue spends the same request budget; policy
                 # and ownership are read again only when the turn can dispatch.
                 remaining = self.request_timeout - (self.clock.monotonic() - raw.received_at)
+                # Keep the expanded body: a replay must re-send exactly what was dispatched.
+                raw = _QueuedTurn(self._expand_continuation(raw.payload), raw.received_at)
                 turn_or_none = await self.scheduler.wait_for(
-                    self.prepare(
-                        self._expand_continuation(raw.payload),
-                        bound=self.identity,
-                        excluded=set(),
-                        received_at=raw.received_at,
-                    ),
+                    self.prepare(raw.payload, bound=self.identity, excluded=set(), received_at=raw.received_at),
                     timeout=max(0, remaining),
                 )
                 if turn_or_none is None:

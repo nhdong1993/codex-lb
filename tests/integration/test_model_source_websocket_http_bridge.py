@@ -8,9 +8,9 @@ from typing import Any
 
 import pytest
 from aiohttp import web
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from app.db.models import ApiKeyUsageReservation, RequestLog
+from app.db.models import ApiKeyUsageReservation, ModelSourceModel, RequestLog
 from app.db.session import SessionLocal
 from app.modules.proxy.source_admission import get_source_bulkhead
 from app.modules.proxy.source_dispatch import SourceDispatch
@@ -378,7 +378,9 @@ async def test_bridge_source_rejection_returns_http_envelope(async_client, app_i
     assert event["error"]["code"] != "model_source_busy"
     assert calls == 1
     assert [reservation.status for reservation in reservations] == ["released"]
-    assert [row.status for row in rows] == ["error"]
+    assert [(row.status, row.failure_detail) for row in rows] == [
+        ("error", "source_bridge events=none handed_off=none replay=none")
+    ]
     assert get_source_bulkhead().in_flight(source_id) == 0
 
 
@@ -611,3 +613,364 @@ async def test_bridge_resend_limit_boundary(async_client, app_instance, monkeypa
     else:
         assert last["type"] == "response.completed", last
         assert len(bodies) == 2
+
+
+def _prefix(response_id: str) -> list[dict[str, Any]]:
+    """The lifecycle prefix ch-relay sends before an early moderation verdict (shape seen on 2026-10-23)."""
+    return [
+        {"type": "response.created", "sequence_number": 0, "response": _envelope(response_id, "in_progress", [])},
+        {"type": "response.in_progress", "sequence_number": 1, "response": _envelope(response_id, "in_progress", [])},
+        {
+            "type": "response.metadata",
+            "sequence_number": 2,
+            "response_id": response_id,
+            "metadata": {"openai_chatgpt_moderation_metadata": {"blocked": False, "flags": []}},
+        },
+    ]
+
+
+async def _sse_then_reset(request: web.Request, events: list[dict[str, Any]]) -> web.StreamResponse:
+    """Stream ``events`` and close the connection mid-body, as a relay reset does."""
+
+    response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    await response.prepare(request)
+    for event in events:
+        await response.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
+    assert request.transport is not None
+    request.transport.close()
+    return response
+
+
+def _overloaded(response_id: str) -> dict[str, Any]:
+    failed = _envelope(response_id, "failed", [])
+    failed["error"] = {"code": "server_is_overloaded", "message": "overloaded at https://private.example"}
+    return {"type": "response.failed", "response": failed}
+
+
+@pytest.mark.parametrize("failure", ["reset", "eof", "overloaded"])
+async def test_bridge_pre_content_failure_is_replayed_invisibly(async_client, app_instance, failure):
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        if len(bodies) == 1:
+            if failure == "reset":
+                return await _sse_then_reset(request, _prefix("resp_lost"))
+            if failure == "eof":
+                return await _sse(request, _prefix("resp_lost"))
+            return await _sse(request, [*_prefix("resp_lost"), _overloaded("resp_lost")])
+        return await _sse(request, _turn_events("resp_ok", [MESSAGE]))
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": [USER_MESSAGE]})
+            turn = await _receive_turn(ws)
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "next"})
+            assert (await _receive_turn(ws))[-1]["type"] == "response.completed"
+        rows, reservations = await _rows(source_id)
+    assert [event["type"] for event in turn] == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert turn[0]["response"]["id"] == "resp_ok"
+    assert len(bodies) == 3 and bodies[0] == bodies[1]
+    first_code = "model_source_response_failed" if failure == "overloaded" else "model_source_stream_truncated"
+    assert [(row.status, row.error_code) for row in rows] == [
+        ("error", first_code),
+        ("success", None),
+        ("success", None),
+    ]
+    events = "created,in_progress,metadata,failed" if failure == "overloaded" else "created,in_progress,metadata"
+    assert rows[0].failure_detail == f"source_bridge events={events} handed_off=none replay=eligible"
+    assert rows[0].upstream_error_code == ("server_is_overloaded" if failure == "overloaded" else None)
+    assert rows[1].failure_detail is None
+    assert "private.example" not in json.dumps({column: str(value) for column, value in vars(rows[0]).items()})
+    assert [reservation.status for reservation in reservations] == ["released", "finalized", "finalized"]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+async def test_bridge_failure_after_content_is_not_replayed(async_client, app_instance):
+    bodies: list[dict[str, Any]] = []
+    streaming_message = {**MESSAGE, "status": "in_progress", "content": []}
+    delta = {"type": "response.output_text.delta", "item_id": "msg_2", "output_index": 0, "delta": "par"}
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        return await _sse_then_reset(
+            request,
+            [
+                {"type": "response.created", "response": _envelope("resp_partial", "in_progress", [])},
+                {"type": "response.output_item.added", "output_index": 0, "item": streaming_message},
+                delta,
+                delta,
+                delta,
+            ],
+        )
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            turn = await _receive_turn(ws)
+        rows, reservations = await _rows(source_id)
+    assert [event["type"] for event in turn] == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_text.delta",
+        "response.output_text.delta",
+        "response.output_text.delta",
+        "error",
+    ]
+    assert turn[-1]["error"]["code"] == "model_source_stream_truncated"
+    assert len(bodies) == 1
+    assert [(row.status, row.error_code, row.failure_detail) for row in rows] == [
+        (
+            "error",
+            "model_source_stream_truncated",
+            "source_bridge events=created,output_item,delta handed_off=content replay=none",
+        )
+    ]
+    assert [reservation.status for reservation in reservations] == ["released"]
+
+
+async def test_bridge_server_error_before_content_is_not_replayed(async_client, app_instance):
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        failed = _envelope("resp_failed", "failed", [])
+        failed["error"] = {"code": "server_error", "message": "boom"}
+        return await _sse(request, [*_prefix("resp_failed"), {"type": "response.failed", "response": failed}])
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            turn = await _receive_turn(ws)
+        rows, reservations = await _rows(source_id)
+    assert [event["type"] for event in turn] == [
+        "response.created",
+        "response.in_progress",
+        "response.metadata",
+        "response.failed",
+    ]
+    assert turn[-1]["response"]["error"]["code"] == "model_source_response_failed"
+    assert len(bodies) == 1
+    assert [(row.error_code, row.upstream_error_code, row.failure_detail) for row in rows] == [
+        (
+            "model_source_response_failed",
+            "server_error",
+            "source_bridge events=created,in_progress,metadata,failed handed_off=content replay=none",
+        )
+    ]
+    assert [reservation.status for reservation in reservations] == ["released"]
+
+
+async def test_bridge_replacement_failure_is_not_replayed_again(async_client, app_instance):
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        return await _sse_then_reset(request, _prefix(f"resp_lost_{len(bodies)}"))
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            turn = await _receive_turn(ws)
+        rows, reservations = await _rows(source_id)
+    assert [event["type"] for event in turn] == [
+        "response.created",
+        "response.in_progress",
+        "response.metadata",
+        "error",
+    ]
+    assert turn[0]["response"]["id"] == "resp_lost_2"
+    assert turn[-1]["error"]["code"] == "model_source_stream_truncated"
+    assert len(bodies) == 2
+    assert [(row.error_code, row.failure_detail) for row in rows] == [
+        (
+            "model_source_stream_truncated",
+            "source_bridge events=created,in_progress,metadata handed_off=none replay=eligible",
+        ),
+        (
+            "model_source_stream_truncated",
+            "source_bridge events=created,in_progress,metadata handed_off=prefix replay=none",
+        ),
+    ]
+    assert [reservation.status for reservation in reservations] == ["released", "released"]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+async def test_bridge_replay_without_admission_returns_the_original_failure(async_client, app_instance, monkeypatch):
+    import app.modules.proxy.api as api
+
+    bodies: list[dict[str, Any]] = []
+    claims = 0
+    original_claim = api.try_claim_source_admission
+
+    def claim_once(source):
+        nonlocal claims
+        claims += 1
+        return original_claim(source) if claims == 1 else None
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        return await _sse_then_reset(request, _prefix("resp_lost"))
+
+    monkeypatch.setattr(api, "try_claim_source_admission", claim_once)
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            event = await ws.receive()
+        rows, reservations = await _rows(source_id)
+    assert event["type"] == "error" and event["status"] == 502, event
+    assert event["error"]["code"] == "model_source_stream_truncated"
+    assert claims == 2 and len(bodies) == 1
+    assert [(row.status, row.error_code) for row in rows] == [("error", "model_source_stream_truncated")]
+    assert [reservation.status for reservation in reservations] == ["released"]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+def _failing_transport(app_instance, failing_type: str, frames: list[dict[str, Any]], closed: asyncio.Event):
+    """ASGI wrapper whose downstream fails right after handing ``failing_type`` to the transport."""
+
+    async def transport(scope, receive, send):
+        async def intercepted(message):
+            await send(message)
+            if message["type"] == "websocket.send":
+                frames.append(json.loads(message["text"]))
+                if frames[-1]["type"] == failing_type:
+                    raise OSError("downstream closed after handoff")
+
+        try:
+            await app_instance(scope, receive, intercepted)
+        finally:
+            closed.set()
+
+    return transport
+
+
+async def test_bridge_prefix_flush_does_not_deliver_an_observed_terminal(async_client, app_instance):
+    frames: list[dict[str, Any]] = []
+    closed = asyncio.Event()
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        await request.json()
+        completed = {"type": "response.completed", "response": _envelope("resp_x", "completed", [], usage=True)}
+        return await _sse(request, [_prefix("resp_x")[0], completed])
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        transport = _failing_transport(app_instance, "response.created", frames, closed)
+        async with websocket_client(transport, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            assert (await ws.receive())["type"] == "response.created"
+            await asyncio.wait_for(closed.wait(), 5)
+        rows, reservations = await _rows(source_id)
+    assert [frame["type"] for frame in frames] == ["response.created"]
+    # The completed terminal was observed while the prefix flushed but never handed off.
+    assert [row.status for row in rows] != ["success"]
+    assert [reservation.status for reservation in reservations] == ["released"]
+
+
+async def test_bridge_trace_counts_content_handed_off_before_a_send_failure(async_client, app_instance):
+    frames: list[dict[str, Any]] = []
+    closed = asyncio.Event()
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        await request.json()
+        return await _sse(request, _turn_events("resp_x", [MESSAGE]))
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        transport = _failing_transport(app_instance, "response.output_item.added", frames, closed)
+        async with websocket_client(transport, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            while (await ws.receive())["type"] != "response.output_item.added":
+                pass
+            await asyncio.wait_for(closed.wait(), 5)
+        rows, _ = await _rows(source_id)
+    assert [frame["type"] for frame in frames] == ["response.created", "response.output_item.added"]
+    assert len(rows) == 1 and rows[0].status != "success"
+    assert rows[0].failure_detail == "source_bridge events=created,output_item handed_off=content replay=none"
+
+
+async def test_bridge_replay_requires_the_same_effective_body(async_client, app_instance):
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        if len(bodies) == 1:
+            # Source policy changes while the first attempt is in flight.
+            overrides = {"source_request_overrides": {"instructions": "new instructions"}}
+            async with SessionLocal() as session:
+                await session.execute(
+                    update(ModelSourceModel)
+                    .where(ModelSourceModel.source_id == source_id)
+                    .values(raw_metadata_json=json.dumps(overrides))
+                )
+                await session.commit()
+            return await _sse_then_reset(request, _prefix("resp_lost"))
+        return await _sse(request, _turn_events("resp_ok", [MESSAGE]))
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send(
+                {"type": "response.create", "model": "source-ws-model", "input": "hi", "instructions": "original"}
+            )
+            event = await ws.receive()
+        rows, reservations = await _rows(source_id)
+    assert event["type"] == "error" and event["error"]["code"] == "model_source_stream_truncated", event
+    assert [body["instructions"] for body in bodies] == ["original"]
+    assert [(row.error_code, row.failure_detail) for row in rows] == [
+        (
+            "model_source_stream_truncated",
+            "source_bridge events=created,in_progress,metadata handed_off=none replay=eligible",
+        )
+    ]
+    assert [reservation.status for reservation in reservations] == ["released"]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+async def test_bridge_outsized_prefix_is_relayed_and_not_replayed(async_client, app_instance, monkeypatch):
+    from app.modules.proxy import source_websocket
+
+    bodies: list[dict[str, Any]] = []
+    monkeypatch.setattr(source_websocket, "SOURCE_STREAM_WITHHELD_CAP_BYTES", 400)
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        return await _sse_then_reset(request, _prefix("resp_big"))
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            turn = await _receive_turn(ws)
+        rows, reservations = await _rows(source_id)
+    assert [event["type"] for event in turn] == [
+        "response.created",
+        "response.in_progress",
+        "response.metadata",
+        "error",
+    ]
+    assert len(bodies) == 1
+    assert [row.failure_detail for row in rows] == [
+        "source_bridge events=created,in_progress,metadata handed_off=prefix replay=none"
+    ]
+    assert [reservation.status for reservation in reservations] == ["released"]

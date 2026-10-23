@@ -444,6 +444,8 @@ class SourceDispatch:
     settlement_failed: bool = False
     reservation_release_failed: bool = False
     ownership: SourceOwnershipRecorder | None = None
+    # Payload-free stream trace recorded on non-success rows only.
+    failure_detail: str | None = None
     _source_closed: bool = field(default=False, init=False, repr=False)
     _reservation_done: bool = field(default=False, init=False, repr=False)
     _claims_released: bool = field(default=False, init=False, repr=False)
@@ -756,6 +758,7 @@ class SourceDispatch:
                     upstream_error_code=(
                         holder.terminal_error_code if holder is not None and status != "success" else None
                     ),
+                    failure_detail=self.failure_detail if status != "success" else None,
                     transport=self.transport,
                     upstream_transport=self.upstream_transport,
                     source=self.request_log_source,
