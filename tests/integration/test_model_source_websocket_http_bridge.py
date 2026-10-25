@@ -890,11 +890,12 @@ def _failing_transport(app_instance, failing_type: str, frames: list[dict[str, A
 
 async def test_bridge_prefix_flush_does_not_deliver_an_observed_terminal(async_client, app_instance):
     frames: list[dict[str, Any]] = []
+    bodies: list[dict[str, Any]] = []
     closed = asyncio.Event()
 
     async def handler(request: web.Request) -> web.StreamResponse:
-        await request.json()
-        completed = {"type": "response.completed", "response": _envelope("resp_x", "completed", [], usage=True)}
+        bodies.append(await request.json())
+        completed = {"type": "response.completed", "response": _envelope("resp_x", "completed", [MESSAGE], usage=True)}
         return await _sse(request, [_prefix("resp_x")[0], completed])
 
     async with stub_source_upstreams() as start:
@@ -907,6 +908,7 @@ async def test_bridge_prefix_flush_does_not_deliver_an_observed_terminal(async_c
             await asyncio.wait_for(closed.wait(), 5)
         rows, reservations = await _rows(source_id)
     assert [frame["type"] for frame in frames] == ["response.created"]
+    assert len(bodies) == 1
     # The completed terminal was observed while the prefix flushed but never handed off.
     assert [row.status for row in rows] != ["success"]
     assert [reservation.status for reservation in reservations] == ["released"]
@@ -1148,3 +1150,152 @@ async def test_bridge_outsized_reasoning_is_relayed_and_not_replayed(async_clien
     assert [event["type"] for event in turn] == ["response.created", "response.output_item.added", "error"]
     assert len(bodies) == 1
     assert rows[0].failure_detail == "source_bridge events=created,output_item handed_off=content replay=none"
+
+
+async def test_bridge_empty_completion_is_replayed_invisibly_and_charged(async_client, app_instance):
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        if len(bodies) == 1:
+            return await _sse(request, _empty_turn("resp_empty"))
+        return await _sse(request, _turn_events("resp_ok", [MESSAGE]))
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": [USER_MESSAGE]})
+            turn = await _receive_turn(ws)
+            await ws.send(
+                {
+                    "type": "response.create",
+                    "model": "source-ws-model",
+                    "previous_response_id": "resp_ok",
+                    "input": [TOOL_OUTPUT],
+                }
+            )
+            assert (await _receive_turn(ws))[-1]["type"] == "response.completed"
+        rows, reservations = await _rows(source_id)
+    assert [event["type"] for event in turn] == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert turn[0]["response"]["id"] == "resp_ok"
+    assert len(bodies) == 3 and bodies[0] == bodies[1]
+    assert "msg_empty" not in json.dumps(bodies[2]) and "msg_2" in json.dumps(bodies[2])
+    assert [(row.status, row.error_code) for row in rows] == [
+        ("success", "model_source_empty_completion"),
+        ("success", None),
+        ("success", None),
+    ]
+    assert (rows[0].input_tokens, rows[0].output_tokens, rows[0].failure_detail) == (11, 5, None)
+    assert [reservation.status for reservation in reservations] == ["finalized", "finalized", "finalized"]
+    assert get_source_bulkhead().in_flight(source_id) == 0
+
+
+async def test_bridge_replacement_empty_completion_is_delivered(async_client, app_instance):
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        return await _sse(request, _empty_turn(f"resp_empty_{len(bodies)}"))
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": [USER_MESSAGE]})
+            turn = await _receive_turn(ws)
+        rows, _ = await _rows(source_id)
+    assert [event["type"] for event in turn] == [event["type"] for event in _empty_turn("x")]
+    assert turn[0]["response"]["id"] == "resp_empty_2" and len(bodies) == 2
+    assert [(row.status, row.error_code) for row in rows] == [
+        ("success", "model_source_empty_completion"),
+        ("success", None),
+    ]
+
+
+async def test_bridge_empty_completion_without_admission_returns_error(async_client, app_instance, monkeypatch):
+    import app.modules.proxy.api as api
+
+    bodies: list[dict[str, Any]] = []
+    claims = 0
+    original_claim = api.try_claim_source_admission
+
+    def claim_once(source):
+        nonlocal claims
+        claims += 1
+        return original_claim(source) if claims == 1 else None
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        return await _sse(request, _empty_turn("resp_empty"))
+
+    monkeypatch.setattr(api, "try_claim_source_admission", claim_once)
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            event = await ws.receive()
+        rows, reservations = await _rows(source_id)
+    assert event["type"] == "error" and event["status"] == 502, event
+    assert event["error"]["code"] == "model_source_empty_completion"
+    assert len(bodies) == 1
+    assert [(row.status, row.error_code) for row in rows] == [("success", "model_source_empty_completion")]
+    assert [reservation.status for reservation in reservations] == ["finalized"]
+
+
+async def test_bridge_envelope_only_completion_is_delivered(async_client, app_instance):
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        return await _sse(
+            request,
+            [
+                {"type": "response.created", "response": _envelope("resp_env", "in_progress", [])},
+                {"type": "response.completed", "response": _envelope("resp_env", "completed", [MESSAGE], usage=True)},
+            ],
+        )
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            turn = await _receive_turn(ws)
+        rows, _ = await _rows(source_id)
+    assert [event["type"] for event in turn] == ["response.created", "response.completed"]
+    assert len(bodies) == 1 and [(row.status, row.error_code) for row in rows] == [("success", None)]
+
+
+async def test_bridge_empty_completion_settlement_failure_is_not_replayed(async_client, app_instance, monkeypatch):
+    import app.modules.proxy.api as api
+
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        return await _sse(request, _empty_turn("resp_empty"))
+
+    async def failed_settlement(reservation, **kwargs):
+        await api._release_reservation(reservation)
+        return False
+
+    monkeypatch.setattr(api, "_settle_source_reservation", failed_settlement)
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            event = await ws.receive()
+        rows, reservations = await _rows(source_id)
+    assert event["type"] == "error" and event["error"]["code"] == "usage_settlement_failed", event
+    assert len(bodies) == 1
+    assert [(row.status, row.error_code) for row in rows] == [("error", "usage_settlement_failed")]
+    assert [reservation.status for reservation in reservations] == ["released"]
+    assert get_source_bulkhead().in_flight(source_id) == 0

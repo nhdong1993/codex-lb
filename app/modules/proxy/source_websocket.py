@@ -91,6 +91,7 @@ _BRIDGE_MESSAGE_TEXT_FIELDS = {
 _BRIDGE_PART_TEXT_FIELDS = {"output_text": "text", "refusal": "refusal"}
 # Pre-content failure terminals worth one more attempt; other codes are answers.
 _BRIDGE_REPLAYABLE_FAILURE_CODES = frozenset({"server_is_overloaded"})
+_BRIDGE_EMPTY_COMPLETION_CODE = "model_source_empty_completion"
 _BRIDGE_TRACE_LIMIT = 8
 _BRIDGE_TRACE_KINDS: dict[str, str] = {
     "response.created": "created",
@@ -232,6 +233,19 @@ def _bridge_message_is_empty(item: Mapping[str, JsonValue]) -> bool:
     """Whether no output text or refusal part of an assistant message has visible text."""
     content = item.get("content")
     return not isinstance(content, list) or all(_bridge_part_is_empty(part) for part in content)
+
+
+def _bridge_output_is_empty(output: JsonValue) -> bool:
+    """Whether a completed envelope's output holds nothing but reasoning and empty assistant messages."""
+    if output is None:
+        return True
+    if not isinstance(output, list):
+        return False
+    return all(
+        isinstance(item, dict)
+        and (item.get("type") == "reasoning" or (item.get("type") == "message" and _bridge_message_is_empty(item)))
+        for item in output
+    )
 
 
 def _bridge_held_event(event: dict[str, JsonValue]) -> bool:
@@ -619,6 +633,29 @@ class SourceWebSocketSession:
                         assert turn.terminal_error is not None
                         turn.replay_eligible = True
                         raise turn.terminal_error
+                    envelope = delivered.get("response")
+                    if (
+                        holder.terminal_kind == "completed"
+                        and isinstance(envelope, dict)
+                        and _bridge_output_is_empty(envelope.get("output"))
+                    ):
+                        # Billed like any completion, but nothing reached the client: replay it once.
+                        await self._close_http()
+                        await turn.owner.finish(
+                            status="success",
+                            error_code=_BRIDGE_EMPTY_COMPLETION_CODE,
+                            error_message="Model source completed without output",
+                            upstream_status_code=turn.upstream_status_code,
+                            trial_result="inconclusive",
+                        )
+                        if turn.owner.settlement_failed or turn.owner.reservation_release_failed:
+                            raise source_ws_error(
+                                "usage_settlement_failed", "Unable to finalize source usage; reconnect", status=502
+                            )
+                        turn.replay_eligible = True
+                        raise source_ws_error(
+                            _BRIDGE_EMPTY_COMPLETION_CODE, "Model source completed without output", status=502
+                        )
                     released, withheld = withheld, None
                     for pending in released:
                         await deliver(pending)
