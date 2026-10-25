@@ -230,7 +230,9 @@ def _bridge_part_is_empty(part: JsonValue) -> bool:
 
 
 def _bridge_message_is_empty(item: Mapping[str, JsonValue]) -> bool:
-    """Whether no output text or refusal part of an assistant message has visible text."""
+    """Whether ``item`` is an assistant message none of whose output text or refusal parts has visible text."""
+    if item.get("role") != "assistant":
+        return False
     content = item.get("content")
     return not isinstance(content, list) or all(_bridge_part_is_empty(part) for part in content)
 
@@ -258,8 +260,7 @@ def _bridge_held_event(event: dict[str, JsonValue]) -> bool:
     if event_type in {"response.output_item.added", "response.output_item.done"}:
         item = event.get("item")
         return isinstance(item, dict) and (
-            item.get("type") == "reasoning"
-            or (item.get("type") == "message" and item.get("role") == "assistant" and _bridge_message_is_empty(item))
+            item.get("type") == "reasoning" or (item.get("type") == "message" and _bridge_message_is_empty(item))
         )
     if event_type in {"response.content_part.added", "response.content_part.done"}:
         part = event.get("part")
@@ -585,7 +586,7 @@ class SourceWebSocketSession:
         output_items: list[JsonValue] = []
         trace = turn.trace
         assert trace is not None
-        # Until the first other event nothing of a replayable attempt has
+        # Until the first visible output nothing of a replayable attempt has
         # reached the client or source ownership, so its failure stays invisible.
         withheld: list[dict[str, JsonValue]] | None = [] if turn.replayable else None
         withheld_bytes = 0

@@ -1247,9 +1247,20 @@ async def test_bridge_empty_completion_without_admission_returns_error(async_cli
     assert len(bodies) == 1
     assert [(row.status, row.error_code) for row in rows] == [("success", "model_source_empty_completion")]
     assert [reservation.status for reservation in reservations] == ["finalized"]
+    assert (rows[0].input_tokens, rows[0].output_tokens) == (11, 5)
+    assert get_source_bulkhead().in_flight(source_id) == 0
 
 
-async def test_bridge_envelope_only_completion_is_delivered(async_client, app_instance):
+ROLELESS_EMPTY_MESSAGE: dict[str, Any] = {
+    "type": "message",
+    "id": "msg_3",
+    "status": "completed",
+    "content": [{"type": "output_text", "text": "", "annotations": []}],
+}
+
+
+@pytest.mark.parametrize("output_item", [MESSAGE, ROLELESS_EMPTY_MESSAGE], ids=["assistant_text", "roleless_empty"])
+async def test_bridge_envelope_only_completion_is_delivered(async_client, app_instance, output_item):
     bodies: list[dict[str, Any]] = []
 
     async def handler(request: web.Request) -> web.StreamResponse:
@@ -1258,7 +1269,10 @@ async def test_bridge_envelope_only_completion_is_delivered(async_client, app_in
             request,
             [
                 {"type": "response.created", "response": _envelope("resp_env", "in_progress", [])},
-                {"type": "response.completed", "response": _envelope("resp_env", "completed", [MESSAGE], usage=True)},
+                {
+                    "type": "response.completed",
+                    "response": _envelope("resp_env", "completed", [output_item], usage=True),
+                },
             ],
         )
 
@@ -1295,6 +1309,7 @@ async def test_bridge_empty_completion_settlement_failure_is_not_replayed(async_
             event = await ws.receive()
         rows, reservations = await _rows(source_id)
     assert event["type"] == "error" and event["error"]["code"] == "usage_settlement_failed", event
+    assert event["status"] == 502
     assert len(bodies) == 1
     assert [(row.status, row.error_code) for row in rows] == [("error", "usage_settlement_failed")]
     assert [reservation.status for reservation in reservations] == ["released"]
