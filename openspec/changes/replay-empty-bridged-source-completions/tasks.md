@@ -23,6 +23,6 @@
 ## 4. Verify and ship
 
 - [x] 4.1 Run the bridge and source-WebSocket suites serially, `ruff check`, `ruff format --check` and `ty`.
-- [ ] 4.2 Run `/review-impl`. Sync the delta into the main spec and `context.md`. Run `npx --yes @fission-ai/openspec@1.11.0 validate --specs`.
+- [x] 4.2 Run `/review-impl`. Sync the delta into the main spec and `context.md`. Run `npx --yes @fission-ai/openspec@1.11.0 validate --specs`.
 - [ ] 4.3 Deploy through the HA rollout, only on the operator's request. Confirm `model_source_empty_completion` rows and replays in production.
 - [ ] 4.4 Archive after the operator accepts the result.
