@@ -109,3 +109,17 @@ Pre-content replay (2026-10-23). `ch-relay` sometimes reset the bridged HTTP res
 - **Residual risk:** this is not exactly-once upstream, and relay orphans are not cancelled.
 
 Design and evidence are in the change `replay-pre-content-bridged-source-failures`.
+
+## Empty bridged completions (2026-10-25)
+
+ch-relay 1.1.84 sometimes completed a bridged turn with only reasoning and an assistant `message` whose text was `""`, after sending about 23k fewer input tokens upstream than codex-lb forwarded. The stream was complete, so the pre-content replay never fired, and Codex ended the turn silently with an empty final message.
+
+- **What is held.** The first attempt of a bridged turn now holds back every output-free event until its first visible output: the lifecycle prefix, reasoning items and `response.reasoning_*` events, and the scaffolding of an assistant `message` while all of its text is empty after trimming whitespace. Any other event, including an unknown type, is visible and releases the held events in source order. The 2 MiB withheld-bytes bound still applies, and past it the attempt is no longer replayable.
+- **What is empty.** Only a `response.completed` that arrives while everything before it is still held back, and whose `response.output` holds nothing but reasoning items and assistant messages without non-empty text or refusal. The envelope check matters: a source may send only `response.created` and a `response.completed` carrying the whole answer, and without the check every turn on it would be paid and sent twice. A message with no `assistant` role counts as visible. `response.incomplete` is delivered unchanged, since a replay would hit the same token limit.
+- **A billed success.** The empty attempt is finalized as `status=success` with `error_code=model_source_empty_completion`, settling its reported usage (or the existing estimate for a limited key without reported usage), so dashboards and log-based key limits count its tokens. Its trial result is `inconclusive`: the source answered, so it is neither rewarded nor put into cooldown.
+- **No exposure.** Held events are not published to source ownership and the response id is not kept as a continuable transcript. The client sees only the replacement's events, with one `response.created`.
+- **Replay.** It uses the existing `_bridged_replacement` path: same body check, fresh admission and reservation, original deadline, at most one replay. A replacement that also completes empty is delivered.
+- **When the replacement is unavailable.** The client receives the WebSocket error `model_source_empty_completion` with status 502 and Codex retries the turn, because delivering the empty answer would end it silently. A settlement failure of the empty attempt is not replayed and surfaces as `usage_settlement_failed`.
+- **Residual risk:** the empty attempt and its replay both spend upstream quota (about 0.15% of this source's turns), and the relay bug remains.
+
+Design, incident evidence and operations notes are in the change `replay-empty-bridged-source-completions`.
