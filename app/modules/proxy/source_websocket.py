@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 from uuid import uuid4
@@ -71,10 +71,24 @@ _SESSION_CLEANUP_TIMEOUT_SECONDS = 5.0
 # WebSocket-only envelope fields an HTTP Responses source must not receive.
 _BRIDGE_DROPPED_FIELDS = frozenset({"type", "generate"})
 # Lifecycle bookkeeping a bridged attempt holds back while it may still be
-# replayed: nothing before the first other event reaches the client.
+# replayed, with its output-free events: nothing before the first visible
+# output reaches the client.
 _BRIDGE_LIFECYCLE_EVENT_TYPES = frozenset({"response.created", "response.in_progress", "response.queued"})
 _BRIDGE_LIFECYCLE_FIELDS = frozenset({"type", "response", "sequence_number"})
 _BRIDGE_METADATA_FIELDS = frozenset({"type", "metadata", "headers", "response_id", "sequence_number"})
+_BRIDGE_REASONING_EVENT_PREFIXES = (
+    "response.reasoning_summary_part.",
+    "response.reasoning_summary_text.",
+    "response.reasoning_text.",
+)
+# Text-bearing message events and the field holding their text.
+_BRIDGE_MESSAGE_TEXT_FIELDS = {
+    "response.output_text.delta": "delta",
+    "response.output_text.done": "text",
+    "response.refusal.delta": "delta",
+    "response.refusal.done": "refusal",
+}
+_BRIDGE_PART_TEXT_FIELDS = {"output_text": "text", "refusal": "refusal"}
 # Pre-content failure terminals worth one more attempt; other codes are answers.
 _BRIDGE_REPLAYABLE_FAILURE_CODES = frozenset({"server_is_overloaded"})
 _BRIDGE_TRACE_LIMIT = 8
@@ -115,7 +129,7 @@ class SourceWebSocketTurn:
     upstream_status_code: int = 101
     terminal_handed_off: bool = False
     terminal_error: ModelSourceForwardingError | None = None
-    # A bridged turn's first attempt holds its lifecycle prefix back and may be
+    # A bridged turn's first attempt holds its held-back events and may be
     # replayed once; ``replay_eligible`` records that it failed before delivery.
     replayable: bool = False
     replay_eligible: bool = False
@@ -200,6 +214,44 @@ def _bridge_prefix_event(event: dict[str, JsonValue]) -> bool:
         response = event.get("response")
         return event.keys() <= _BRIDGE_LIFECYCLE_FIELDS and isinstance(response, dict) and not response.get("output")
     return event_type == "response.metadata" and event.keys() <= _BRIDGE_METADATA_FIELDS
+
+
+def _bridge_text_empty(value: JsonValue) -> bool:
+    return not isinstance(value, str) or not value.strip()
+
+
+def _bridge_part_is_empty(part: JsonValue) -> bool:
+    """Whether a content part is not an output text or refusal with visible text."""
+    if not isinstance(part, dict):
+        return True
+    field = _BRIDGE_PART_TEXT_FIELDS.get(str(part.get("type")))
+    return field is None or _bridge_text_empty(part.get(field))
+
+
+def _bridge_message_is_empty(item: Mapping[str, JsonValue]) -> bool:
+    """Whether no output text or refusal part of an assistant message has visible text."""
+    content = item.get("content")
+    return not isinstance(content, list) or all(_bridge_part_is_empty(part) for part in content)
+
+
+def _bridge_held_event(event: dict[str, JsonValue]) -> bool:
+    """Whether ``event`` is held back while a replay is possible: the lifecycle prefix or an output-free event."""
+    if _bridge_prefix_event(event):
+        return True
+    event_type = str(event["type"])
+    if event_type.startswith(_BRIDGE_REASONING_EVENT_PREFIXES):
+        return True
+    if event_type in {"response.output_item.added", "response.output_item.done"}:
+        item = event.get("item")
+        return isinstance(item, dict) and (
+            item.get("type") == "reasoning"
+            or (item.get("type") == "message" and item.get("role") == "assistant" and _bridge_message_is_empty(item))
+        )
+    if event_type in {"response.content_part.added", "response.content_part.done"}:
+        part = event.get("part")
+        return isinstance(part, dict) and part.get("type") in _BRIDGE_PART_TEXT_FIELDS and _bridge_part_is_empty(part)
+    field = _BRIDGE_MESSAGE_TEXT_FIELDS.get(event_type)
+    return field is not None and _bridge_text_empty(event.get(field))
 
 
 def _bridge_truncation(error: BaseException) -> bool:
@@ -523,6 +575,13 @@ class SourceWebSocketSession:
         # reached the client or source ownership, so its failure stays invisible.
         withheld: list[dict[str, JsonValue]] | None = [] if turn.replayable else None
         withheld_bytes = 0
+
+        async def deliver(event: dict[str, JsonValue]) -> None:
+            await self._deliver(turn, event)
+            item = event.get("item")
+            if event.get("type") == "response.output_item.done" and isinstance(item, dict):
+                output_items.append(item)
+
         try:
             async for block in events.blocks:
                 data = extract_sse_data(block)
@@ -540,16 +599,16 @@ class SourceWebSocketSession:
                     # source's own upstream, not this client's session.
                     continue
                 trace.observe(event_type)
-                prefix = _bridge_prefix_event(event)
-                if withheld is not None and prefix:
+                held = _bridge_held_event(event)
+                if withheld is not None and held:
                     withheld.append(self._observe_event(turn, holder, parser, event))
                     withheld_bytes += len(data.encode("utf-8"))
                     if withheld_bytes <= SOURCE_STREAM_WITHHELD_CAP_BYTES:
                         continue
-                    # An outsized prefix is relayed as before; it is no longer replayable.
+                    # Outsized held-back events are relayed as before; the attempt is no longer replayable.
                     released, withheld = withheld, None
                     for pending in released:
-                        await self._deliver(turn, pending)
+                        await deliver(pending)
                     continue
                 delivered = self._observe_event(turn, holder, parser, event)
                 if withheld is not None:
@@ -562,11 +621,8 @@ class SourceWebSocketSession:
                         raise turn.terminal_error
                     released, withheld = withheld, None
                     for pending in released:
-                        await self._deliver(turn, pending)
-                await self._deliver(turn, delivered)
-                item = delivered.get("item")
-                if event_type == "response.output_item.done" and isinstance(item, dict):
-                    output_items.append(item)
+                        await deliver(pending)
+                await deliver(delivered)
                 if holder.terminal_kind is not None:
                     turn.owner.failure_detail = trace.detail(replay=False)
                     self._remember(turn, delivered, output_items)

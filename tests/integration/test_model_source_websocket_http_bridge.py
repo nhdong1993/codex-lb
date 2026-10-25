@@ -629,6 +629,34 @@ def _prefix(response_id: str) -> list[dict[str, Any]]:
     ]
 
 
+EMPTY_MESSAGE: dict[str, Any] = {
+    **MESSAGE,
+    "id": "msg_empty",
+    "content": [{"type": "output_text", "text": "", "annotations": []}],
+}
+
+
+def _empty_turn(response_id: str) -> list[dict[str, Any]]:
+    """A source turn whose only output is reasoning and an empty assistant message."""
+    in_progress = {**EMPTY_MESSAGE, "status": "in_progress", "content": []}
+    part = {"type": "output_text", "text": ""}
+    ids = {"item_id": "msg_empty", "output_index": 1, "content_index": 0}
+    return [
+        {"type": "response.created", "response": _envelope(response_id, "in_progress", [])},
+        {"type": "response.output_item.added", "output_index": 0, "item": REASONING},
+        {"type": "response.output_item.done", "output_index": 0, "item": REASONING},
+        {"type": "response.output_item.added", "output_index": 1, "item": in_progress},
+        {"type": "response.content_part.added", **ids, "part": part},
+        {"type": "response.output_text.done", **ids, "text": ""},
+        {"type": "response.content_part.done", **ids, "part": part},
+        {"type": "response.output_item.done", "output_index": 1, "item": EMPTY_MESSAGE},
+        {
+            "type": "response.completed",
+            "response": _envelope(response_id, "completed", [REASONING, EMPTY_MESSAGE], usage=True),
+        },
+    ]
+
+
 async def _sse_then_reset(request: web.Request, events: list[dict[str, Any]]) -> web.StreamResponse:
     """Stream ``events`` and close the connection mid-body, as a relay reset does."""
 
@@ -974,3 +1002,149 @@ async def test_bridge_outsized_prefix_is_relayed_and_not_replayed(async_client, 
         "source_bridge events=created,in_progress,metadata handed_off=prefix replay=none"
     ]
     assert [reservation.status for reservation in reservations] == ["released"]
+
+
+@pytest.mark.parametrize("case", ["text", "call", "empty_message_then_call", "whitespace_then_text"])
+async def test_bridge_reasoning_is_held_until_visible_output(async_client, app_instance, case):
+    bodies: list[dict[str, Any]] = []
+    streaming = {**MESSAGE, "status": "in_progress", "content": []}
+    delta = {"type": "response.output_text.delta", "item_id": "msg_2", "output_index": 1}
+    source_events = {
+        "text": _turn_events("resp_ok", [REASONING, MESSAGE]),
+        "call": _turn_events("resp_ok", [REASONING, FUNCTION_CALL]),
+        "empty_message_then_call": _turn_events("resp_ok", [REASONING, EMPTY_MESSAGE, FUNCTION_CALL]),
+        "whitespace_then_text": [
+            {"type": "response.created", "response": _envelope("resp_ok", "in_progress", [])},
+            {"type": "response.output_item.added", "output_index": 0, "item": REASONING},
+            {"type": "response.output_item.done", "output_index": 0, "item": REASONING},
+            {"type": "response.output_item.added", "output_index": 1, "item": streaming},
+            {**delta, "delta": "\n"},
+            {**delta, "delta": "done"},
+            {"type": "response.output_item.done", "output_index": 1, "item": MESSAGE},
+            {
+                "type": "response.completed",
+                "response": _envelope("resp_ok", "completed", [REASONING, MESSAGE], usage=True),
+            },
+        ],
+    }[case]
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        if len(bodies) == 1:
+            return await _sse(request, source_events)
+        return await _sse(request, _turn_events("resp_next", [MESSAGE]))
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": [USER_MESSAGE]})
+            turn = await _receive_turn(ws)
+            if case == "empty_message_then_call":
+                await ws.send(
+                    {
+                        "type": "response.create",
+                        "model": "source-ws-model",
+                        "previous_response_id": "resp_ok",
+                        "input": [TOOL_OUTPUT],
+                    }
+                )
+                assert (await _receive_turn(ws))[-1]["type"] == "response.completed"
+        rows, _ = await _rows(source_id)
+    assert [event["type"] for event in turn] == [event["type"] for event in source_events]
+    assert len(bodies) == (2 if case == "empty_message_then_call" else 1)
+    expected = [("success", None)] * len(bodies)
+    assert [(row.status, row.error_code) for row in rows] == expected
+    if case == "empty_message_then_call":
+        # The request model already drops the empty ``annotations`` list from resent history.
+        resent = {**EMPTY_MESSAGE, "content": [{"type": "output_text", "text": ""}]}
+        assert bodies[1]["input"] == [USER_MESSAGE, REASONING, resent, FUNCTION_CALL, TOOL_OUTPUT]
+
+
+async def test_bridge_reset_during_reasoning_is_replayed(async_client, app_instance):
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        if len(bodies) == 1:
+            return await _sse_then_reset(
+                request,
+                [
+                    {"type": "response.created", "response": _envelope("resp_lost", "in_progress", [])},
+                    {"type": "response.output_item.added", "output_index": 0, "item": REASONING},
+                ],
+            )
+        return await _sse(request, _turn_events("resp_ok", [MESSAGE]))
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": [USER_MESSAGE]})
+            turn = await _receive_turn(ws)
+        rows, reservations = await _rows(source_id)
+    assert turn[0]["response"]["id"] == "resp_ok" and len(bodies) == 2 and bodies[0] == bodies[1]
+    assert rows[0].failure_detail == "source_bridge events=created,output_item handed_off=none replay=eligible"
+    assert [reservation.status for reservation in reservations] == ["released", "finalized"]
+
+
+async def test_bridge_incomplete_after_reasoning_is_delivered(async_client, app_instance):
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        return await _sse(
+            request,
+            [
+                {"type": "response.created", "response": _envelope("resp_inc", "in_progress", [])},
+                {"type": "response.output_item.added", "output_index": 0, "item": REASONING},
+                {"type": "response.output_item.done", "output_index": 0, "item": REASONING},
+                {
+                    "type": "response.incomplete",
+                    "response": _envelope("resp_inc", "incomplete", [REASONING], usage=True),
+                },
+            ],
+        )
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": [USER_MESSAGE]})
+            turn = await _receive_turn(ws)
+    assert [event["type"] for event in turn] == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.incomplete",
+    ]
+    assert len(bodies) == 1
+
+
+async def test_bridge_outsized_reasoning_is_relayed_and_not_replayed(async_client, app_instance, monkeypatch):
+    from app.modules.proxy import source_websocket
+
+    bodies: list[dict[str, Any]] = []
+    monkeypatch.setattr(source_websocket, "SOURCE_STREAM_WITHHELD_CAP_BYTES", 400)
+    big = {**REASONING, "encrypted_content": "x" * 1000}
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        bodies.append(await request.json())
+        return await _sse_then_reset(
+            request,
+            [
+                {"type": "response.created", "response": _envelope("resp_big", "in_progress", [])},
+                {"type": "response.output_item.added", "output_index": 0, "item": big},
+            ],
+        )
+
+    async with stub_source_upstreams() as start:
+        source_id = await create_source(async_client, await start(handler, shutdown_timeout=1), enabled=False)
+        key = await create_key(async_client, source_id)
+        async with websocket_client(app_instance, "/v1/responses", key["key"]) as ws:
+            await ws.send({"type": "response.create", "model": "source-ws-model", "input": "hi"})
+            turn = await _receive_turn(ws)
+        rows, _ = await _rows(source_id)
+    assert [event["type"] for event in turn] == ["response.created", "response.output_item.added", "error"]
+    assert len(bodies) == 1
+    assert rows[0].failure_detail == "source_bridge events=created,output_item handed_off=content replay=none"
