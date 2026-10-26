@@ -35,6 +35,18 @@ Group data loads only while its tab is mounted, uses cookie-free Bearer requests
 - Soft-deleted logs and logs belonging to other keys are excluded by the server-side repository query.
 - Account, plan, raw API key and database identity, client fingerprint, conversation/archive identity, model-source identity, upstream-proxy routing identity, and free-form failure details are intentionally unavailable in Overview. Only the key's display name and masked prefix are exposed as self-identification metadata. Install is an explicit credential-export action for the already-authenticated caller; its visible previews remain masked.
 
+## Automatic refresh
+
+The dashboard refreshes the open Overview or Group keys tab every 30 seconds while the browser tab is visible, and once when the tab becomes visible again. It reuses the manual loaders instead of a query cache, so Disconnect keeps clearing every credential and cached value in one place.
+
+- The cadence is fixed like the administrator request log (30 seconds) rather than the administrator `refreshSeconds` preference, which belongs to another audience and can be as low as 5 seconds.
+- Overview refreshes profile and usage on every tick but request logs only on the first page: offset pagination would otherwise shift a later page under the reader (with rows `A, B, C, D` and page size 2, page 2 shows `C, D`; one new row turns it into `B, C`).
+- Background refreshes are silent. A server error keeps the old data and shows an alert until the next success; a 401 disconnects.
+- Overview fetches profile, usage, and logs in parallel and still fails fast on the first error, but every request reports its own 401 to the page, so a 401 that arrives after a server error (or while a sibling hangs) still disconnects.
+- Ticks skip while a request is pending and never abort it, so a slow endpoint still completes. Manual Refresh, paging, and connect always run and win over a pending background load through the request generation counter. The Group panel uses the pending request's `AbortController` as its ownership token.
+- Chart member visibility is keyed by name and masked prefix so a refreshed response with a different member order keeps the holder's choices.
+- Install never refreshes automatically: its script depends only on the chosen platform and options.
+
 ## Overview and client setup
 
 Overview is the default tab and contains the existing profile, limits, colored lifetime summary, and recent-log grid. The profile policy presentation is now only Models: enforced model first, otherwise the allowed list or All models. Lifecycle dates use the browser timezone and the fixed 24-hour `HH:mm:ss  dd/MM/yyyy` format, independent of the administrator's date preference. Missing expiry and last-use dates retain their descriptive labels.

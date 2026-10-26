@@ -29,7 +29,7 @@ Keys can also be scoped to specific accounts, so a key draws quota only from the
 
 ## Self-service key dashboard
 
-Open `/key-dashboard` and enter an active API key to view that key's name and masked prefix, lifecycle and policy details, configured usage limits, lifetime request/token/cost totals, and latest request logs. This page does not require the administrator dashboard password.
+Open `/key-dashboard` and enter an active API key to view that key's name and masked prefix, lifecycle and policy details, configured usage limits, lifetime request/token/cost totals, and latest request logs. This page does not require the administrator dashboard password. While the browser tab is visible, the open Overview or Group keys tab refreshes itself every 30 seconds; a later request-log page stays where it is until you change pages or click Refresh.
 
 The **Group keys** tab compares usage across keys in the same usage group over the last 30 days. Administrators assign a group in the **Usage group** field when creating or editing an API key. Use the same group name on each member; names are case-sensitive and surrounding spaces are trimmed. Leave the field blank to remove a key from sharing. Existing keys start without a group.
 

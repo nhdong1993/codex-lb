@@ -38,7 +38,7 @@ function DailyTooltip({ active, payload, label, formatValue }: Partial<TooltipCo
 export function KeyGroupDailyChart({ members }: { members: Member[] }) {
   const { t, i18n } = useTranslation();
   const [metric, setMetric] = useState<Metric>("tokens");
-  const [hiddenMembers, setHiddenMembers] = useState<Set<number>>(() => new Set());
+  const [hiddenMembers, setHiddenMembers] = useState<Set<string>>(() => new Set());
   const [showTable, setShowTable] = useState(false);
   const number = new Intl.NumberFormat(i18n.language);
   const currency = new Intl.NumberFormat(i18n.language, {
@@ -46,7 +46,7 @@ export function KeyGroupDailyChart({ members }: { members: Member[] }) {
   });
   const formatValue = (value: number) => metric === "tokens" ? number.format(value) : currency.format(value);
   const metricLabel = t(`keyDashboard.group.daily.${metric}`);
-  const visible = members.map((member, index) => ({ member, index })).filter(({ index }) => !hiddenMembers.has(index));
+  const visible = members.map((member, index) => ({ member, index })).filter(({ member }) => !hiddenMembers.has(memberLabel(member)));
   const chartData = useMemo<DailyChartRow[]>(() => (members[0]?.dailyUsage ?? []).map((day, dayIndex) => ({
     date: day.date,
     values: members.map((member) => metric === "tokens"
@@ -105,10 +105,11 @@ export function KeyGroupDailyChart({ members }: { members: Member[] }) {
         <legend className="mb-2 text-xs text-muted-foreground">{t("keyDashboard.group.daily.keys")}</legend>
         {members.map((member, index) => (
           <label key={index} className="flex min-w-0 max-w-full cursor-pointer items-center gap-2 text-xs">
-            <input type="checkbox" checked={!hiddenMembers.has(index)} className="size-3.5 shrink-0 accent-primary"
+            <input type="checkbox" checked={!hiddenMembers.has(memberLabel(member))} className="size-3.5 shrink-0 accent-primary"
               onChange={() => setHiddenMembers((previous) => {
                 const next = new Set(previous);
-                if (next.has(index)) next.delete(index); else next.add(index);
+                const label = memberLabel(member);
+                if (next.has(label)) next.delete(label); else next.add(label);
                 return next;
               })} />
             <span className="h-0.5 w-4 shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} aria-hidden="true" />

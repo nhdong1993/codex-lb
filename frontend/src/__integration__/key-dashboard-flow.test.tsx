@@ -592,4 +592,303 @@ describe("API key dashboard integration", () => {
     await waitFor(() => expect(screen.getByLabelText("API key")).toHaveValue(""));
     expect(window.localStorage.getItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY)).toBeNull();
   });
+
+  describe("automatic refresh", () => {
+    let visibility: DocumentVisibilityState = "visible";
+
+    beforeEach(() => {
+      visibility = "visible";
+      vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const setupUser = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const tick = (ms = 30_000) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+
+    function countDashboard(overrides: { usage?: () => Response | Promise<Response> } = {}) {
+      const calls = { profile: 0, usage: 0, logs: [] as string[] };
+      server.use(
+        http.get("/api/key-dashboard/profile", () => { calls.profile += 1; return HttpResponse.json(safeProfile); }),
+        http.get("/v1/usage", () => {
+          calls.usage += 1;
+          return overrides.usage?.() ?? HttpResponse.json({ ...usagePayload, request_count: calls.usage === 1 ? 9 : 777 });
+        }),
+        http.get("/api/key-dashboard/request-logs", ({ request }) => {
+          const offset = new URL(request.url).searchParams.get("offset") ?? "0";
+          calls.logs.push(offset);
+          return HttpResponse.json({
+            requests: [{ ...safeLog, requestId: `req-${offset}`, model: offset === "0" ? "gpt-first-page" : "gpt-second-page" }],
+            total: 40,
+            hasMore: offset === "0",
+          });
+        }),
+      );
+      return calls;
+    }
+
+    it("refreshes the visible Overview silently every 30 seconds", async () => {
+      const calls = countDashboard();
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await connect(user);
+      expect(screen.getByText("9")).toBeInTheDocument();
+      await tick();
+      expect(await screen.findByText("777")).toBeInTheDocument();
+      expect(calls).toEqual({ profile: 2, usage: 2, logs: ["0", "0"] });
+      expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled();
+    });
+
+    it("pauses while hidden and refreshes once when visible again", async () => {
+      const calls = countDashboard();
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await connect(user);
+      visibility = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+      await tick(90_000);
+      expect(calls.usage).toBe(1);
+      visibility = "visible";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      await waitFor(() => expect(calls.usage).toBe(2));
+      await tick(1_000);
+      expect(calls.usage).toBe(2);
+    });
+
+    it("keeps a later request-log page while refreshing usage", async () => {
+      const calls = countDashboard();
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await connect(user);
+      await user.click(screen.getByRole("button", { name: "Next page" }));
+      expect(await screen.findByText(/gpt-second-page/)).toBeInTheDocument();
+      expect(calls.logs).toEqual(["0", "25"]);
+      await tick();
+      expect(await screen.findByText("777")).toBeInTheDocument();
+      expect(calls.logs).toEqual(["0", "25"]);
+      expect(screen.getByText(/gpt-second-page/)).toBeInTheDocument();
+    });
+
+    it("keeps data on background failures and disconnects on 401", async () => {
+      let status = 200;
+      const calls = countDashboard({
+        usage: () => status === 200
+          ? HttpResponse.json({ ...usagePayload, request_count: 777 })
+          : HttpResponse.json({ error: { code: "failed", message: "Usage unavailable" } }, { status }),
+      });
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await user.click(await screen.findByRole("checkbox", { name: /Remember on this browser/ }));
+      await connect(user);
+      status = 500;
+      await tick();
+      expect(await screen.findByText("Usage unavailable")).toBeInTheDocument();
+      expect(screen.getByText("777")).toBeInTheDocument();
+      status = 200;
+      await tick();
+      await waitFor(() => expect(screen.queryByText("Usage unavailable")).not.toBeInTheDocument());
+      status = 401;
+      await tick();
+      expect(await screen.findByRole("button", { name: "Open dashboard" })).toBeInTheDocument();
+      expect(window.localStorage.getItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY)).toBeNull();
+      expect(calls.usage).toBe(4);
+    });
+
+    it("does not overlap a pending refresh and lets a manual refresh win", async () => {
+      let release!: () => void;
+      let hold = false;
+      const calls = countDashboard({
+        usage: async () => {
+          if (hold) await new Promise<void>((resolve) => { release = resolve; });
+          return HttpResponse.json({ ...usagePayload, request_count: hold ? 111 : 222 });
+        },
+      });
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await connect(user);
+      hold = true;
+      await tick();
+      await waitFor(() => expect(calls.usage).toBe(2));
+      await tick();
+      expect(calls.usage).toBe(2);
+      hold = false;
+      await user.click(screen.getByRole("button", { name: "Refresh" }));
+      expect(await screen.findByText("222")).toBeInTheDocument();
+      await act(async () => { release(); });
+      await tick(1_000);
+      expect(screen.getByText("222")).toBeInTheDocument();
+      expect(screen.queryByText("111")).not.toBeInTheDocument();
+    });
+
+    it("discards a pending automatic refresh after disconnect", async () => {
+      let release!: () => void;
+      let hold = false;
+      const calls = countDashboard({
+        usage: async () => {
+          if (hold) await new Promise<void>((resolve) => { release = resolve; });
+          return HttpResponse.json(usagePayload);
+        },
+      });
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await connect(user);
+      hold = true;
+      await tick();
+      await waitFor(() => expect(calls.usage).toBe(2));
+      await user.click(screen.getByRole("button", { name: "Disconnect" }));
+      await act(async () => { release(); });
+      await tick(1_000);
+      expect(screen.getByRole("button", { name: "Open dashboard" })).toBeInTheDocument();
+      expect(screen.queryByRole("tab", { name: "Overview" })).not.toBeInTheDocument();
+    });
+
+    it("refreshes group usage without losing chart choices or overlapping", async () => {
+      countDashboard();
+      let groupCalls = 0;
+      let status = 200;
+      let release: (() => void) | null = null;
+      let hold = false;
+      server.use(http.get("/api/key-dashboard/group", async () => {
+        groupCalls += 1;
+        if (hold) await new Promise<void>((resolve) => { release = resolve; });
+        if (status !== 200) return HttpResponse.json({ error: { code: "failed", message: "Group unavailable" } }, { status });
+        if (groupCalls === 1) return HttpResponse.json(groupPayload);
+        const [alice, bob] = groupPayload.members;
+        return HttpResponse.json({ ...groupPayload, members: [{ ...bob, requestCount: 70 }, alice] });
+      }));
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await connect(user);
+      await user.click(screen.getByRole("tab", { name: "Group keys" }));
+      expect(await screen.findByRole("heading", { name: "Daily usage by key" })).toBeInTheDocument();
+      await user.click(screen.getByRole("checkbox", { name: "Bob · sk-clb-bob…" }));
+      await tick();
+      const table = screen.getByRole("table", { name: "Group member usage for the last 30 days" });
+      expect(await within(table).findByText("70")).toBeInTheDocument();
+      expect(screen.getByRole("checkbox", { name: "Bob · sk-clb-bob…" })).not.toBeChecked();
+      expect(screen.getByRole("checkbox", { name: "Alice · sk-clb-alice…" })).toBeChecked();
+      status = 500;
+      await tick();
+      expect(await screen.findByText("Group unavailable")).toBeInTheDocument();
+      expect(within(table).getByText("70")).toBeInTheDocument();
+      status = 200;
+      hold = true;
+      await tick();
+      await waitFor(() => expect(groupCalls).toBe(4));
+      await tick();
+      expect(groupCalls).toBe(4);
+      hold = false;
+      await act(async () => { release?.(); });
+      await waitFor(() => expect(screen.queryByText("Group unavailable")).not.toBeInTheDocument());
+      expect(within(table).getByText("70")).toBeInTheDocument();
+    });
+
+    it("shows background group failures for an ungrouped key", async () => {
+      countDashboard();
+      let status = 200;
+      server.use(http.get("/api/key-dashboard/group", () => status === 200
+        ? HttpResponse.json({ groupName: null, from: "2026-08-11T12:00:00Z", until: "2026-09-10T12:00:00Z", members: [] })
+        : HttpResponse.json({ error: { code: "failed", message: "Group unavailable" } }, { status })));
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await connect(user);
+      await user.click(screen.getByRole("tab", { name: "Group keys" }));
+      expect(await screen.findByText("No key group yet")).toBeInTheDocument();
+      status = 500;
+      await tick();
+      expect(await screen.findByText("Group unavailable")).toBeInTheDocument();
+      expect(screen.getByText("No key group yet")).toBeInTheDocument();
+    });
+
+    it("disconnects on a 401 even when another refresh request fails first", async () => {
+      let failing = false;
+      countDashboard({
+        usage: () => failing
+          ? HttpResponse.json({ error: { code: "failed", message: "Usage unavailable" } }, { status: 500 })
+          : HttpResponse.json(usagePayload),
+      });
+      server.use(http.get("/api/key-dashboard/profile", async () => {
+        if (!failing) return HttpResponse.json(safeProfile);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return HttpResponse.json({ error: { code: "invalid_api_key", message: "Invalid key" } }, { status: 401 });
+      }));
+      server.use(http.get("/api/key-dashboard/request-logs", async () => {
+        // A request that never settles must not hold back the 401.
+        if (failing) await new Promise(() => {});
+        return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+      }));
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await user.click(await screen.findByRole("checkbox", { name: /Remember on this browser/ }));
+      await connect(user);
+      failing = true;
+      await tick();
+      await tick(100);
+      expect(await screen.findByRole("button", { name: "Open dashboard" })).toBeInTheDocument();
+      expect(window.localStorage.getItem(KEY_DASHBOARD_API_KEY_STORAGE_KEY)).toBeNull();
+    });
+
+    it("shows a background failure while a sibling request hangs and keeps refreshing", async () => {
+      let failing = false;
+      const calls = countDashboard({
+        usage: () => failing
+          ? HttpResponse.json({ error: { code: "failed", message: "Usage unavailable" } }, { status: 500 })
+          : HttpResponse.json(usagePayload),
+      });
+      server.use(http.get("/api/key-dashboard/request-logs", async () => {
+        if (failing) await new Promise(() => {});
+        return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+      }));
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await connect(user);
+      failing = true;
+      await tick();
+      expect(await screen.findByText("Usage unavailable")).toBeInTheDocument();
+      failing = false;
+      await tick();
+      await waitFor(() => expect(screen.queryByText("Usage unavailable")).not.toBeInTheDocument());
+      expect(calls.usage).toBe(3);
+    });
+
+    it("clears a background refresh error on disconnect", async () => {
+      let failing = false;
+      countDashboard({
+        usage: () => failing
+          ? HttpResponse.json({ error: { code: "failed", message: "Usage unavailable" } }, { status: 500 })
+          : HttpResponse.json(usagePayload),
+      });
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await connect(user);
+      failing = true;
+      await tick();
+      expect(await screen.findByText("Usage unavailable")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Disconnect" }));
+      expect(await screen.findByRole("button", { name: "Open dashboard" })).toBeInTheDocument();
+      expect(screen.queryByText("Usage unavailable")).not.toBeInTheDocument();
+    });
+
+    it("never refreshes the Install tab automatically", async () => {
+      const calls = countDashboard();
+      let installCalls = 0;
+      let groupCalls = 0;
+      server.use(
+        http.get("/api/key-dashboard/install-script", () => { installCalls += 1; return new HttpResponse("#!/bin/bash\n"); }),
+        http.get("/api/key-dashboard/group", () => { groupCalls += 1; return HttpResponse.json(groupPayload); }),
+      );
+      const user = setupUser();
+      renderWithProviders(<App />);
+      await connect(user);
+      await user.click(screen.getByRole("tab", { name: "Install" }));
+      await waitFor(() => expect(installCalls).toBe(1));
+      await tick(90_000);
+      expect(installCalls).toBe(1);
+      expect(groupCalls).toBe(0);
+      expect(calls).toEqual({ profile: 1, usage: 1, logs: ["0"] });
+    });
+  });
 });

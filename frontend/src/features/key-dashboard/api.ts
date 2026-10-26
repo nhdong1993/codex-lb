@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { get } from "@/lib/api-client";
+import { ApiError, get } from "@/lib/api-client";
 import {
   KeyDashboardGroupSchema,
   KeyDashboardProfileSchema,
@@ -76,15 +76,24 @@ export async function getKeyDashboardData(
   apiKey: string,
   limit: number,
   offset: number,
+  includeLogs = true,
+  onUnauthorized?: () => void,
 ): Promise<{
   profile: KeyDashboardProfile;
   usage: KeyUsage;
-  logs: KeyDashboardRequestLogsResponse;
+  logs: KeyDashboardRequestLogsResponse | null;
 }> {
-  const [profile, usage, logs] = await Promise.all([
+  const requests = [
     getKeyDashboardProfile(apiKey),
     getKeyUsage(apiKey),
-    getKeyDashboardRequestLogs(apiKey, limit, offset),
-  ]);
+    includeLogs ? getKeyDashboardRequestLogs(apiKey, limit, offset) : Promise.resolve(null),
+  ] as const;
+  // Report every 401, even one arriving after another failure already rejected the batch, so a revoked key always disconnects.
+  for (const request of requests) {
+    request.catch((reason: unknown) => {
+      if (reason instanceof ApiError && reason.status === 401) onUnauthorized?.();
+    });
+  }
+  const [profile, usage, logs] = await Promise.all(requests);
   return { profile, usage, logs };
 }

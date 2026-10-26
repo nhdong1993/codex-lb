@@ -32,6 +32,7 @@ import { ApiError } from "@/lib/api-client";
 import { formatCompactNumber, formatCurrency } from "@/utils/formatters";
 
 const DEFAULT_LIMIT = 25;
+const AUTO_REFRESH_MS = 30_000;
 const SAFE_COLUMNS = ["time", "model", "transport", "status", "ttft", "tps", "tokens", "cost", "details"] as const;
 const SAFE_COLUMN_WIDTHS: RequestLogColumnWidths = {
   time: 136,
@@ -48,6 +49,7 @@ const SAFE_COLUMN_WIDTHS: RequestLogColumnWidths = {
 export function KeyDashboardPage() {
   const { t } = useTranslation();
   const requestGenerationRef = useRef(0);
+  const inFlightRef = useRef(false);
   const [draftKey, setDraftKey] = useState("");
   const [initialRememberedKey, setInitialRememberedKey] = useState(getRememberedApiKey);
   const [rememberKey, setRememberKey] = useState(initialRememberedKey !== null);
@@ -61,6 +63,7 @@ export function KeyDashboardPage() {
   const [connectedKey, setConnectedKey] = useState("");
   const [activeTab, setActiveTab] = useState("overview");
   const [groupRefreshVersion, setGroupRefreshVersion] = useState(0);
+  const [groupReloadSignal, setGroupReloadSignal] = useState(0);
 
   const connected = profile !== null && usage !== null && logs !== null;
   const requests = useMemo(
@@ -107,6 +110,8 @@ export function KeyDashboardPage() {
 
   const clearConnection = useCallback(() => {
     requestGenerationRef.current += 1;
+    inFlightRef.current = false;
+    setError(null);
     setConnectedKey("");
     setActiveTab("overview");
     setInitialRememberedKey(null);
@@ -125,33 +130,60 @@ export function KeyDashboardPage() {
     apiKey: string,
     nextLimit: number,
     nextOffset: number,
-    rememberAfterSuccess = false,
+    { remember = false, silent = false } = {},
   ) => {
     const generation = ++requestGenerationRef.current;
-    setIsLoading(true);
-    setError(null);
-    try {
-      const data = await getKeyDashboardData(apiKey, nextLimit, nextOffset);
+    inFlightRef.current = true;
+    if (!silent) {
+      setIsLoading(true);
+      setError(null);
+    }
+    const disconnect = () => {
       if (generation !== requestGenerationRef.current) return;
+      clearConnection();
+      setError(t("keyDashboard.errors.invalidKey"));
+    };
+    try {
+      // Background refreshes leave a later log page alone so it does not shift under the reader.
+      const data = await getKeyDashboardData(apiKey, nextLimit, nextOffset, !silent || nextOffset === 0, disconnect);
+      if (generation !== requestGenerationRef.current) return;
+      setError(null);
       setConnectedKey(apiKey);
-      if (rememberAfterSuccess) rememberApiKey(apiKey);
+      if (remember) rememberApiKey(apiKey);
       setProfile(data.profile);
       setUsage(data.usage);
-      setLogs(data.logs);
+      if (data.logs) setLogs(data.logs);
       setLimit(nextLimit);
       setOffset(nextOffset);
     } catch (caught) {
       if (generation !== requestGenerationRef.current) return;
       if (caught instanceof ApiError && caught.status === 401) {
-        clearConnection();
-        setError(t("keyDashboard.errors.invalidKey"));
+        disconnect();
       } else {
         setError(caught instanceof Error ? caught.message : t("keyDashboard.errors.loadFailed"));
       }
     } finally {
-      if (generation === requestGenerationRef.current) setIsLoading(false);
+      if (generation === requestGenerationRef.current) {
+        inFlightRef.current = false;
+        if (!silent) setIsLoading(false);
+      }
     }
   }, [clearConnection, t]);
+
+  useEffect(() => {
+    if (!connectedKey || activeTab === "install") return;
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      if (activeTab === "group") setGroupReloadSignal((value) => value + 1);
+      else if (!inFlightRef.current) void load(connectedKey, limit, offset, { silent: true });
+    };
+    const timer = window.setInterval(refresh, AUTO_REFRESH_MS);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [activeTab, connectedKey, limit, load, offset]);
 
   useEffect(() => {
     if (!initialRememberedKey) return;
@@ -170,7 +202,7 @@ export function KeyDashboardPage() {
       return;
     }
     setDraftKey("");
-    void load(key, DEFAULT_LIMIT, 0, rememberKey);
+    void load(key, DEFAULT_LIMIT, 0, { remember: rememberKey });
   };
 
   const handlePageChange = (nextLimit: number, nextOffset: number) => {
@@ -311,7 +343,12 @@ export function KeyDashboardPage() {
                 </section>
               </Tabs.Content>
               <Tabs.Content value="group" className="min-w-0 outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                <KeyGroupPanel key={groupRefreshVersion} apiKey={connectedKey} onUnauthorized={handleInstallUnauthorized} />
+                <KeyGroupPanel
+                  key={groupRefreshVersion}
+                  apiKey={connectedKey}
+                  reloadSignal={groupReloadSignal}
+                  onUnauthorized={handleInstallUnauthorized}
+                />
               </Tabs.Content>
               <Tabs.Content value="install" className="outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <KeyInstallPanel apiKey={connectedKey} onUnauthorized={handleInstallUnauthorized} />

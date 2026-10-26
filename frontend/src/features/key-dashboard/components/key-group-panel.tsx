@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Activity, Coins, Database, DollarSign, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -17,17 +17,21 @@ const KeyGroupDailyChart = lazy(() => import("./key-group-daily-chart").then((mo
 
 type Props = {
   apiKey: string;
+  reloadSignal: number;
   onUnauthorized: () => void;
 };
 
-export function KeyGroupPanel({ apiKey, onUnauthorized }: Props) {
+export function KeyGroupPanel({ apiKey, reloadSignal, onUnauthorized }: Props) {
   const { t, i18n } = useTranslation();
   const [data, setData] = useState<KeyDashboardGroup | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retryVersion, setRetryVersion] = useState(0);
+  // The pending request's controller doubles as its ownership token, so a replaced request cannot release the gate.
+  const requestRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
+  const fetchGroup = useCallback(() => {
     const controller = new AbortController();
+    requestRef.current = controller;
     void getKeyDashboardGroup(apiKey, controller.signal).then((group) => {
       if (!controller.signal.aborted) {
         setError(null);
@@ -40,11 +44,30 @@ export function KeyGroupPanel({ apiKey, onUnauthorized }: Props) {
       } else {
         setError(caught instanceof Error ? caught.message : t("keyDashboard.errors.loadFailed"));
       }
+    }).finally(() => {
+      if (requestRef.current === controller) requestRef.current = null;
     });
-    return () => controller.abort();
-  }, [apiKey, retryVersion, onUnauthorized, t]);
+    return controller;
+  }, [apiKey, onUnauthorized, t]);
 
-  if (error) return (
+  useEffect(() => {
+    const controller = fetchGroup();
+    return () => controller.abort();
+  }, [fetchGroup, retryVersion]);
+
+  const handledSignalRef = useRef(reloadSignal);
+  const hasData = data !== null;
+  useEffect(() => {
+    if (reloadSignal === handledSignalRef.current) return;
+    handledSignalRef.current = reloadSignal;
+    // Automatic reloads never abort a pending request; only unmount does.
+    if (!hasData || requestRef.current) return;
+    fetchGroup();
+  }, [fetchGroup, hasData, reloadSignal]);
+
+  useEffect(() => () => requestRef.current?.abort(), []);
+
+  if (error && !data) return (
     <div className="space-y-3">
       <AlertMessage variant="error">{error}</AlertMessage>
       <Button variant="outline" onClick={() => {
@@ -56,10 +79,13 @@ export function KeyGroupPanel({ apiKey, onUnauthorized }: Props) {
   );
   if (!data) return <SpinnerBlock />;
   if (data.groupName === null) return (
-    <div className="rounded-xl border border-dashed bg-card px-6 py-14 text-center">
-      <Users className="mx-auto mb-4 size-8 text-muted-foreground" aria-hidden="true" />
-      <h2 className="text-lg font-semibold">{t("keyDashboard.group.emptyTitle")}</h2>
-      <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">{t("keyDashboard.group.emptyDescription")}</p>
+    <div className="space-y-4">
+      {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
+      <div className="rounded-xl border border-dashed bg-card px-6 py-14 text-center">
+        <Users className="mx-auto mb-4 size-8 text-muted-foreground" aria-hidden="true" />
+        <h2 className="text-lg font-semibold">{t("keyDashboard.group.emptyTitle")}</h2>
+        <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">{t("keyDashboard.group.emptyDescription")}</p>
+      </div>
     </div>
   );
 
@@ -80,6 +106,7 @@ export function KeyGroupPanel({ apiKey, onUnauthorized }: Props) {
 
   return (
     <section className="min-w-0 space-y-6" aria-labelledby="key-group-title">
+      {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 id="key-group-title" className="break-words text-xl font-semibold">{data.groupName}</h2>
