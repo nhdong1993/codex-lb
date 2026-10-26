@@ -30,6 +30,9 @@ const ReportsPage = lazy(() =>
 const AccountsPage = lazy(() =>
   import("@/features/accounts/components/accounts-page").then((m) => ({ default: m.AccountsPage })),
 );
+const DashboardOverviewPage = lazy(() =>
+  import("@/features/dashboard/components/dashboard-overview-page").then((m) => ({ default: m.DashboardOverviewPage })),
+);
 const AutomationsPage = lazy(() =>
   import("@/features/automations/components/automations-page").then((m) => ({ default: m.AutomationsPage })),
 );
@@ -90,6 +93,7 @@ function AdministratorApp() {
         <Route element={<AppLayout />}>
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/dashboard/overview" element={<DashboardOverviewPage />} />
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/accounts" element={<AccountsPage />} />
           <Route path="/automations" element={<AutomationsPage />} />
