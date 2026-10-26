@@ -355,8 +355,20 @@ describe("API key dashboard integration", () => {
     expect(screen.getByRole("checkbox", { name: "Keep Codex account login session" })).toHaveFocus();
     await user.tab();
     expect(screen.getByRole("button", { name: "Copy command" })).toHaveFocus();
-    const guidance = screen.getByRole("complementary", { name: "Before you run" });
-    expect(within(guidance).getByText(/Install the Codex client first/)).toBeVisible();
+    const follows = (first: Element, second: Element) =>
+      Boolean(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const prerequisite = screen.getByRole("region", { name: "Before you run" });
+    expect(within(prerequisite).getByText(/Install the Codex client first/)).toBeVisible();
+    expect(screen.getByText("Works with Codex App, Codex CLI and the IDE extension.")).toBeVisible();
+    const optionsStep = screen.getByRole("heading", { name: "Setup options" });
+    const commandStep = screen.getByRole("heading", { name: "Run in your terminal" });
+    const otherWays = screen.getByRole("heading", { name: "Other ways to set up" });
+    expect(follows(prerequisite, group)).toBe(true);
+    expect(follows(group, optionsStep)).toBe(true);
+    expect(follows(optionsStep, commandStep)).toBe(true);
+    expect(follows(commandStep, otherWays)).toBe(true);
+    expect(follows(otherWays, screen.getByRole("heading", { name: "Prefer a script file?" }))).toBe(true);
+    const guidance = screen.getByRole("complementary", { name: "Good to know" });
     expect(within(guidance).getByText(/Backs up and replaces/)).toBeVisible();
     expect(within(guidance).getByText(/commands may remain in shell history/)).toBeVisible();
     expect(screen.getByRole("heading", { name: "Restore previous setup" })).toBeVisible();
