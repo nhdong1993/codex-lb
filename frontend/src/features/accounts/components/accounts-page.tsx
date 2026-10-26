@@ -10,6 +10,7 @@ import { useDialogState } from "@/hooks/use-dialog-state";
 import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
+import { AccountsViewTabs } from "@/features/accounts/components/accounts-view-tabs";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
 import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
@@ -154,11 +155,14 @@ export function AccountsPage() {
   return (
     <div className="animate-fade-in-up space-y-6">
       {/* Page header */}
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">{t("accounts.page.title")}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {t("accounts.page.subtitle")}
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">{t("accounts.page.title")}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {t("accounts.page.subtitle")}
+          </p>
+        </div>
+        <AccountsViewTabs />
       </div>
 
       {mutationError ? (

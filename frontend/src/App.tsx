@@ -33,6 +33,9 @@ const ReportsPage = lazy(() =>
 const AccountsPage = lazy(() =>
   import("@/features/accounts/components/accounts-page").then((m) => ({ default: m.AccountsPage })),
 );
+const AccountsOverviewPage = lazy(() =>
+  import("@/features/accounts/components/accounts-overview-page").then((m) => ({ default: m.AccountsOverviewPage })),
+);
 const AutomationsPage = lazy(() =>
   import("@/features/automations/components/automations-page").then((m) => ({ default: m.AutomationsPage })),
 );
@@ -119,6 +122,7 @@ export default function App() {
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/accounts" element={<AccountsPage />} />
+              <Route path="/accounts/overview" element={<AccountsOverviewPage />} />
               <Route path="/automations" element={<AutomationsPage />} />
               <Route path="/apis" element={<ApisPage />} />
               <Route path="/settings" element={<SettingsPage />} />

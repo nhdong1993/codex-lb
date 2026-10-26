@@ -62,4 +62,27 @@ describe("accounts flow integration", () => {
       expect(screen.getByRole("heading", { name: "primary@example.com" })).toBeInTheDocument();
     });
   });
+
+  it("switches between the list and the plan overview with the view tabs", async () => {
+    const user = userEvent.setup({ delay: null });
+
+    window.history.pushState({}, "", "/accounts");
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Accounts" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "List" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Overview" })).not.toHaveAttribute("aria-current");
+
+    await user.click(screen.getByRole("link", { name: "Overview" }));
+    expect(await screen.findByRole("heading", { name: "Accounts overview" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/accounts/overview");
+    expect(await screen.findByRole("heading", { name: /All plans/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "List" })).not.toHaveAttribute("aria-current");
+
+    await user.click(screen.getByRole("link", { name: "List" }));
+    expect(await screen.findByRole("heading", { name: "Accounts" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/accounts");
+    expect(screen.getByRole("link", { name: "List" })).toHaveAttribute("aria-current", "page");
+  });
 });

@@ -26,4 +26,16 @@ describe("permission-aware navigation integration", () => {
     expect(screen.queryByRole("link", { name: /Accounts/i })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Reports/i })).toBeInTheDocument();
   });
+
+  it("guards the nested accounts overview route with the same permission", async () => {
+    server.use(http.get("/api/dashboard-auth/session", () => HttpResponse.json(dashboardOnlySession)));
+
+    window.history.pushState({}, "", "/accounts/overview");
+    renderWithProviders(<App />);
+
+    await waitFor(() => expect(window.location.pathname).toBe("/dashboard"));
+    expect(await screen.findByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Accounts overview" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Accounts/i })).not.toBeInTheDocument();
+  });
 });
