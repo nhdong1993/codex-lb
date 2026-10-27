@@ -10,7 +10,7 @@ The earlier Accounts plan overview (`/accounts/overview`, never released) answer
 - Activity: 24h / 7d / 30d timeframe, summary cards with previous-window deltas and sparklines, and an activity chart switchable between requests (with errors), tokens, and error rate.
 - Accounts: a plan selector; a status tile and one quota tile per window with the average used percent, drawn per account for up to 100 accounts and as distributions (status-share bar, ten-bucket histogram) for larger plans such as 3,000+ free accounts.
 - Requests: the Dashboard's full request-log table (all columns, details, pages) with an auto-refresh switch, an All / Success / Errors filter, and page statistics (errors, average and p95 latency, tokens, cache share).
-- `/accounts/overview` (an unreleased plan-grouped accounts overview from a fork build) redirects to `/dashboard/overview`; the Accounts page keeps no view tabs.
+- The Accounts page keeps no view tabs. (This fork never served the unreleased `/accounts/overview`, so it carries no redirect from it.)
 
 ## Capabilities
 

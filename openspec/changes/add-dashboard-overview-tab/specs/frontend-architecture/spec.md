@@ -2,15 +2,11 @@
 
 ### Requirement: Dashboard overview route and tabs
 
-The dashboard SHALL serve a read-only Overview at `/dashboard/overview` under the same `dashboard:read` guard as `/dashboard`, without adding a core navigation item. Both routes SHALL show "Dashboard" and "Overview" tabs that link to each other, and only the tab for the current route SHALL carry `aria-current="page"`. The Overview page component SHALL load lazily like every other route page. `/accounts/overview` SHALL redirect to `/dashboard/overview` for every signed-in session, including one without `accounts:read`, and the Accounts page SHALL NOT show view tabs.
+The dashboard SHALL serve a read-only Overview at `/dashboard/overview` behind the same administrator sign-in as `/dashboard`, without adding a core navigation item. Both routes SHALL show "Dashboard" and "Overview" tabs that link to each other, and only the tab for the current route SHALL carry `aria-current="page"`. The Overview page component SHALL load lazily like every other route page. The Accounts page SHALL NOT show the Dashboard view tabs.
 
 #### Scenario: Operator opens the overview
 - **WHEN** an operator selects the Overview tab on the Dashboard page
 - **THEN** the URL becomes `/dashboard/overview` and only the Overview tab is current
-
-#### Scenario: Old accounts overview link
-- **WHEN** an operator with or without `accounts:read` opens `/accounts/overview`
-- **THEN** the dashboard replaces the URL with `/dashboard/overview`
 
 ### Requirement: Dashboard overview loads two endpoints
 

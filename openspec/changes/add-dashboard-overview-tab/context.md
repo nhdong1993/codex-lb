@@ -8,7 +8,7 @@ The design follows a three-section relay dashboard the operator shared (activity
 
 ## Decisions
 
-- **Dashboard sub-route, not a nav item.** The core navigation is at its budget (`.github/simplicity-budgets.toml`). `routePermission` matches `/dashboard/` by prefix, so `/dashboard/overview` inherits `dashboard:read` without new guard code.
+- **Dashboard sub-route, not a nav item.** No new navigation item. On this fork every administrator page sits behind one `AuthGate` in `AdministratorApp` (there is no `RouteGuard`), so `/dashboard/overview` gets the same sign-in as `/dashboard`.
 - **Two endpoints.** `GET /api/dashboard/overview` already carries accounts, metrics, comparison, and trends; the request list adds `GET /api/request-logs`. The page skips projections, filter facets, and conversations, which is what makes it lighter than the Dashboard page.
 - **Reuse.** Summary cards come from `buildDashboardView(...).stats`, so values, deltas, and copy match the Dashboard page. Pool figures (status counts, average remaining, windows present) come from the all-plans row of `summarizeAccountsByPlan`.
 - **Used, not remaining.** The tiles show used percent like the reference design; colors still come from `quotaBarColor` on the remaining percent, so red still means "almost out".
@@ -16,7 +16,7 @@ The design follows a three-section relay dashboard the operator shared (activity
 - **User change 2026-10-26: full request table.** The request list reuses the Dashboard's `RecentRequestsTable` (all columns, details dialog, page controls, shared column layout) instead of a reduced table; pages replace "Load more". The overview chunk now includes the table module.
 - **Free quota is monthly.** The backend drops a free account's 5-hour fields (zero primary capacity) and, once a monthly sample exists, its weekly fields too, so free accounts land in the monthly tile. A free account with no monthly sample yet still reports weekly and shows there; the page does not hard-code plan rules the account summary already applies. Each tile counts "with data" against the accounts that report that window, not the whole plan, so all plans does not read "35/3,035" for 5-hour.
 - **One column per account, sorted.** The earlier page avoided per-account marks because unsorted marks stop being readable past a few dozen accounts. Sorting columns by used percent turns them into a distribution curve that stays readable at hundreds of accounts.
-- **Old link outside the guard.** `/accounts/overview` matches the Accounts guard by prefix, so its redirect sits outside `RouteGuard`; otherwise a dashboard-only session would land on `/dashboard` instead of the overview.
+- **No legacy redirect on this fork.** Upstream `main` redirects the unreleased `/accounts/overview`; this fork never served that path, so the port leaves it unmatched (not-found page).
 - **Own request-list query.** The Dashboard's `useRequestLogs` also loads filter facets and polls every 30 s regardless of preference, so the page runs its own query on `getRequestLogs`.
 - **Fixed status sets.** The backend's visible statuses are `ok`, `error`, `rate_limit`, `quota`, and `cancelled`; Errors sends the last four rather than loading the facet endpoint.
 - **Errors per bucket** are derived as requests × error rate, because the trend payload carries the rate, not the count.
@@ -25,7 +25,7 @@ The design follows a three-section relay dashboard the operator shared (activity
 
 ## Constraints and failure modes
 
-- `GET /api/dashboard/overview` requires `accounts:read`, exactly as for the Dashboard page, which loads the same endpoint. A dashboard-only session reaches the Overview (and is redirected there from `/accounts/overview`) but sees the overview load error, as it does on `/dashboard`; changing the endpoint's permission is a backend change outside this frontend-only change.
+- `GET /api/dashboard/overview` requires `accounts:read`, exactly as for the Dashboard page, which loads the same endpoint. A session that cannot read the dashboard overview sees the same load error on the Overview as on `/dashboard`; changing the endpoint's permission is a backend change outside this frontend-only change.
 - A failed poll keeps the last overview on screen with an error alert and Retry, so stale figures are never presented as current.
 - Unknown account statuses count as active through `normalizeStatus`, as elsewhere in the dashboard.
 - Unknown token counts are left out of the totals, not counted as zero; a figure with nothing known, or a cache share over zero input tokens, shows "–".
