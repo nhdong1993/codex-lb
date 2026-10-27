@@ -77,6 +77,45 @@ describe("ApiKeyEditDialog", () => {
     expect("limits" in payload).toBe(false);
   });
 
+  it("resets usage only after confirmation", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey()}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Reset usage" }));
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    const confirm = await screen.findByRole("alertdialog");
+    await user.click(within(confirm).getByRole("button", { name: "Reset" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith({ resetUsage: true });
+    });
+  });
+
+  it("hides reset usage when the key has no limits", () => {
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ limits: [] })}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Reset usage" })).not.toBeInTheDocument();
+  });
+
   it("omits limits from payload when only isActive changes", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

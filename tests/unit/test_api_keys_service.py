@@ -2839,3 +2839,43 @@ async def test_touch_usage_reservation_reports_the_exhausted_lock_budget(
         and "sqlite_errorname=SQLITE_BUSY" in message
         for message in warnings
     )
+
+
+@pytest.mark.asyncio
+async def test_lifetime_limit_is_never_lazy_reset_and_reports_no_reset_time() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="lifetime-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="lifetime", max_value=100),
+            ],
+        )
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    limits[0].current_value = 100
+
+    validated = await service.validate_key(created.key)
+    assert validated.id == created.id
+    assert (await repo.get_limits_by_key(created.id))[0].current_value == 100
+
+    with pytest.raises(ApiKeyRateLimitExceededError) as exc_info:
+        await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    message = exc_info.value.client_message()
+    assert "lifetime" in message
+    assert "does not reset automatically" in message
+    assert "resets at" not in message
+
+
+def test_rate_limit_client_message_keeps_reset_time_for_windowed_limits() -> None:
+    error = ApiKeyRateLimitExceededError(
+        message="API key total_tokens weekly limit exceeded",
+        reset_at=datetime(2026, 5, 1, 0, 0, 0),
+    )
+    assert error.client_message() == (
+        "API key total_tokens weekly limit exceeded. Usage resets at 2026-05-01T00:00:00Z."
+    )

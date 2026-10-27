@@ -21,7 +21,7 @@ The protected proxy routes covered by this setting are:
 
 ## Creating keys
 
-Dashboard → API Keys → Create. The full key is shown **only once** at creation. Keys support optional expiration, model restrictions, and rate limits (tokens / cost per day / week / month).
+Dashboard → API Keys → Create. The full key is shown **only once** at creation. Keys support optional expiration, model restrictions, and rate limits (tokens / cost per 5 hours / day / week / 7 days / month, or **lifetime**: a total budget that never resets on its own). In the key's edit dialog, **Reset usage** sets every limit's current usage back to 0 after a confirmation; periodic limits also start a new window.
 
 Keys can also be scoped to specific accounts, so a key draws quota only from the accounts assigned to it:
 

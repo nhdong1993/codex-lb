@@ -744,3 +744,63 @@ async def test_usage_7d_keeps_unknown_account_usage_separate_from_deleted_accoun
             "isDeleted": False,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_adding_lifetime_limit_backfills_all_successful_history(async_client, monkeypatch: pytest.MonkeyPatch):
+    key_id = await _create_api_key(async_client, name="lifetime-backfill-key")
+    now = datetime(2026, 4, 30, 12, 0, 0)
+    monkeypatch.setattr("app.modules.api_keys.service.utcnow", lambda: now)
+
+    await _insert_request_logs(
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-lifetime-backfill-old",
+            requested_at=now - timedelta(days=400),
+            model="gpt-5.1",
+            status="success",
+            input_tokens=10_000,
+            output_tokens=5_000,
+            cached_input_tokens=0,
+            cost_usd=2.0,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-lifetime-backfill-recent",
+            requested_at=now - timedelta(hours=1),
+            model="gpt-5.1",
+            status="success",
+            input_tokens=1_000,
+            output_tokens=500,
+            cached_input_tokens=0,
+            cost_usd=0.5,
+        ),
+        RequestLog(
+            api_key_id=key_id,
+            request_id="req-lifetime-backfill-error",
+            requested_at=now - timedelta(days=30),
+            model="gpt-5.1",
+            status="error",
+            error_code="response.incomplete",
+            input_tokens=99_000,
+            output_tokens=99_000,
+            cached_input_tokens=0,
+            cost_usd=9.0,
+        ),
+    )
+
+    response = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "lifetime", "maxValue": 1_000_000},
+                {"limitType": "cost_usd", "limitWindow": "lifetime", "maxValue": 100_000_000},
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    limits = {limit["limitType"]: limit for limit in response.json()["limits"]}
+    assert limits["total_tokens"]["limitWindow"] == "lifetime"
+    assert limits["total_tokens"]["currentValue"] == 16_500
+    assert limits["cost_usd"]["currentValue"] == 2_500_000
