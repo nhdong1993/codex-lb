@@ -154,6 +154,43 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_dashboard_overview_weekly_pace_opt_out_skips_pace_only(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = utcnow().replace(microsecond=0)
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_lite", "lite@example.com"))
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry("acc_lite", 20.0, window="primary", recorded_at=now - timedelta(minutes=5))
+        await usage_repo.add_entry(
+            "acc_lite",
+            40.0,
+            window="secondary",
+            recorded_at=now - timedelta(minutes=2),
+            reset_at=naive_utc_to_epoch(now + timedelta(days=3)),
+            window_minutes=10080,
+        )
+
+    default = await async_client.get("/api/dashboard/overview")
+    assert default.status_code == 200
+    assert default.json()["weeklyCreditPace"] is not None
+
+    async def _fail_history_load(*_args, **_kwargs):
+        raise AssertionError("weeklyPace=false must not load usage history")
+
+    monkeypatch.setattr("app.modules.dashboard.service._load_projection_histories", _fail_history_load)
+    lite = await async_client.get("/api/dashboard/overview", params={"weeklyPace": "false"})
+    assert lite.status_code == 200
+    lite_payload = lite.json()
+    assert lite_payload.pop("weeklyCreditPace") is None
+    default_payload = default.json()
+    default_payload.pop("weeklyCreditPace")
+    assert lite_payload == default_payload
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_carries_weekly_runway_fields_and_attribution(
     async_client,
     db_setup,

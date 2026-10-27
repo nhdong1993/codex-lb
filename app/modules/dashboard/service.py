@@ -90,6 +90,8 @@ class DashboardService:
     async def get_overview(
         self,
         timeframe_key: DashboardOverviewTimeframeKey = "7d",
+        *,
+        include_weekly_pace: bool = True,
     ) -> DashboardOverviewResponse:
         now = utcnow()
         overview_timeframe = resolve_overview_timeframe(timeframe_key)
@@ -188,32 +190,34 @@ class DashboardService:
             ),
         )
 
-        dashboard_settings = await self._repo.get_settings()
-        _, secondary_history = await _load_projection_histories(
-            self._repo,
-            primary_usage,
-            secondary_usage,
-            now,
-            smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
-            include_primary=False,
-        )
-        settings = get_settings()
-        trailing_demand = await self._repo.positive_used_percent_deltas_by_account(
-            _weekly_history_windows(primary_usage, secondary_usage),
-            since=now - DEMAND_WINDOW,
-            until=now,
-        )
-        weekly_credit_pace = build_weekly_credit_pace(
-            accounts=accounts,
-            account_summaries=account_summaries,
-            secondary_history=secondary_history,
-            now=now,
-            usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
-            trailing_demand_used_percent_by_account=trailing_demand,
-            working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
-            smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
-        )
-        await _attach_top_api_keys(self._repo, weekly_credit_pace, now)
+        weekly_credit_pace: WeeklyCreditPaceResponse | None = None
+        if include_weekly_pace:
+            dashboard_settings = await self._repo.get_settings()
+            _, secondary_history = await _load_projection_histories(
+                self._repo,
+                primary_usage,
+                secondary_usage,
+                now,
+                smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
+                include_primary=False,
+            )
+            settings = get_settings()
+            trailing_demand = await self._repo.positive_used_percent_deltas_by_account(
+                _weekly_history_windows(primary_usage, secondary_usage),
+                since=now - DEMAND_WINDOW,
+                until=now,
+            )
+            weekly_credit_pace = build_weekly_credit_pace(
+                accounts=accounts,
+                account_summaries=account_summaries,
+                secondary_history=secondary_history,
+                now=now,
+                usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+                trailing_demand_used_percent_by_account=trailing_demand,
+                working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
+                smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
+            )
+            await _attach_top_api_keys(self._repo, weekly_credit_pace, now)
 
         additional_ts = await self._repo.latest_additional_recorded_at()
         return DashboardOverviewResponse(

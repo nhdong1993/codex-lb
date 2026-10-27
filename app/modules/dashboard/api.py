@@ -27,9 +27,10 @@ router = APIRouter(
 @router.get("/dashboard/overview", response_model=DashboardOverviewResponse)
 async def get_overview(
     timeframe: DashboardOverviewTimeframeKey = Query("7d"),
+    weekly_pace: bool = Query(True, alias="weeklyPace"),
     context: DashboardContext = Depends(get_dashboard_context),
 ) -> DashboardOverviewResponse:
-    return await context.service.get_overview(timeframe)
+    return await context.service.get_overview(timeframe, include_weekly_pace=weekly_pace)
 
 
 @router.get("/dashboard/projections", response_model=DashboardProjectionsResponse)

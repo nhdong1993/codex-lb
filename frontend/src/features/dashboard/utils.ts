@@ -90,6 +90,8 @@ export type DashboardView = {
 type DashboardViewOptions = {
   isDark?: boolean;
   showAccountBurnrate?: boolean;
+  // False for overviews requested with `weeklyPace=false`: their null pace is deliberate, not an older backend.
+  weeklyPace?: boolean;
 };
 
 function resolveDashboardViewOptions(optionsOrIsDark: DashboardViewOptions | boolean): Required<DashboardViewOptions> {
@@ -97,11 +99,13 @@ function resolveDashboardViewOptions(optionsOrIsDark: DashboardViewOptions | boo
     return {
       isDark: optionsOrIsDark,
       showAccountBurnrate: true,
+      weeklyPace: true,
     };
   }
   return {
     isDark: optionsOrIsDark.isDark ?? false,
     showAccountBurnrate: optionsOrIsDark.showAccountBurnrate ?? true,
+    weeklyPace: optionsOrIsDark.weeklyPace ?? true,
   };
 }
 
@@ -738,7 +742,7 @@ export function buildDashboardView(
   optionsOrIsDark: DashboardViewOptions | boolean = false,
   projections?: DashboardProjections,
 ): DashboardView {
-  const { isDark, showAccountBurnrate } = resolveDashboardViewOptions(optionsOrIsDark);
+  const { isDark, showAccountBurnrate, weeklyPace } = resolveDashboardViewOptions(optionsOrIsDark);
   const primaryWindow = overview.windows.primary;
   const secondaryWindow = overview.windows.secondary;
   const metrics = overview.summary.metrics;
@@ -871,8 +875,9 @@ export function buildDashboardView(
     // runway model), which is indistinguishable from a fresh backend with no
     // eligible accounts — so null falls back to the projections copy and then
     // to the local projection instead of hiding the card entirely.
-    weeklyCreditPace:
-      overview.weeklyCreditPace ?? projections?.weeklyCreditPace ?? buildWeeklyCreditPace(overview.accounts),
+    weeklyCreditPace: weeklyPace
+      ? (overview.weeklyCreditPace ?? projections?.weeklyCreditPace ?? buildWeeklyCreditPace(overview.accounts))
+      : null,
   };
 }
 

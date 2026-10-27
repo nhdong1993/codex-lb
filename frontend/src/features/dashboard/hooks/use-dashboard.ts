@@ -8,16 +8,22 @@ import {
 } from "@/features/dashboard/schemas";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 
-export function useDashboard(timeframe: OverviewTimeframe = DEFAULT_OVERVIEW_TIMEFRAME) {
+// Without the weekly pace card the response carries account usage, which the server refreshes every 60 s.
+const WITHOUT_WEEKLY_PACE_REFETCH_MS = 60_000;
+
+export function useDashboard(
+  timeframe: OverviewTimeframe = DEFAULT_OVERVIEW_TIMEFRAME,
+  { weeklyPace = true }: { weeklyPace?: boolean } = {},
+) {
   const queryClient = useQueryClient();
   const refreshSeconds = useDashboardPreferencesStore((state) => state.refreshSeconds);
   return useQuery({
-    queryKey: ["dashboard", "overview", timeframe],
+    queryKey: weeklyPace ? ["dashboard", "overview", timeframe] : ["dashboard", "overview", timeframe, "without-weekly-pace"],
     queryFn: async () => {
       const generation = resetReconciliationGeneration(queryClient);
-      return reconcileDashboardQuery(queryClient, await getDashboardOverview({ timeframe }), generation);
+      return reconcileDashboardQuery(queryClient, await getDashboardOverview({ timeframe, weeklyPace }), generation);
     },
-    refetchInterval: refreshSeconds * 1_000,
+    refetchInterval: weeklyPace ? refreshSeconds * 1_000 : WITHOUT_WEEKLY_PACE_REFETCH_MS,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });

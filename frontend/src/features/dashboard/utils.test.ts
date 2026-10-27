@@ -908,6 +908,26 @@ describe("buildDashboardView", () => {
     expect(view.weeklyCreditPace).toBe(serverPace);
   });
 
+  it("skips the local projection when the overview was requested without weekly pace", () => {
+    const overview = createDashboardOverview({
+      weeklyCreditPace: null,
+      accounts: [
+        account({
+          accountId: "acc-no-pace",
+          email: "no-pace@example.com",
+          usage: { primaryRemainingPercent: null, secondaryRemainingPercent: 50 },
+          capacityCreditsSecondary: 50_400,
+          remainingCreditsSecondary: 25_200,
+          resetAtSecondary: new Date(Date.now() + 3.5 * 24 * 60 * 60 * 1000).toISOString(),
+          windowMinutesSecondary: 10_080,
+        }),
+      ],
+    });
+
+    expect(buildDashboardView(overview, [], { weeklyPace: false }).weeklyCreditPace).toBeNull();
+    expect(buildDashboardView(overview, [], {}).weeklyCreditPace).not.toBeNull();
+  });
+
   it("falls back to the local projection when the overview serves null and projections have none", () => {
     const weeklyResetAt = new Date(Date.now() + 3.5 * 24 * 60 * 60 * 1000).toISOString();
     const overview = createDashboardOverview({
