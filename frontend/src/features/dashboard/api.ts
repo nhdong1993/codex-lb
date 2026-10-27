@@ -42,6 +42,7 @@ export type RequestLogFacetFilters = {
 
 export type DashboardOverviewParams = {
   timeframe?: OverviewTimeframe;
+  weeklyPace?: boolean;
 };
 
 function appendMany(params: URLSearchParams, key: string, values?: string[]): void {
@@ -58,6 +59,9 @@ function appendMany(params: URLSearchParams, key: string, values?: string[]): vo
 export function getDashboardOverview(params: DashboardOverviewParams = {}) {
   const query = new URLSearchParams();
   query.set("timeframe", params.timeframe ?? DEFAULT_OVERVIEW_TIMEFRAME);
+  if (params.weeklyPace === false) {
+    query.set("weeklyPace", "false");
+  }
   return get(`${DASHBOARD_PATH}/overview?${query.toString()}`, DashboardOverviewSchema);
 }
 

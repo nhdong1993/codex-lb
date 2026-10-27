@@ -14,6 +14,12 @@ import {
 } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
+import * as dashboardUtils from "@/features/dashboard/utils";
+
+vi.mock("@/features/dashboard/utils", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/features/dashboard/utils")>();
+  return { ...actual, buildDashboardView: vi.fn(actual.buildDashboardView) };
+});
 
 function trackRequests() {
   const urls: URL[] = [];
@@ -54,6 +60,15 @@ describe("DashboardOverviewPage", () => {
     }
     expect(requestLogCalls(urls)[0]?.searchParams.get("limit")).toBe("25");
     expect(requestLogCalls(urls)[0]?.searchParams.get("offset")).toBe("0");
+    // Neither the page nor the status bar asks for the weekly pace here.
+    const overviewCalls = urls.filter((url) => url.pathname === "/api/dashboard/overview");
+    expect(overviewCalls).not.toHaveLength(0);
+    expect(overviewCalls.every((url) => url.searchParams.get("weeklyPace") === "false")).toBe(true);
+    // A deliberately pace-free response must not trigger the browser-side weekly pace projection.
+    for (const [, , options] of vi.mocked(dashboardUtils.buildDashboardView).mock.calls) {
+      expect(options).toMatchObject({ weeklyPace: false });
+    }
+    expect(vi.mocked(dashboardUtils.buildDashboardView)).toHaveBeenCalled();
 
     await user.click(within(tabs).getByRole("link", { name: "Dashboard" }));
     await waitFor(() => expect(window.location.pathname).toBe("/dashboard"));

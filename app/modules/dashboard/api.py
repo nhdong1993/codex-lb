@@ -33,12 +33,14 @@ router = APIRouter(
 )
 async def get_overview(
     timeframe: DashboardOverviewTimeframeKey = Query("7d"),
+    weekly_pace: bool = Query(True, alias="weeklyPace"),
     principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: DashboardContext = Depends(get_dashboard_context),
 ) -> DashboardOverviewResponse:
     return await context.service.get_overview(
         timeframe,
         redact_identity=not principal.has(Permission.ACCOUNTS_WRITE),
+        include_weekly_pace=weekly_pace,
     )
 
 
