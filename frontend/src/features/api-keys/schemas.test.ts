@@ -263,6 +263,14 @@ describe("ApiKeyUpdateRequestSchema", () => {
     expect(parsed.limits![0].limitType).toBe("cost_usd");
   });
 
+  it("accepts the lifetime limit window", () => {
+    const parsed = ApiKeyUpdateRequestSchema.parse({
+      limits: [{ limitType: "total_tokens", limitWindow: "lifetime", maxValue: 1000 }],
+    });
+
+    expect(parsed.limits![0].limitWindow).toBe("lifetime");
+  });
+
   it("accepts resetUsage flag", () => {
     const parsed = ApiKeyUpdateRequestSchema.parse({
       resetUsage: true,

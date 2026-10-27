@@ -5,9 +5,15 @@ from datetime import datetime, timedelta
 from app.db.models import LimitWindow
 
 _DAILY_LIMIT_UTC_OFFSET = timedelta(hours=7)  # Asia/Ho_Chi_Minh
+_EPOCH = datetime(1970, 1, 1)
+_LIFETIME_RESET_BASE = datetime(9000, 1, 1)
 
 
 def next_limit_reset(now: datetime, window: LimitWindow) -> datetime:
+    if window == LimitWindow.LIFETIME:
+        # Far enough ahead that no reset path ever fires, yet distinct per reset:
+        # reservation CAS fences on reset_at, so a manual reset must change it.
+        return _LIFETIME_RESET_BASE + (now - _EPOCH)
     if window == LimitWindow.FIVE_HOURS:
         return now + timedelta(hours=5)
     if window == LimitWindow.SEVEN_DAYS:
@@ -31,6 +37,12 @@ def advance_limit_reset(reset_at: datetime, now: datetime, window: LimitWindow) 
     while next_reset <= now:
         next_reset += delta
     return next_reset
+
+
+def limit_window_start(now: datetime, window: LimitWindow) -> datetime:
+    if window == LimitWindow.LIFETIME:
+        return _EPOCH
+    return now - limit_window_delta(window)
 
 
 def limit_window_delta(window: LimitWindow) -> timedelta:

@@ -10182,7 +10182,7 @@ async def _enforce_request_limits(
                 request_usage_budget=request_usage_budget,
             )
         except ApiKeyRateLimitExceededError as exc:
-            message = f"{exc}. Usage resets at {exc.reset_at.isoformat()}Z."
+            message = exc.client_message()
             raise ProxyRateLimitError(message) from exc
         except ApiKeyInvalidError as exc:
             raise ProxyAuthError(str(exc)) from exc

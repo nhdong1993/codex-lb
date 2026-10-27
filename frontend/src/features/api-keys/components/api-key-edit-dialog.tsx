@@ -1,9 +1,10 @@
-import { useMemo, useReducer } from "react";
+import { useMemo, useReducer, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { z } from "zod";
 
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -138,6 +139,7 @@ function apiKeyEditDraftReducer(
 
 function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps) {
   const { t } = useTranslation();
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
   const formSchema = z.object({
     name: z.string().min(1, t("apiKeys.validation.nameRequired")),
     isActive: z.boolean(),
@@ -198,6 +200,15 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     }
     try {
       await onSubmit(payload);
+    } catch {
+      return;
+    }
+    onClose();
+  };
+
+  const handleResetUsage = async () => {
+    try {
+      await onSubmit({ resetUsage: true });
     } catch {
       return;
     }
@@ -428,7 +439,19 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             {apiKey.limits.length > 0 ? (
               <div className="space-y-1">
-                <div className="text-xs font-medium text-muted-foreground">{t("apiKeys.form.currentUsage")}</div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-medium text-muted-foreground">{t("apiKeys.form.currentUsage")}</div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    disabled={busy}
+                    onClick={() => setConfirmResetOpen(true)}
+                  >
+                    {t("apiKeys.resetUsage.button")}
+                  </Button>
+                </div>
                 <div className="space-y-1">
                   {apiKey.limits.map((limit) => (
                     <LimitUsageBar key={limit.id} limit={limit} />
@@ -446,6 +469,15 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
           </Button>
         </DialogFooter>
       </form>
+
+      <ConfirmDialog
+        open={confirmResetOpen}
+        title={t("apiKeys.resetUsage.title")}
+        description={t("apiKeys.resetUsage.description")}
+        confirmLabel={t("apiKeys.resetUsage.confirm")}
+        onOpenChange={setConfirmResetOpen}
+        onConfirm={() => void handleResetUsage()}
+      />
     </Form>
   );
 }

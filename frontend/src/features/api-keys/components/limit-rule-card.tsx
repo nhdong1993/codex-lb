@@ -34,6 +34,7 @@ const WINDOW_LABELS: Record<LimitWindowType, string> = {
   monthly: "Monthly",
   "5h": "5h",
   "7d": "7d",
+  lifetime: "Lifetime (no reset)",
 };
 
 const LIMIT_TYPE_SET: ReadonlySet<string> = new Set(LIMIT_TYPES);

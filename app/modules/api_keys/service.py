@@ -25,7 +25,7 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, LimitType, LimitWindow, ModelSource, UsageHistory
 from app.db.session import sqlite_writer_section
 from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer, get_api_key_last_used_coalescer
-from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_delta, next_limit_reset
+from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_start, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -232,9 +232,15 @@ class ApiKeyValidationError(ValueError):
 
 
 class ApiKeyRateLimitExceededError(ValueError):
-    def __init__(self, *, message: str, reset_at: datetime) -> None:
+    def __init__(self, *, message: str, reset_at: datetime, lifetime: bool = False) -> None:
         super().__init__(message)
         self.reset_at = reset_at
+        self.lifetime = lifetime
+
+    def client_message(self) -> str:
+        if self.lifetime:
+            return f"{self}. Usage does not reset automatically."
+        return f"{self}. Usage resets at {self.reset_at.isoformat()}Z."
 
 
 def _ensure_optional_int_token_budget(field_name: str, value: int | None) -> None:
@@ -1670,6 +1676,7 @@ def _rate_limit_exceeded_error(limit: ApiKeyLimit) -> ApiKeyRateLimitExceededErr
         message=f"API key {limit.limit_type.value} {limit.limit_window.value} limit exceeded"
         + (f" for model {limit.model_filter}" if limit.model_filter else ""),
         reset_at=limit.reset_at,
+        lifetime=limit.limit_window == LimitWindow.LIFETIME,
     )
 
 
@@ -1957,7 +1964,7 @@ async def _new_limit_input_to_backfilled_row(
     limit_type = LimitType(submitted.limit_type)
     window = LimitWindow(submitted.limit_window)
     reset_at = next_limit_reset(now, window)
-    since = now - limit_window_delta(window)
+    since = limit_window_start(now, window)
     current_value = await repository.get_limit_usage_value(
         key_id,
         limit_type=limit_type,

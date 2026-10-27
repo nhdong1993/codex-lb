@@ -3156,6 +3156,88 @@ async def test_api_key_limit_applies_to_compact_responses(async_client, monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
+async def test_lifetime_limit_429_says_usage_does_not_reset(async_client, monkeypatch, endpoint):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "compact-lifetime-limit",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "lifetime", "maxValue": 10},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    key = payload["key"]
+    key_id = payload["id"]
+
+    await _import_account(async_client, "acc_compact_lifetime_key", "compact-lifetime-key@example.com")
+
+    seen = {"calls": 0}
+
+    async def fake_compact(_payload, _headers, _access_token, _account_id):
+        seen["calls"] += 1
+        return OpenAIResponsePayload.model_validate(
+            {
+                "id": "resp_compact_1",
+                "model": _TEST_MODELS[0],
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 5,
+                    "total_tokens": 12,
+                },
+                "output": [],
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    request_payload = {
+        "model": _TEST_MODELS[0],
+        "instructions": "hi",
+        "input": [],
+    }
+
+    first = await async_client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {key}"},
+        json=request_payload,
+    )
+    assert first.status_code == 200
+
+    blocked = await async_client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {key}"},
+        json=request_payload,
+    )
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["code"] == "rate_limit_exceeded"
+    assert "lifetime limit exceeded" in blocked.json()["error"]["message"]
+    assert "does not reset automatically" in blocked.json()["error"]["message"]
+    assert "resets at" not in blocked.json()["error"]["message"]
+    assert seen["calls"] == 1
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 12  # 7 input + 5 output
+
+
+@pytest.mark.asyncio
 async def test_chat_completions_stream_finalizes_token_limit(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",
@@ -5244,3 +5326,44 @@ async def test_stream_without_api_key_auth_skips_settlement(async_client, monkey
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line]
         assert len(lines) >= 1  # stream completed without error
+
+
+@pytest.mark.asyncio
+async def test_lifetime_limit_survives_sweep_and_resets_only_on_explicit_reset(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "lifetime-limit",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "lifetime", "maxValue": 1000},
+                {"limitType": "cost_usd", "limitWindow": "lifetime", "maxValue": 5_000_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    assert {li["limitWindow"] for li in created.json()["limits"]} == {"lifetime"}
+    key_id = created.json()["id"]
+
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        for limit in limits:
+            limit.current_value = 900
+        await session.commit()
+        original_reset_at = {limit.id: limit.reset_at for limit in limits}
+
+    # Years later, the hourly fallback sweep still leaves lifetime usage alone.
+    async with SessionLocal() as session:
+        reset_count = await ApiKeysRepository(session).reset_expired_limits(now=utcnow() + timedelta(days=3650))
+        assert reset_count == 0
+
+    explicit_reset = await async_client.patch(f"/api/api-keys/{key_id}", json={"resetUsage": True})
+    assert explicit_reset.status_code == 200
+
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert [limit.current_value for limit in limits] == [0, 0]
+        for limit in limits:
+            assert limit.limit_window == LimitWindow.LIFETIME
+            # A new reset_at fences reservations taken before the reset.
+            assert limit.reset_at != original_reset_at[limit.id]
+            assert limit.reset_at > utcnow() + timedelta(days=3650)

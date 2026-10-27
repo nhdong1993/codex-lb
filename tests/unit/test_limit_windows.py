@@ -8,6 +8,7 @@ from app.db.models import LimitWindow
 from app.modules.api_keys.limit_windows import (
     advance_limit_reset,
     limit_window_delta,
+    limit_window_start,
     next_limit_reset,
 )
 
@@ -133,3 +134,17 @@ def test_advance_limit_reset_lands_in_future_for_every_window(window: LimitWindo
     result = advance_limit_reset(reset_at, NOW, window)
 
     assert result > NOW
+
+
+def test_next_limit_reset_lifetime_is_far_future_and_unique_per_reset() -> None:
+    first = next_limit_reset(NOW, LimitWindow.LIFETIME)
+    later = next_limit_reset(NOW + timedelta(seconds=1), LimitWindow.LIFETIME)
+
+    assert first > NOW + timedelta(days=365 * 1000)
+    # Reservation CAS fences on reset_at, so each manual reset needs a new value.
+    assert later != first
+
+
+def test_limit_window_start_lifetime_covers_all_history() -> None:
+    assert limit_window_start(NOW, LimitWindow.LIFETIME) <= datetime(1970, 1, 1)
+    assert limit_window_start(NOW, LimitWindow.DAILY) == NOW - timedelta(days=1)
