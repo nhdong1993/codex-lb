@@ -83,6 +83,29 @@ describe("useDashboard", () => {
     expect(requestedTimeframe).toBe("1d");
   });
 
+  it("asks for the overview without weekly pace under its own key every 60 seconds", async () => {
+    useDashboardPreferencesStore.setState({ refreshSeconds: 15 });
+    let weeklyPace: string | null = null;
+    server.use(
+      http.get("/api/dashboard/overview", ({ request }) => {
+        weeklyPace = new URL(request.url).searchParams.get("weeklyPace");
+        return undefined;
+      }),
+    );
+    const queryClient = createTestQueryClient();
+    const { result } = renderHook(() => useDashboard("7d", { weeklyPace: false }), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(weeklyPace).toBe("false");
+    expect(queryClient.getQueryCache().find({ queryKey: ["dashboard", "overview", "7d"], exact: true })).toBeUndefined();
+    const query = queryClient
+      .getQueryCache()
+      .find({ queryKey: ["dashboard", "overview", "7d", "without-weekly-pace"], exact: true });
+    expect((query?.options as { refetchInterval?: unknown } | undefined)?.refetchInterval).toBe(60_000);
+  });
+
   it("applies the selected cadence to projection polling", () => {
     useDashboardPreferencesStore.setState({ refreshSeconds: 5 });
     const queryClient = createTestQueryClient();

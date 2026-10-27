@@ -97,12 +97,12 @@ export function DashboardOverviewPage() {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const timeframe = parseOverviewTimeframe(searchParams.get("overviewTimeframe"));
-  const dashboardQuery = useDashboard(timeframe);
+  const dashboardQuery = useDashboard(timeframe, { weeklyPace: false });
   const isDark = useThemeStore((state) => state.theme === "dark");
   const overview = dashboardQuery.data;
   // The stat labels are translated inside the builder; the language is part of the input.
   void i18n.resolvedLanguage;
-  const stats = overview ? buildDashboardView(overview, [], { isDark, showAccountBurnrate: false }).stats : null;
+  const stats = overview ? buildDashboardView(overview, [], { isDark, showAccountBurnrate: false, weeklyPace: false }).stats : null;
   const error = getErrorMessageOrNull(dashboardQuery.error);
 
   const handleTimeframeChange = (next: OverviewTimeframe) => {
