@@ -16,7 +16,7 @@ def test_source_websocket_migration_defaults_and_round_trip(tmp_path: Path):
     path = tmp_path / "source-ws.db"
     url = f"sqlite+aiosqlite:///{path}"
     config = _build_alembic_config(url)
-    assert ScriptDirectory.from_config(config).get_heads() == ["20261011_020000_add_model_plan_routing_policies"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["20261027_000000_add_lifetime_api_key_limit_window"]
     run_upgrade(url, PARENT, bootstrap_legacy=False)
     engine = create_engine(f"sqlite:///{path}")
     try:

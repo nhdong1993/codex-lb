@@ -17,7 +17,7 @@ HEAD = "20261011_020000_add_model_plan_routing_policies"
 def test_plan_check_upgrade_preserves_credentials_and_round_trips(tmp_path: Path):
     url = os.environ.get("CODEX_LB_TEST_MIGRATION_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'checks.db'}")
     config = _build_alembic_config(url)
-    assert ScriptDirectory.from_config(config).get_heads() == [HEAD]
+    assert ScriptDirectory.from_config(config).get_heads() == ["20261027_000000_add_lifetime_api_key_limit_window"]
     run_upgrade(url, PARENT, bootstrap_legacy=False)
     engine = create_engine(url.replace("+aiosqlite", "").replace("+asyncpg", "+psycopg"))
     try:
