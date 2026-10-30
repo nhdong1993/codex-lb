@@ -233,7 +233,7 @@ anything else belongs in `app/core/config/settings.py`.
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
 | `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` | T3 | `dict[str, int]` | `{}` |
-| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | T1 | `str` | `'0.163.0'` |
+| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | T1 | `str` | `'0.166.0'` |
 | `CODEX_LB_MODEL_REGISTRY_ENABLED` | T3 | `bool` | `True` |
 | `CODEX_LB_MODEL_REGISTRY_SNAPSHOT_MAX_AGE_SECONDS` | T1 | `int` | `86400` |
 
