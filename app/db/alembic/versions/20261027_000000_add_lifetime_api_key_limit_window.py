@@ -1,7 +1,7 @@
 """add lifetime api key limit window enum value
 
 Revision ID: 20261027_000000_add_lifetime_api_key_limit_window
-Revises: 20260918_000000_merge_scim_and_overflow_heads
+Revises: 20261011_020000_add_model_plan_routing_policies
 Create Date: 2026-10-27
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20261027_000000_add_lifetime_api_key_limit_window"
-down_revision = "20260918_000000_merge_scim_and_overflow_heads"
+down_revision = "20261011_020000_add_model_plan_routing_policies"
 branch_labels = None
 depends_on = None
 
