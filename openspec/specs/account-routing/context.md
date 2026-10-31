@@ -332,3 +332,7 @@ The quota planner tick, the quota planner forecast endpoint and the usage-refres
 - recovery reuses the detached row the refresh cycle already read.
 
 Without this, an operator who turned soft drain off in the dashboard still saw these background paths compute the draining tier from the environment default.
+
+## Reserved accounts
+
+`drop_foreign_reserved` (`app/modules/proxy/_load_balancer/reserved_accounts.py`) runs after every cached selection-input load and drops accounts reserved for another key from `accounts`, continuity owners and sticky authority, but never from `runtime_accounts`, so cooldown/backoff state survives and a required owner fails with `continuity_owner_policy_conflict`. The owner key's preference is a pre-pass in `_select_account_preferring_budget_safe` over its reserved states only (no backoff fallback, no usage-exhaustion error), skipped under `single_account`. Rationale: `openspec/changes/archive/2026-10-31-reserve-accounts-for-api-key/context.md`.
