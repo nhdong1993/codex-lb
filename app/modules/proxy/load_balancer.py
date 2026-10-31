@@ -139,21 +139,11 @@ from app.modules.proxy._load_balancer.types import (
     ProbeReservation,
     RuntimeState,
 )
-from app.modules.proxy._load_balancer.unbound_selection import (
-    UnboundSelectionRequest,
-    run_unbound_selection_path,
-)
+from app.modules.proxy._load_balancer.unbound_selection import UnboundSelectionRequest, run_unbound_selection_path
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
-from app.modules.proxy.account_eligibility import (
-    account_access_token_expires_at,
-    all_accounts_require_reauthentication,
-)
+from app.modules.proxy.account_eligibility import account_access_token_expires_at, all_accounts_require_reauthentication
 from app.modules.proxy.affinity import _CodexSessionSource
-from app.modules.proxy.cap_partitioning import (
-    configured_account_concurrency_caps,
-    get_cap_partition,
-    partition_cap,
-)
+from app.modules.proxy.cap_partitioning import configured_account_concurrency_caps, get_cap_partition, partition_cap
 from app.modules.proxy.fair_share import (
     ApiKeyFairShareDenialError,
     FairShareDecision,
