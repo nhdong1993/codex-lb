@@ -6,8 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 import app.modules.proxy.load_balancer as load_balancer_module
+from app.core.balancer.logic import AccountState
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy._load_balancer.reserved_accounts import drop_foreign_reserved
+from app.modules.proxy._load_balancer.sticky_selection import _select_account_preferring_budget_safe
 from app.modules.proxy.account_cache import AccountSelectionCache
 from app.modules.proxy.load_balancer import LoadBalancer
 from tests.unit.test_load_balancer_contract import _account, _balancer, _usage_row
@@ -159,6 +161,40 @@ def test_drop_foreign_reserved_is_noop_without_reservations() -> None:
     assert [account.id for account in dropped.accounts] == ["acc-a"]
     assert [account.id for account in dropped.runtime_accounts or []] == ["acc-a", "acc-b"]
     assert dropped.effective_sticky_mutation_authority_account_ids == frozenset({"acc-a"})
+
+
+def test_drop_foreign_reserved_removes_authority_only_reserved_ids() -> None:
+    model_ineligible = _reserved("acc-a", "key-k")
+    pool = _account("acc-b")
+    inputs = load_balancer_module._SelectionInputs(
+        accounts=[pool],
+        latest_primary={},
+        latest_secondary={},
+        latest_monthly={},
+        continuity_owner_candidates=[pool],
+        sticky_mutation_authority_account_ids=frozenset({"acc-a", "acc-b"}),
+        runtime_accounts=[model_ineligible, pool],
+    )
+
+    for api_key_id in ("key-j", None):
+        dropped = drop_foreign_reserved(inputs, api_key_id)
+        assert dropped.effective_sticky_mutation_authority_account_ids == frozenset({"acc-b"})
+        assert [account.id for account in dropped.runtime_accounts or []] == ["acc-a", "acc-b"]
+    assert drop_foreign_reserved(inputs, "key-k") is inputs
+
+
+def test_budget_safe_wrapper_skips_reservation_preference_for_single_account() -> None:
+    states = [
+        AccountState(account_id="acc-z", status=AccountStatus.ACTIVE, used_percent=10.0, reserved=True),
+        AccountState(account_id="acc-b", status=AccountStatus.ACTIVE, used_percent=10.0),
+    ]
+
+    selection = _select_account_preferring_budget_safe(
+        states, routing_strategy="single_account", prefer_earlier_reset=False, budget_threshold_pct=95.0
+    )
+
+    assert selection.account is not None
+    assert selection.account.account_id == "acc-b"
 
 
 @pytest.mark.asyncio

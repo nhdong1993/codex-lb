@@ -99,7 +99,7 @@ Since the WP-E fix in #2124 the HTTP Responses session bridge returns the pool's
 
 ### Reserved accounts
 
-An account can be reserved for one API key (`Reserved accounts (preferred)` in the API key dialog, or `reservedAccountIds` on `/api/api-keys`). Requests with that key use its reserved accounts first, even when they are fuller than the rest of the pool, and fall back to the key's normal pool only while every reserved account is unusable (quota exhausted, cooling down, paused or deactivated). No other key and no keyless request ever selects a reserved account; a conversation of another key that is owned by it fails closed instead of moving. `single_account` routing still sends traffic to the configured account. With API key authentication disabled every request is keyless, so reserved accounts sit idle.
+An account can be reserved for one API key (`Reserved accounts (preferred)` in the API key dialog, or `reservedAccountIds` on `/api/api-keys`). Requests with that key use its reserved accounts first, even when they are fuller than the rest of the pool, and fall back to the key's normal pool only while every reserved account is unusable (quota exhausted, cooling down, paused or deactivated). No other key and no keyless request ever selects a reserved account; a conversation of another key that is owned by it fails closed instead of moving. `single_account` routing keeps using the configured account; if that account is reserved, only its key is served and other requests fail with `No available accounts`. With API key authentication disabled every request is keyless, so reserved accounts sit idle.
 
 ---
 
