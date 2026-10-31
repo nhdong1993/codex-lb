@@ -67,6 +67,7 @@ type ApiKeyCreateFormProps = {
 type ApiKeyCreateDraft = {
   selectedModels: string[];
   selectedAccountIds: string[];
+  selectedReservedAccountIds: string[];
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
   usageSections: string;
@@ -84,6 +85,7 @@ type ApiKeyCreateDraft = {
 const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   selectedModels: [],
   selectedAccountIds: [],
+  selectedReservedAccountIds: [],
   selectedSourceIds: [],
   selectedReasoningEfforts: [],
   usageSections: "upstream_limits,account_pool_usage",
@@ -125,6 +127,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
       applyToCodexModel: draft.applyToCodexModel,
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
+      ...(draft.selectedReservedAccountIds.length > 0 ? { reservedAccountIds: draft.selectedReservedAccountIds } : {}),
       ...(draft.selectedSourceIds.length > 0 ? { assignedSourceIds: draft.selectedSourceIds } : {}),
       usageSections: draft.usageSections,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
@@ -210,6 +213,16 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             <div className="space-y-1">
               <p className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</p>
               <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
+            </div>
+
+            <div className="space-y-1">
+              <p className="text-sm font-medium">{t("apiKeys.form.reservedAccounts")}</p>
+              <AccountMultiSelect
+                value={draft.selectedReservedAccountIds}
+                onChange={(selectedReservedAccountIds) => updateDraft({ selectedReservedAccountIds })}
+                placeholder={t("apiKeys.accountSelect.none")}
+              />
+              <p className="text-xs text-muted-foreground">{t("apiKeys.form.reservedAccountsHint")}</p>
             </div>
 
             <div className="space-y-1">

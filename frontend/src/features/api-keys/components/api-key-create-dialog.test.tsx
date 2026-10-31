@@ -250,6 +250,40 @@ describe("ApiKeyCreateDialog", () => {
     expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
   });
 
+  it("submits reserved accounts on create", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    server.use(
+      http.get("/api/accounts", () =>
+        HttpResponse.json({
+          accounts: [
+            createAccountSummary(),
+            createAccountSummary({
+              accountId: "acc_secondary",
+              email: "secondary@example.com",
+              displayName: "secondary@example.com",
+            }),
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(<ApiKeyCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+
+    await user.type(screen.getByLabelText("Name"), "Reserved create");
+    await user.click(await screen.findByRole("button", { name: "No reserved accounts" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: /secondary@example\.com/i }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.reservedAccountIds).toEqual(["acc_secondary"]);
+    expect("assignedAccountIds" in payload).toBe(false);
+  });
+
   it("clears selected assigned accounts when the dialog is dismissed", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
