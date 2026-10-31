@@ -37,3 +37,7 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+## Reserved accounts
+
+`accounts.reserved_api_key_id` dedicates an account to one key (at most one owner per account). The owner key prefers it and falls back to its pool; other keys, keyless requests and all-accounts automation jobs never use it. Writes are a conditional `UPDATE … WHERE reserved_api_key_id IS NULL AND delete_requested_at IS NULL`, so a lost race is `409 account_reserved_by_other_key` and the whole request rolls back. Scoped keys keep reserved ⊆ assigned. Known limits: with API key auth disabled every request is keyless, so reserved accounts idle; keyless system tasks (quota-planner schedule, limit warmup, cache-isolation probe) still touch them; closing bridge sessions on reservation is replica-local; downgrading the migration drops every reservation. Rationale and example: `openspec/changes/archive/2026-10-31-reserve-accounts-for-api-key/context.md`.
