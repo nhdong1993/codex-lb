@@ -1117,7 +1117,8 @@ class AutomationsService:
             account_ids_to_try = [
                 account.id
                 for account in accounts
-                if self._is_account_eligible_for_automation(
+                if account.reserved_api_key_id is None
+                and self._is_account_eligible_for_automation(
                     account,
                     include_paused_accounts=include_paused_accounts,
                 )
@@ -1941,7 +1942,8 @@ class AutomationsService:
         accounts_by_id = {account.id: account for account in accounts}
         candidate_accounts: list[Account]
         if job.account_scope_all:
-            candidate_accounts = accounts
+            # Reserved accounts belong to their API key; only an explicit pick sends automation traffic there.
+            candidate_accounts = [account for account in accounts if account.reserved_api_key_id is None]
         else:
             candidate_accounts = [
                 accounts_by_id[account_id] for account_id in account_ids if account_id in accounts_by_id

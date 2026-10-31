@@ -5818,3 +5818,43 @@ async def test_automations_run_details_normalize_legacy_manual_cycle_key(async_c
     assert payload["totalAccounts"] == 2
     assert payload["completedAccounts"] == 1
     assert payload["pendingAccounts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_all_accounts_automation_skips_reserved_accounts(async_client, monkeypatch):
+    reserved, pool = await _create_accounts("auto-reserved-a", "auto-reserved-pool")
+    owner = await async_client.post("/api/api-keys/", json={"name": "auto-owner", "reservedAccountIds": [reserved.id]})
+    assert owner.status_code == 200
+
+    async def _fake_compact(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+    now = datetime(2026, 10, 31, 10, 0, 0)
+
+    async def cycle_accounts(account_ids: list[str]) -> list[str]:
+        async with SessionLocal() as session:
+            automations_repository = AutomationsRepository(session)
+            service = AutomationsService(automations_repository, AccountsRepository(session))
+            job = await automations_repository.create_job(
+                name=f"Reserved scope {len(account_ids)}",
+                enabled=False,
+                include_paused_accounts=False,
+                schedule_type="daily",
+                schedule_time="05:00",
+                schedule_timezone="UTC",
+                schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                schedule_threshold_minutes=0,
+                model="gpt-5.3-codex",
+                reasoning_effort=None,
+                prompt="ping",
+                account_ids=account_ids,
+            )
+            run = await service.run_now(job.id, now_utc=now)
+            assert run.cycle_key is not None
+            cycle = await automations_repository.get_run_cycle(cycle_key=run.cycle_key)
+        assert cycle is not None
+        return sorted(entry.account_id for entry in cycle.accounts)
+
+    assert await cycle_accounts([]) == [pool.id]
+    assert await cycle_accounts([reserved.id]) == [reserved.id]

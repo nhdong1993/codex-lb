@@ -7,7 +7,7 @@ Operators want to give one API key its own upstream account: that key should use
 - Add `accounts.reserved_api_key_id` (nullable FK to `api_keys.id`, `ON DELETE SET NULL`, indexed). One account is reserved by at most one key.
 - `POST/PATCH /api/api-keys` accept `reservedAccountIds`; every API key response returns it (sorted). Unknown ids return `400 invalid_api_key_payload`; an account already reserved by another key returns `409 account_reserved_by_other_key` and nothing in the request is committed. For a scoped key, reserved accounts are merged into its assigned accounts. Deleting a key releases its accounts.
 - Account selection drops accounts reserved by another key (or by any key, for keyless requests) from fresh selection, continuity owners and sticky authority. A key prefers its own reserved accounts while they are usable and falls back to its normal pool when they are exhausted, cooling down, paused or deactivated. `single_account` routing still wins over the preference.
-- Reset-credit listing/redeem, `/v1` warmup and keyed `warm-now` honor the same rule.
+- Reset-credit listing/redeem, `/v1` warmup and keyed `warm-now` honor the same rule; automation jobs scoped to all accounts skip reserved accounts.
 - Dashboard: a "Reserved accounts (preferred)" picker in the API key create/edit dialogs.
 
 No new settings. Without any reservation, routing is unchanged.
