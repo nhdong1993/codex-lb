@@ -238,7 +238,7 @@ export function AccountMultiSelect({
             onCheckedChange={selectAll}
             onSelect={(event) => event.preventDefault()}
           >
-            {t("apiKeys.accountSelect.all")}
+            {placeholderLabel}
           </DropdownMenuCheckboxItem>
           <DropdownMenuSeparator />
           {filtered.map((account) => (

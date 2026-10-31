@@ -94,6 +94,7 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
 type ApiKeyEditDraft = {
   selectedModels: string[];
   selectedAccountIds: string[];
+  selectedReservedAccountIds: string[];
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
   clearSourceScope: boolean;
@@ -112,6 +113,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
   return {
     selectedModels: apiKey.allowedModels || [],
     selectedAccountIds: apiKey.assignedAccountIds,
+    selectedReservedAccountIds: apiKey.reservedAccountIds,
     selectedSourceIds: apiKey.assignedSourceIds,
     selectedReasoningEfforts: apiKey.allowedReasoningEfforts || [],
     clearSourceScope: false,
@@ -187,6 +189,10 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     if (shouldSubmitAssignedAccountIds) {
       payload.assignedAccountIds = draft.selectedAccountIds;
     }
+    // Saving a reservation closes the accounts' bridge sessions, so only send it when it changed.
+    if (hasSelectionChange(apiKey.reservedAccountIds, draft.selectedReservedAccountIds)) {
+      payload.reservedAccountIds = draft.selectedReservedAccountIds;
+    }
     if (shouldSubmitAssignedSourceIds) {
       payload.assignedSourceIds = draft.selectedSourceIds;
     }
@@ -251,6 +257,16 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             <div className="space-y-1">
               <div className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</div>
               <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">{t("apiKeys.form.reservedAccounts")}</div>
+              <AccountMultiSelect
+                value={draft.selectedReservedAccountIds}
+                onChange={(selectedReservedAccountIds) => updateDraft({ selectedReservedAccountIds })}
+                placeholder={t("apiKeys.accountSelect.none")}
+              />
+              <p className="text-xs text-muted-foreground">{t("apiKeys.form.reservedAccountsHint")}</p>
             </div>
 
             <div className="space-y-1">

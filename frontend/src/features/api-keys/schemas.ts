@@ -65,6 +65,7 @@ export const ApiKeySchema = z.object({
   sourceAssignmentScopeEnabled: z.boolean().default(false),
   assignedAccountIds: z.array(z.string()).default([]),
   assignedSourceIds: z.array(z.string()).default([]),
+  reservedAccountIds: z.array(z.string()).default([]),
   createdAt: z.iso.datetime({ offset: true }),
   lastUsedAt: z.iso.datetime({ offset: true }).nullable(),
   limits: z.array(LimitRuleSchema).default([]),
@@ -100,6 +101,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   assignedSourceIds: z.array(z.string()).optional(),
+  reservedAccountIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
 });
 
@@ -126,6 +128,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   assignedSourceIds: z.array(z.string()).optional(),
+  reservedAccountIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
   resetUsage: z.boolean().optional(),
 });

@@ -309,6 +309,59 @@ describe("ApiKeyEditDialog", () => {
     expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
   });
 
+  it("submits reserved accounts only when the selection changes", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    server.use(
+      http.get("/api/accounts", () =>
+        HttpResponse.json({
+          accounts: [
+            createAccountSummary(),
+            createAccountSummary({
+              accountId: "acc_secondary",
+              email: "secondary@example.com",
+              displayName: "secondary@example.com",
+            }),
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ reservedAccountIds: ["acc_primary"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect("reservedAccountIds" in onSubmit.mock.calls[0][0]).toBe(false);
+
+    await user.click(await screen.findByRole("button", { name: "1 account selected" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: /secondary@example\.com/i }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(2);
+    });
+    expect(onSubmit.mock.calls[1][0].reservedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
+
+    await user.click(await screen.findByRole("button", { name: "2 accounts selected" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "No reserved accounts" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(3);
+    });
+    expect(onSubmit.mock.calls[2][0].reservedAccountIds).toEqual([]);
+  });
+
   it("keeps the dialog open when selecting portalled model and account menu items", async () => {
     const user = userEvent.setup();
     server.use(

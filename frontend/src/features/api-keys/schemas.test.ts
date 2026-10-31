@@ -42,6 +42,7 @@ describe("ApiKeySchema", () => {
     expect(parsed.limits).toHaveLength(1);
     expect(parsed.limits[0].limitType).toBe("total_tokens");
     expect(parsed.trafficClass).toBe("foreground");
+    expect(parsed.reservedAccountIds).toEqual([]);
   });
 
   it("defaults limits to empty array when not provided", () => {
