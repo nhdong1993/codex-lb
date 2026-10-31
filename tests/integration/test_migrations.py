@@ -3379,3 +3379,87 @@ async def test_bridge_continuity_abandonment_migration_upgrade_and_downgrade(tmp
 
 
 # end bridge continuity abandonment
+
+
+@pytest.mark.asyncio
+async def test_account_reserved_api_key_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the nullable FK column and its index to ``accounts``; the
+    batch rebuild (and its downgrade) must not cascade child rows on SQLite."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-reserved-api-key.sqlite'}"
+    revision = "20261031_000000_add_account_reserved_api_key"
+    parent_revision = ScriptDirectory.from_config(_build_alembic_config(db_url)).get_revision(revision).down_revision
+    assert isinstance(parent_revision, str)
+
+    def _state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        columns = {column["name"] for column in inspector.get_columns("accounts")}
+        indexes = {index["name"] for index in inspector.get_indexes("accounts")}
+        fks = [
+            (fk["referred_table"], tuple(fk["constrained_columns"]), (fk.get("options") or {}).get("ondelete"))
+            for fk in inspector.get_foreign_keys("accounts")
+        ]
+        return {
+            "column": "reserved_api_key_id" in columns,
+            "index": "ix_accounts_reserved_api_key_id" in indexes,
+            "fk": ("api_keys", ("reserved_api_key_id",), "SET NULL") in fks,
+        }
+
+    async def _child_counts(conn) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for table in ("accounts", "usage_history", "api_keys", "api_key_accounts"):
+            counts[table] = (await conn.execute(text(f"SELECT COUNT(*) FROM {table}"))).scalar_one()
+        return counts
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO accounts (id, codex_installation_id, email, plan_type, "
+                    "access_token_encrypted, refresh_token_encrypted, id_token_encrypted, last_refresh, status) "
+                    "VALUES ('acc_mig_reserved', 'install-mig-reserved', 'reserved@example.com', 'plus', "
+                    "X'00', X'00', X'00', '2026-10-31 00:00:00', 'active')"
+                )
+            )
+            await conn.execute(
+                text("INSERT INTO usage_history (account_id, used_percent) VALUES ('acc_mig_reserved', 12.5)")
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO api_keys (id, name, key_hash, key_prefix, is_active) "
+                    "VALUES ('key_mig_reserved', 'k', 'hash-mig-reserved', 'sk-clb-mig', 1)"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO api_key_accounts (api_key_id, account_id) "
+                    "VALUES ('key_mig_reserved', 'acc_mig_reserved')"
+                )
+            )
+            before = await _child_counts(conn)
+            assert await conn.run_sync(_state) == {"column": False, "index": False, "fk": False}
+        assert before == {"accounts": 1, "usage_history": 1, "api_keys": 1, "api_key_accounts": 1}
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_state) == {"column": True, "index": True, "fk": True}
+            assert await _child_counts(conn) == before
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_state) == {"column": False, "index": False, "fk": False}
+            assert await _child_counts(conn) == before
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_state) == {"column": True, "index": True, "fk": True}
+    finally:
+        await engine.dispose()
