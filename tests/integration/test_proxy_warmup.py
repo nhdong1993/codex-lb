@@ -1196,3 +1196,40 @@ async def test_warmup_uses_unique_request_ids_per_account(async_client, monkeypa
     logged_request_ids = [row.request_id for row in rows]
     assert len(set(logged_request_ids)) == 2
     assert set(logged_request_ids) == set(captured_request_ids)
+
+
+async def _warmup_reserved_pool(async_client) -> tuple[str, str, str]:
+    reserved_id = await _import_account(async_client, "acc-warm-reserved", "warm-reserved@example.com")
+    pool_id = await _import_account(async_client, "acc-warm-pool", "warm-pool@example.com")
+    await _add_primary_usage(reserved_id, used_percent=0.0, window_minutes=300)
+    await _add_primary_usage(pool_id, used_percent=0.0, window_minutes=300)
+    owner = await async_client.post("/api/api-keys/", json={"name": "warm-owner", "reservedAccountIds": [reserved_id]})
+    assert owner.status_code == 200
+    return reserved_id, pool_id, owner.json()["key"]
+
+
+async def _warmed_accounts(async_client, headers: dict[str, str]) -> list[str]:
+    response = await async_client.post("/v1/warmup", headers=headers, json={"mode": "force"})
+    assert response.status_code == 200
+    return sorted(entry["account_id"] for entry in response.json()["submitted"])
+
+
+@pytest.mark.asyncio
+async def test_warmup_skips_accounts_reserved_for_other_key(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    reserved_id, pool_id, owner_key = await _warmup_reserved_pool(async_client)
+    _, other_key = await _create_api_key(async_client, name="warm-other")
+    _install_successful_warmup_stub(monkeypatch, [])
+
+    assert await _warmed_accounts(async_client, {"Authorization": f"Bearer {other_key}"}) == [pool_id]
+    assert await _warmed_accounts(async_client, {"Authorization": f"Bearer {owner_key}"}) == sorted(
+        [reserved_id, pool_id]
+    )
+
+
+@pytest.mark.asyncio
+async def test_keyless_warmup_skips_reserved_accounts(async_client, monkeypatch):
+    _, pool_id, _ = await _warmup_reserved_pool(async_client)
+    _install_successful_warmup_stub(monkeypatch, [])
+
+    assert await _warmed_accounts(async_client, {}) == [pool_id]

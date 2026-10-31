@@ -134,6 +134,10 @@ class QuotaWarmupService:
             model=resolved_model,
             force_probe=force_probe,
         )
+        if allowed and api_key_id is not None and account is not None:
+            # Before the claim and the key's budget reservation: another key's reserved account is off-limits.
+            if account.reserved_api_key_id not in (None, api_key_id):
+                allowed, reason = False, "account_reserved_by_other_key"
         if not allowed:
             if decision.status == "executing" and warmup_claim_is_expired(decision):
                 row = await self._planner.skip_stale_warmup_claim(decision.id, reason=reason)

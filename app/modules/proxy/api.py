@@ -2271,7 +2271,11 @@ def _eligible_reset_credit_accounts(accounts: list[Account], api_key: ApiKeyData
         requested_accounts = [account for account in accounts if account.id in assigned_ids]
     else:
         requested_accounts = accounts
-    return [account for account in requested_accounts if _is_reset_credit_selectable_account(account)]
+    return [
+        account
+        for account in requested_accounts
+        if _is_reset_credit_selectable_account(account) and account.reserved_api_key_id in (None, api_key.id)
+    ]
 
 
 def _project_reset_credit_accounts(accounts: list[Account], api_key: ApiKeyData) -> list[tuple[str, str]]:
@@ -2309,6 +2313,8 @@ def _list_available_reset_credits(account_id: str, email: str) -> list[V1ResetCr
 
 def _is_reset_credit_account_in_api_key_pool(account: Account | None, api_key: ApiKeyData) -> bool:
     if account is None or not _is_reset_credit_selectable_account(account):
+        return False
+    if account.reserved_api_key_id not in (None, api_key.id):
         return False
     if not api_key.account_assignment_scope_enabled:
         return True
