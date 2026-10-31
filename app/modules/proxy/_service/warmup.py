@@ -129,6 +129,7 @@ class _WarmupAccountSnapshot:
     deactivation_reason: str | None
     reset_at: int | None
     blocked_at: int | None
+    reserved_api_key_id: str | None = None
 
 
 def _is_warmup_usage_eligible(entry: _WarmupUsageSnapshot | None) -> bool:
@@ -153,6 +154,7 @@ def _snapshot_warmup_account(account: Account) -> _WarmupAccountSnapshot:
         deactivation_reason=account.deactivation_reason,
         reset_at=account.reset_at,
         blocked_at=account.blocked_at,
+        reserved_api_key_id=account.reserved_api_key_id,
     )
 
 
@@ -295,8 +297,12 @@ class _WarmupMixin:
         *,
         api_key: ApiKeyData | None,
     ) -> list[_WarmupAccountSnapshot]:
+        api_key_id = api_key.id if api_key is not None else None
         active_accounts = [
-            account for account in accounts if account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+            account
+            for account in accounts
+            if account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+            and account.reserved_api_key_id in (None, api_key_id)
         ]
         if api_key is None or not api_key.account_assignment_scope_enabled:
             return active_accounts
