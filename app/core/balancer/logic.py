@@ -152,6 +152,8 @@ class AccountState:
     # neutral. The balancer derives it from the account's recent upstream
     # error rate. Deterministic strategies ignore it.
     selection_weight_multiplier: float = 1.0
+    # Reserved for the requesting API key: selection inputs already dropped accounts reserved for other keys.
+    reserved: bool = False
 
 
 @dataclass

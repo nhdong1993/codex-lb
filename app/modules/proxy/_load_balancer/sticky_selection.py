@@ -5,7 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Generic, Literal, Protocol, TypeVar
+from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar
 
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
@@ -76,6 +76,8 @@ AccountCapRejectionCallback = Callable[[AccountLeaseKind | None], None]
 
 
 class SelectionInputsProtocol(Protocol):
+    # Implementations are dataclasses, so callers can ``dataclasses.replace`` them.
+    __dataclass_fields__: ClassVar[dict[str, Any]]
     accounts: list[Account]
     latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
@@ -86,6 +88,8 @@ class SelectionInputsProtocol(Protocol):
     error_code: str | None
     ignore_standard_quota_account_ids: frozenset[str]
     routing_policy_override: str | None
+    continuity_owner_candidates: list[Account] | None
+    sticky_mutation_authority_account_ids: frozenset[str] | None
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]: ...
@@ -2257,6 +2261,29 @@ def _select_account_preferring_budget_safe(
     selection_seed: str | None = None,
 ) -> SelectionResult:
     state_list = list(states)
+    reserved_states = [state for state in state_list if state.reserved]
+    if routing_strategy != "single_account" and 0 < len(reserved_states) < len(state_list):
+        # The requesting key's reserved accounts go first while usable; otherwise the whole pool decides.
+        reserved_selection = _select_account_preferring_budget_safe(
+            reserved_states,
+            prefer_earlier_reset=prefer_earlier_reset,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=apply_secondary_budget_threshold,
+            allow_backoff_fallback=False,
+            deterministic_probe=deterministic_probe,
+            traffic_class=traffic_class,
+            ignore_standard_quota=ignore_standard_quota,
+            routing_costs_by_account_id=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=False,
+            selection_seed=selection_seed,
+        )
+        if reserved_selection.account is not None:
+            return reserved_selection
     if selection_seed is None and routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
         # This pass must precede budget-safe and routing-policy shortcuts below;
         # otherwise a healthy preferred account can starve PROBING indefinitely.

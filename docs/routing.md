@@ -66,6 +66,10 @@ Each signal needs at least eight samples on at least three accounts (per model, 
 
 Limit warm-up sends **one small real request** (using the configured warm-up model and prompt) to an opted-in account when one of its quota windows is confirmed to have newly reset, verifying that the account responds. It consumes a small amount of quota. The optional staggered idle mode additionally pre-starts the 5h window of idle opted-in accounts before traffic arrives; the configured cooldown applies to these staggered idle probes, while ordinary reset-confirmed probes fire once per confirmed reset. Accounts opt in individually (`Enable warm-up` in account actions); the last attempt's result, model, and time are shown on the account list entry.
 
+### Reserved accounts
+
+An account can be reserved for one API key (`Reserved accounts (preferred)` in the API key dialog, or `reservedAccountIds` on `/api/api-keys`). Requests with that key use its reserved accounts first, even when they are fuller than the rest of the pool, and fall back to the key's normal pool only while every reserved account is unusable (quota exhausted, cooling down, paused or deactivated). No other key and no keyless request ever selects a reserved account; a conversation of another key that is owned by it fails closed instead of moving. `single_account` routing still sends traffic to the configured account. With API key authentication disabled every request is keyless, so reserved accounts sit idle.
+
 ---
 
 *Specs: [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture) · [usage-refresh-policy](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy)*

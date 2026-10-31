@@ -35,6 +35,7 @@ from app.core.balancer import (
 from app.core.clock import Clock
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
+from app.modules.proxy._load_balancer.reserved_accounts import drop_foreign_reserved
 from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     _account_cap_error_code,
@@ -195,6 +196,7 @@ class OpportunisticAdmissionRequest:
     # C2-2 routing/overload: dashboard snapshot resolved once by the caller.
     routing_tunables: RoutingTunables
     observe_only: bool = False
+    api_key_id: str | None = None
     # C2-3 resilience toggles: dashboard soft-drain value resolved by the
     # caller's snapshot; None inherits the env alias / default.
     soft_drain_enabled: bool | None = None
@@ -278,10 +280,13 @@ async def run_opportunistic_admission(
     *,
     request: OpportunisticAdmissionRequest,
 ) -> OpportunisticAdmissionOutcome:
-    selection_inputs = await owner._load_selection_inputs(
-        model=request.model,
-        service_tier=request.service_tier,
-        account_ids=request.account_ids,
+    selection_inputs = drop_foreign_reserved(
+        await owner._load_selection_inputs(
+            model=request.model,
+            service_tier=request.service_tier,
+            account_ids=request.account_ids,
+        ),
+        request.api_key_id,
     )
     if selection_inputs.error_code is not None and not selection_inputs.accounts:
         return OpportunisticAdmissionOutcome(

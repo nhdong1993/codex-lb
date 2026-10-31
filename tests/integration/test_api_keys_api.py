@@ -662,6 +662,59 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
 
 
 @pytest.mark.asyncio
+async def test_reserved_account_routes_only_owner_key(async_client, monkeypatch):
+    await _populate_test_registry()
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model",
+        lambda accounts, model, *, service_tier=None: accounts,
+    )
+    reserved_id = await _import_account(async_client, "acc-route-reserved", "route-reserved@example.com")
+    await _import_account(async_client, "acc-route-pool", "route-pool@example.com")
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+    owner = (
+        await async_client.post("/api/api-keys/", json={"name": "route-owner", "reservedAccountIds": [reserved_id]})
+    ).json()
+    other = (await async_client.post("/api/api-keys/", json={"name": "route-other"})).json()
+
+    routed: list[str] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        routed.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    async def compact_accounts(headers: dict[str, str]) -> set[str]:
+        routed.clear()
+        for _ in range(6):
+            response = await async_client.post(
+                "/backend-api/codex/responses/compact",
+                headers=headers,
+                json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+            )
+            assert response.status_code == 200
+        return set(routed)
+
+    assert await compact_accounts({"Authorization": f"Bearer {owner['key']}"}) == {"acc-route-reserved"}
+    assert await compact_accounts({"Authorization": f"Bearer {other['key']}"}) == {"acc-route-pool"}
+
+    disabled = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": False})
+    assert disabled.status_code == 200
+    assert await compact_accounts({}) == {"acc-route-pool"}
+
+
+@pytest.mark.asyncio
 async def test_api_key_update_rejects_unknown_assigned_account_ids(async_client):
     create = await async_client.post(
         "/api/api-keys/",
