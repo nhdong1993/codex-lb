@@ -44,7 +44,7 @@ def test_reset_credit_migration_preserves_legacy_pins(tmp_path: Path) -> None:
             )
         run_upgrade(url, "head", bootstrap_legacy=False)
         assert ScriptDirectory.from_config(_build_alembic_config(url)).get_heads() == [
-            "20261027_000000_add_lifetime_api_key_limit_window"
+            "20261031_000000_add_account_reserved_api_key"
         ]
         assert check_schema_drift(url) == ()
         with engine.connect() as connection:

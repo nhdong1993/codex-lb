@@ -18,7 +18,7 @@ def test_model_plan_migration_backfill_downgrade_reupgrade_and_single_head(tmp_p
     database = tmp_path / "model-plan-policy.db"
     url = f"sqlite+aiosqlite:///{database}"
     config = _build_alembic_config(url)
-    assert ScriptDirectory.from_config(config).get_heads() == ["20261027_000000_add_lifetime_api_key_limit_window"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["20261031_000000_add_account_reserved_api_key"]
     run_upgrade(url, PARENT, bootstrap_legacy=False)
     engine = create_engine(f"sqlite:///{database}")
     try:

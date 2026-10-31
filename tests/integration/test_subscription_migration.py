@@ -21,7 +21,7 @@ COLUMNS = {
 def test_upgrade_preserves_existing_accounts_and_round_trips(tmp_path: Path):
     url = f"sqlite+aiosqlite:///{tmp_path / 'subscription.db'}"
     config = _build_alembic_config(url)
-    assert ScriptDirectory.from_config(config).get_heads() == ["20261027_000000_add_lifetime_api_key_limit_window"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["20261031_000000_add_account_reserved_api_key"]
     run_upgrade(url, PARENT, bootstrap_legacy=False)
     engine = create_engine(url.replace("+aiosqlite", ""))
     try:
