@@ -15537,7 +15537,7 @@ async def test_compact_owner_miss_uses_api_key_scope_before_fail_closed(monkeypa
 
     async def fake_load_selection_inputs(**kwargs):
         seen_account_ids.append(kwargs.get("account_ids"))
-        return SimpleNamespace(accounts=[account], continuity_owner_candidates=None)
+        return SimpleNamespace(accounts=[account], continuity_owner_candidates=None, runtime_accounts=None)
 
     monkeypatch.setattr(service._load_balancer, "_load_selection_inputs", fake_load_selection_inputs)
     monkeypatch.setattr(
@@ -41862,7 +41862,9 @@ async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_
         "_load_selection_inputs",
         AsyncMock(
             return_value=SimpleNamespace(
-                accounts=[account_other, _make_account("acc_second_stream")], continuity_owner_candidates=None
+                accounts=[account_other, _make_account("acc_second_stream")],
+                continuity_owner_candidates=None,
+                runtime_accounts=None,
             )
         ),
     )
