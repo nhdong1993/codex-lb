@@ -74,7 +74,7 @@ Reset-credit listing and redeem, `/v1` warmup and `POST /api/quota-planner/warm-
 
 ### Requirement: All-accounts automations skip reserved accounts
 
-An automation job scoped to all accounts MUST NOT dispatch runs to accounts reserved by an API key. An automation job that names a reserved account explicitly MUST still dispatch to it.
+An automation job scoped to all accounts MUST NOT dispatch runs to accounts reserved by an API key, including runs of a cycle planned before the account was reserved. An automation job that names a reserved account explicitly MUST still dispatch to it.
 
 #### Scenario: All-accounts job skips a reserved account
 
@@ -87,3 +87,10 @@ An automation job scoped to all accounts MUST NOT dispatch runs to accounts rese
 - **GIVEN** key K reserves `acc-a`
 - **WHEN** an automation job that selects `acc-a` runs
 - **THEN** the run cycle contains `acc-a`
+
+#### Scenario: Cycle planned before the reservation skips the account
+
+- **GIVEN** an all-accounts automation cycle has a later slot for `acc-a`
+- **WHEN** key K reserves `acc-a` before that slot is due
+- **THEN** the slot does not run on `acc-a`
+
