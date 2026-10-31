@@ -508,6 +508,26 @@ async def test_deleting_api_key_releases_reserved_accounts(async_client):
 
 
 @pytest.mark.asyncio
+async def test_deleting_account_releases_its_reservation(async_client):
+    account_id = await _import_account(async_client, "acc-reserve-gone", "reserve-gone@example.com")
+    other_account_id = await _import_account(async_client, "acc-reserve-stay", "reserve-stay@example.com")
+    key_id = (
+        await async_client.post("/api/api-keys/", json={"name": "gone-owner", "reservedAccountIds": [account_id]})
+    ).json()["id"]
+
+    assert (await async_client.delete(f"/api/accounts/{account_id}")).status_code == 200
+
+    listed = {row["id"]: row for row in (await async_client.get("/api/api-keys/")).json()}
+    assert listed[key_id]["reservedAccountIds"] == []
+    resubmitted = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"reservedAccountIds": [*listed[key_id]["reservedAccountIds"], other_account_id]},
+    )
+    assert resubmitted.status_code == 200
+    assert resubmitted.json()["reservedAccountIds"] == [other_account_id]
+
+
+@pytest.mark.asyncio
 async def test_api_key_list_includes_pooled_credit_fields_for_selectable_assigned_accounts(async_client):
     active_account_id = await _import_account(async_client, "acc-pooled-active", "pooled-active@example.com")
     paused_account_id = await _import_account(async_client, "acc-pooled-paused", "pooled-paused@example.com")

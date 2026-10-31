@@ -1099,6 +1099,8 @@ class AccountsRepository:
                 "refresh_token_encrypted": wiped_token,
                 "id_token_encrypted": wiped_token,
                 "delete_requested_at": func.coalesce(Account.delete_requested_at, utcnow()),
+                # Released with the assignments below: a key must not keep a reservation it cannot resubmit.
+                "reserved_api_key_id": None,
                 "delete_history_requested": case(
                     (Account.delete_requested_at.is_(None), delete_history),
                     else_=Account.delete_history_requested,
