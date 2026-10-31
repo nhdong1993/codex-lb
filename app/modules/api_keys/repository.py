@@ -153,6 +153,7 @@ class ApiKeysRepository:
                 selectinload(ApiKey.limits),
                 selectinload(ApiKey.account_assignments),
                 selectinload(ApiKey.source_assignments),
+                selectinload(ApiKey.reserved_accounts).load_only(Account.id),
             )
         )
 
@@ -492,6 +493,33 @@ class ApiKeysRepository:
         if parent is not None:
             await self._session.refresh(parent, attribute_names=["limits"])
         return await self.get_limits_by_key(key_id)
+
+    async def reserve_accounts(self, key_id: str, account_ids: list[str]) -> list[str]:
+        """Make ``account_ids`` exactly the accounts reserved by ``key_id``, without committing.
+
+        Returns the ids another key already holds; the caller rolls back. The
+        claim only takes free rows, so a concurrent claim of the same account
+        (PostgreSQL re-evaluates the WHERE after the row lock) loses here.
+        """
+        release = update(Account).where(Account.reserved_api_key_id == key_id)
+        if account_ids:
+            release = release.where(Account.id.not_in(account_ids))
+        await self._session.execute(
+            release.values(reserved_api_key_id=None).execution_options(synchronize_session=False)
+        )
+        if not account_ids:
+            return []
+        await self._session.execute(
+            update(Account)
+            .where(Account.id.in_(account_ids), Account.reserved_api_key_id.is_(None))
+            .values(reserved_api_key_id=key_id)
+            .execution_options(synchronize_session=False)
+        )
+        owned = await self._session.execute(
+            select(Account.id).where(Account.id.in_(account_ids), Account.reserved_api_key_id == key_id)
+        )
+        owned_ids = set(owned.scalars().all())
+        return [account_id for account_id in account_ids if account_id not in owned_ids]
 
     async def replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True) -> None:
         # Re-check the pending-deletion marker atomically with the write:

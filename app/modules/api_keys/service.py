@@ -125,6 +125,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         self, key_id: str, account_ids: list[str], *, commit: bool = True
     ) -> None: ...
     async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None: ...
+    async def reserve_accounts(self, key_id: str, account_ids: list[str]) -> list[str]: ...
 
     async def increment_limit_usage(
         self,
@@ -231,6 +232,10 @@ class ApiKeyValidationError(ValueError):
     pass
 
 
+class ApiKeyAccountReservedError(ValueError):
+    pass
+
+
 class ApiKeyRateLimitExceededError(ValueError):
     def __init__(self, *, message: str, reset_at: datetime, lifetime: bool = False) -> None:
         super().__init__(message)
@@ -295,6 +300,7 @@ class ApiKeyCreateData:
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
     assigned_source_ids: list[str] | None = None
+    reserved_account_ids: list[str] | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
 
 
@@ -330,6 +336,8 @@ class ApiKeyUpdateData:
     assigned_account_ids_set: bool = False
     assigned_source_ids: list[str] | None = None
     assigned_source_ids_set: bool = False
+    reserved_account_ids: list[str] | None = None
+    reserved_account_ids_set: bool = False
     limits: list[LimitRuleInput] | None = None
     limits_set: bool = False
     reset_usage: bool = False
@@ -360,6 +368,7 @@ class ApiKeyData:
     source_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
     assigned_source_ids: list[str] = field(default_factory=list)
+    reserved_account_ids: list[str] = field(default_factory=list)
     pooled_credits: "PooledCreditData | None" = None
 
 
@@ -489,6 +498,7 @@ class ApiKeysService:
         normalized_allowed_models = _normalize_allowed_models(payload.allowed_models)
         assigned_account_ids = await self._resolve_assigned_account_ids(payload.assigned_account_ids)
         assigned_source_ids = await self._resolve_assigned_source_ids(payload.assigned_source_ids)
+        reserved_account_ids = await self._resolve_assigned_account_ids(payload.reserved_account_ids)
         enforced_model = _normalize_model_slug(payload.enforced_model)
         enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
         allowed_reasoning_efforts = _normalize_allowed_reasoning_efforts(payload.allowed_reasoning_efforts)
@@ -527,9 +537,13 @@ class ApiKeysService:
             created = await self._repository.create(row, commit=False)
 
             if assigned_account_ids:
-                await self._repository.replace_account_assignments(created.id, assigned_account_ids, commit=False)
+                await self._repository.replace_account_assignments(
+                    created.id, _merge_ids(assigned_account_ids, reserved_account_ids), commit=False
+                )
             if assigned_source_ids:
                 await self._repository.replace_source_assignments(created.id, assigned_source_ids, commit=False)
+            if reserved_account_ids:
+                await self._reserve_accounts(created.id, reserved_account_ids)
 
             if payload.limits:
                 limit_rows = [_limit_input_to_row(li, created.id, now) for li in payload.limits]
@@ -621,6 +635,25 @@ class ApiKeysService:
         else:
             assigned_account_ids = None
             account_assignment_scope_enabled = _UNSET
+        reserved_account_ids = (
+            await self._resolve_assigned_account_ids(payload.reserved_account_ids)
+            if payload.reserved_account_ids_set
+            else None
+        )
+        # Scoped keys keep reserved ⊆ assigned, so every scoped-pool computation sees the reserved accounts.
+        account_assignment_write: list[str] | None = None
+        if assigned_account_ids:
+            effective_reserved_ids = (
+                reserved_account_ids
+                if reserved_account_ids is not None
+                else [account.id for account in existing.reserved_accounts]
+            )
+            account_assignment_write = _merge_ids(assigned_account_ids, effective_reserved_ids)
+        elif assigned_account_ids is not None:
+            account_assignment_write = []
+        elif reserved_account_ids and existing.account_assignment_scope_enabled:
+            current_assigned_ids = [assignment.account_id for assignment in existing.account_assignments]
+            account_assignment_write = _merge_ids(current_assigned_ids, reserved_account_ids)
         if payload.assigned_source_ids_set:
             assigned_source_ids = await self._resolve_assigned_source_ids(payload.assigned_source_ids)
             source_assignment_scope_enabled: bool | _Unset = bool(assigned_source_ids)
@@ -742,12 +775,13 @@ class ApiKeysService:
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
-            if payload.assigned_account_ids_set:
-                assert assigned_account_ids is not None
-                await self._repository.replace_account_assignments(key_id, assigned_account_ids, commit=False)
+            if account_assignment_write is not None:
+                await self._repository.replace_account_assignments(key_id, account_assignment_write, commit=False)
             if payload.assigned_source_ids_set:
                 assert assigned_source_ids is not None
                 await self._repository.replace_source_assignments(key_id, assigned_source_ids, commit=False)
+            if reserved_account_ids is not None:
+                await self._reserve_accounts(key_id, reserved_account_ids)
 
             if limit_rows is not None:
                 await self._repository.upsert_limits(
@@ -772,6 +806,7 @@ class ApiKeysService:
 
         if (
             payload.assigned_account_ids_set
+            or payload.reserved_account_ids_set
             or payload.assigned_source_ids_set
             or limit_rows is not None
             or payload.name_set
@@ -809,6 +844,11 @@ class ApiKeysService:
             missing = ", ".join(missing_account_ids)
             raise ApiKeyValidationError(f"Unknown account ids: {missing}")
         return normalized_account_ids
+
+    async def _reserve_accounts(self, key_id: str, account_ids: list[str]) -> None:
+        taken = await self._repository.reserve_accounts(key_id, account_ids)
+        if taken:
+            raise ApiKeyAccountReservedError(f"Accounts already reserved by another API key: {', '.join(taken)}")
 
     async def _resolve_assigned_source_ids(self, source_ids: list[str] | None) -> list[str]:
         normalized_source_ids = _normalize_assigned_source_ids(source_ids)
@@ -1461,6 +1501,10 @@ def _normalize_allowed_models(allowed_models: list[str] | None) -> list[str] | N
     return [model.strip() for model in allowed_models if model and model.strip()]
 
 
+def _merge_ids(first: list[str], second: list[str]) -> list[str]:
+    return list(dict.fromkeys([*first, *second]))
+
+
 def _normalize_assigned_account_ids(account_ids: list[str] | None) -> list[str]:
     if not account_ids:
         return []
@@ -1841,6 +1885,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         source_assignment_scope_enabled=data.source_assignment_scope_enabled,
         assigned_account_ids=data.assigned_account_ids,
         assigned_source_ids=data.assigned_source_ids,
+        reserved_account_ids=data.reserved_account_ids,
         key=key,
     )
 
@@ -1882,6 +1927,7 @@ def _to_api_key_data(
         source_assignment_scope_enabled=getattr(row, "source_assignment_scope_enabled", False),
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
         assigned_source_ids=[assignment.source_id for assignment in source_assignments],
+        reserved_account_ids=sorted(account.id for account in getattr(row, "reserved_accounts", [])),
         pooled_credits=pooled_credits,
     )
 

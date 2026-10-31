@@ -8,8 +8,8 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
-from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
-from app.dependencies import ApiKeysContext, get_api_keys_context
+from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
+from app.dependencies import ApiKeysContext, get_api_keys_context, get_proxy_service_for_app
 from app.modules.api_keys.schemas import (
     ApiKeyAccountCostResponse,
     ApiKeyCreateRequest,
@@ -22,6 +22,7 @@ from app.modules.api_keys.schemas import (
     LimitRuleResponse,
 )
 from app.modules.api_keys.service import (
+    ApiKeyAccountReservedError,
     ApiKeyCreateData,
     ApiKeyData,
     ApiKeyNotFoundError,
@@ -29,6 +30,7 @@ from app.modules.api_keys.service import (
     ApiKeyValidationError,
     LimitRuleInput,
 )
+from app.modules.proxy.account_cache import get_account_selection_cache, propagate_account_routing_change
 
 router = APIRouter(
     prefix="/api/api-keys",
@@ -58,6 +60,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         source_assignment_scope_enabled=row.source_assignment_scope_enabled,
         assigned_account_ids=row.assigned_account_ids,
         assigned_source_ids=row.assigned_source_ids,
+        reserved_account_ids=row.reserved_account_ids,
         created_at=row.created_at,
         last_used_at=row.last_used_at,
         limits=[
@@ -120,6 +123,16 @@ def _build_limit_inputs(payload: ApiKeyCreateRequest | ApiKeyUpdateRequest) -> l
     return limit_inputs
 
 
+async def _apply_reservation_change(request: Request, reserved_account_ids: list[str]) -> None:
+    get_account_selection_cache().invalidate()
+    await propagate_account_routing_change()
+    # shortcut: closes every bridge session on these accounts, the owning key's too, and only on this
+    # replica; upgrade when running several replicas.
+    proxy_service = get_proxy_service_for_app(request.app)
+    for account_id in reserved_account_ids:
+        await proxy_service.close_http_bridge_sessions_for_account(account_id)
+
+
 @router.post("", response_model=ApiKeyCreateResponse, include_in_schema=False)
 @router.post("/", response_model=ApiKeyCreateResponse)
 async def create_api_key(
@@ -152,11 +165,16 @@ async def create_api_key(
                 expires_at=payload.expires_at,
                 assigned_account_ids=payload.assigned_account_ids,
                 assigned_source_ids=payload.assigned_source_ids,
+                reserved_account_ids=payload.reserved_account_ids,
                 limits=limit_inputs,
             )
         )
     except ApiKeyValidationError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
+    except ApiKeyAccountReservedError as exc:
+        raise DashboardConflictError(str(exc), code="account_reserved_by_other_key") from exc
+    if created.reserved_account_ids:
+        await _apply_reservation_change(request, created.reserved_account_ids)
     resp = _to_response(created)
     AuditService.log_async(
         "api_key_created",
@@ -225,6 +243,8 @@ async def update_api_key(
         assigned_account_ids_set="assigned_account_ids" in fields,
         assigned_source_ids=payload.assigned_source_ids,
         assigned_source_ids_set="assigned_source_ids" in fields,
+        reserved_account_ids=payload.reserved_account_ids,
+        reserved_account_ids_set="reserved_account_ids" in fields,
         limits=limit_inputs,
         limits_set=limits_set,
         reset_usage=bool(payload.reset_usage),
@@ -235,6 +255,10 @@ async def update_api_key(
         raise DashboardNotFoundError(str(exc)) from exc
     except ApiKeyValidationError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
+    except ApiKeyAccountReservedError as exc:
+        raise DashboardConflictError(str(exc), code="account_reserved_by_other_key") from exc
+    if "reserved_account_ids" in fields:
+        await _apply_reservation_change(request, row.reserved_account_ids)
     if "is_active" in fields and payload.is_active is False and row.is_active is False:
         AuditService.log_async(
             "api_key_revoked",
@@ -255,6 +279,8 @@ async def delete_api_key(
         await context.service.delete_key(key_id)
     except ApiKeyNotFoundError as exc:
         raise DashboardNotFoundError(str(exc)) from exc
+    # The FK released this key's reserved accounts back to the shared pool.
+    await _apply_reservation_change(request, [])
     AuditService.log_async(
         "api_key_revoked",
         actor_ip=request.client.host if request.client else None,
