@@ -526,6 +526,30 @@ async def test_deleting_account_releases_its_reservation(async_client):
 
 
 @pytest.mark.asyncio
+async def test_reservation_claim_skips_account_deleted_after_validation(async_client, monkeypatch):
+    from app.modules.accounts.repository import AccountsRepository
+
+    account_id = await _import_account(async_client, "acc-reserve-race", "reserve-race@example.com")
+    key_id = (await async_client.post("/api/api-keys/", json={"name": "race-owner"})).json()["id"]
+    resolve = ApiKeysService._resolve_assigned_account_ids
+
+    async def resolve_then_delete(self, account_ids):
+        resolved = await resolve(self, account_ids)
+        if resolved == [account_id]:
+            async with SessionLocal() as session:
+                assert await AccountsRepository(session).begin_delete(account_id)
+        return resolved
+
+    monkeypatch.setattr(ApiKeysService, "_resolve_assigned_account_ids", resolve_then_delete)
+    raced = await async_client.patch(f"/api/api-keys/{key_id}", json={"reservedAccountIds": [account_id]})
+    assert raced.status_code == 400
+    assert raced.json()["error"]["code"] == "invalid_api_key_payload"
+    async with SessionLocal() as session:
+        holder = await session.scalar(select(Account.reserved_api_key_id).where(Account.id == account_id))
+    assert holder is None
+
+
+@pytest.mark.asyncio
 async def test_api_key_list_includes_pooled_credit_fields_for_selectable_assigned_accounts(async_client):
     active_account_id = await _import_account(async_client, "acc-pooled-active", "pooled-active@example.com")
     paused_account_id = await _import_account(async_client, "acc-pooled-paused", "pooled-paused@example.com")
