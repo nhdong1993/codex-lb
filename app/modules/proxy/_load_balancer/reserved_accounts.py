@@ -19,7 +19,8 @@ def drop_foreign_reserved(inputs: SelectionInputsT, api_key_id: str | None) -> S
     owners = inputs.continuity_owner_candidates
     foreign = {
         account.id
-        for account in [*inputs.accounts, *(owners or ())]
+        # runtime_accounts covers ids present only in the sticky authority (e.g. model-ineligible accounts).
+        for account in [*inputs.accounts, *(owners or ()), *(inputs.runtime_accounts or ())]
         if account.reserved_api_key_id is not None and account.reserved_api_key_id != api_key_id
     }
     if not foreign:
