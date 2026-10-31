@@ -125,7 +125,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         self, key_id: str, account_ids: list[str], *, commit: bool = True
     ) -> None: ...
     async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None: ...
-    async def reserve_accounts(self, key_id: str, account_ids: list[str]) -> list[str]: ...
+    async def reserve_accounts(self, key_id: str, account_ids: list[str]) -> tuple[list[str], list[str]]: ...
 
     async def increment_limit_usage(
         self,
@@ -536,14 +536,14 @@ class ApiKeysService:
         try:
             created = await self._repository.create(row, commit=False)
 
+            if reserved_account_ids:
+                await self._reserve_accounts(created.id, reserved_account_ids)
             if assigned_account_ids:
                 await self._repository.replace_account_assignments(
                     created.id, _merge_ids(assigned_account_ids, reserved_account_ids), commit=False
                 )
             if assigned_source_ids:
                 await self._repository.replace_source_assignments(created.id, assigned_source_ids, commit=False)
-            if reserved_account_ids:
-                await self._reserve_accounts(created.id, reserved_account_ids)
 
             if payload.limits:
                 limit_rows = [_limit_input_to_row(li, created.id, now) for li in payload.limits]
@@ -775,13 +775,13 @@ class ApiKeysService:
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
+            if reserved_account_ids is not None:
+                await self._reserve_accounts(key_id, reserved_account_ids)
             if account_assignment_write is not None:
                 await self._repository.replace_account_assignments(key_id, account_assignment_write, commit=False)
             if payload.assigned_source_ids_set:
                 assert assigned_source_ids is not None
                 await self._repository.replace_source_assignments(key_id, assigned_source_ids, commit=False)
-            if reserved_account_ids is not None:
-                await self._reserve_accounts(key_id, reserved_account_ids)
 
             if limit_rows is not None:
                 await self._repository.upsert_limits(
@@ -846,7 +846,9 @@ class ApiKeysService:
         return normalized_account_ids
 
     async def _reserve_accounts(self, key_id: str, account_ids: list[str]) -> None:
-        taken = await self._repository.reserve_accounts(key_id, account_ids)
+        taken, unavailable = await self._repository.reserve_accounts(key_id, account_ids)
+        if unavailable:
+            raise ApiKeyValidationError(f"Unknown account ids: {', '.join(unavailable)}")
         if taken:
             raise ApiKeyAccountReservedError(f"Accounts already reserved by another API key: {', '.join(taken)}")
 
