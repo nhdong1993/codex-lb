@@ -152,6 +152,13 @@ class Account(Base):
         server_default=false(),
         nullable=False,
     )
+    # The API key this account is reserved for: only that key may route to it.
+    reserved_api_key_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("api_keys.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",
@@ -1816,6 +1823,8 @@ class ApiKey(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    # Loaded only by the dashboard loaders; the per-request key load must not query it.
+    reserved_accounts: Mapped[list["Account"]] = relationship("Account", viewonly=True, lazy="raise")
 
 
 class ApiKeyAccountAssignment(Base):

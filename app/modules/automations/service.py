@@ -911,6 +911,7 @@ class AutomationsService:
         eligible_cycle_account_ids = await self._resolve_eligible_account_ids(
             [cycle_account.account_id for cycle_account in cycle.accounts],
             include_paused_accounts=cycle.include_paused_accounts,
+            skip_reserved=job.account_scope_all,
             now_utc=now_utc,
         )
         executed = 0
@@ -1045,6 +1046,7 @@ class AutomationsService:
             if account is None or not self._is_account_eligible_for_automation(
                 account,
                 include_paused_accounts=include_paused_accounts,
+                skip_reserved=job.account_scope_all,
             ):
                 if _is_unclaimed_run_placeholder(run):
                     await self._repository.skip_unclaimed_manual_run_placeholder(
@@ -1162,6 +1164,7 @@ class AutomationsService:
                 if self._is_account_eligible_for_automation(
                     account,
                     include_paused_accounts=include_paused_accounts,
+                    skip_reserved=True,
                 )
             ]
             cached_accounts_by_id = {account.id: account for account in accounts}
@@ -1189,6 +1192,7 @@ class AutomationsService:
             if not self._is_account_eligible_for_automation(
                 account,
                 include_paused_accounts=include_paused_accounts,
+                skip_reserved=job.account_scope_all,
             ):
                 continue
 
@@ -1454,6 +1458,7 @@ class AutomationsService:
         eligible_pending_account_ids = await self._resolve_eligible_account_ids(
             expected_account_ids,
             include_paused_accounts=include_paused_accounts,
+            skip_reserved=job.account_scope_all,
             now_utc=now_utc,
         )
         all_account_ids = [
@@ -1626,6 +1631,7 @@ class AutomationsService:
         eligible_pending_account_ids = await self._resolve_eligible_account_ids(
             expected_account_ids,
             include_paused_accounts=include_paused_accounts,
+            skip_reserved=job.account_scope_all,
             now_utc=now_utc,
         )
         all_account_ids = [
@@ -1782,6 +1788,7 @@ class AutomationsService:
         account_ids: list[str],
         *,
         include_paused_accounts: bool,
+        skip_reserved: bool = False,
         now_utc: datetime | None = None,
     ) -> set[str]:
         if not account_ids:
@@ -1796,6 +1803,7 @@ class AutomationsService:
             and self._is_account_eligible_for_automation(
                 account,
                 include_paused_accounts=include_paused_accounts,
+                skip_reserved=skip_reserved,
             )
         }
 
@@ -1920,6 +1928,7 @@ class AutomationsService:
                 self._is_account_eligible_for_automation(
                     account,
                     include_paused_accounts=include_paused_accounts,
+                    skip_reserved=True,
                 )
                 for account in accounts
             )
@@ -1994,6 +2003,7 @@ class AutomationsService:
             if self._is_account_eligible_for_automation(
                 account,
                 include_paused_accounts=job.include_paused_accounts,
+                skip_reserved=job.account_scope_all,
             )
         ]
 
@@ -2084,8 +2094,13 @@ class AutomationsService:
         account: Account,
         *,
         include_paused_accounts: bool,
+        skip_reserved: bool = False,
     ) -> bool:
         if account.status in _AUTOMATION_ALWAYS_SKIPPED_ACCOUNT_STATUSES:
+            return False
+        # Reserved accounts belong to their API key; all-accounts jobs never run there, even in cycles
+        # planned before the reservation. An explicit pick still runs.
+        if skip_reserved and account.reserved_api_key_id is not None:
             return False
         if account.status == AccountStatus.PAUSED and not include_paused_accounts:
             return False

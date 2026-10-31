@@ -1124,6 +1124,7 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
         status=AccountStatus.ACTIVE,
         access_token_encrypted=TokenEncryptor().encrypt("access-token"),
         chatgpt_account_id="chatgpt-session-lifecycle",
+        reserved_api_key_id=None,
     )
 
     class SessionManager:
@@ -1348,3 +1349,44 @@ async def test_v1_reset_credit_post_preserves_success_when_post_redeem_usage_ref
     }
     assert "V1 reset credit consume succeeded but usage refresh failed" in caplog.text
     assert get_rate_limit_reset_credits_store().get(account_id) is None
+
+
+@pytest.mark.asyncio
+async def test_reset_credit_excludes_account_reserved_for_other_key(async_client, monkeypatch: pytest.MonkeyPatch):
+    await _enable_api_key_auth(async_client)
+    reserved_id = await _import_account(async_client, "acc-reset-reserved", "reserved@example.com")
+    pool_id = await _import_account(async_client, "acc-reset-pool", "pool@example.com")
+    owner_id, owner_key = await _create_api_key(async_client, name="reset-credit-owner")
+    _, other_key = await _create_api_key(async_client, name="reset-credit-other")
+    reserve = await async_client.patch(f"/api/api-keys/{owner_id}", json={"reservedAccountIds": [reserved_id]})
+    assert reserve.status_code == 200
+    expires_at = datetime(2031, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    await _seed_snapshot(
+        reserved_id,
+        available_count=1,
+        credits=[ResetCreditItem(id="credit-reserved", status="available", expires_at=expires_at)],
+    )
+    await _seed_snapshot(
+        pool_id,
+        available_count=1,
+        credits=[ResetCreditItem(id="credit-pool", status="available", expires_at=expires_at)],
+    )
+
+    async def listed_accounts(key: str) -> set[str]:
+        response = await async_client.get("/v1/reset-credit", headers={"Authorization": f"Bearer {key}"})
+        assert response.status_code == 200
+        return {entry["account_id"] for entry in response.json()}
+
+    assert await listed_accounts(other_key) == {pool_id}
+    assert await listed_accounts(owner_key) == {reserved_id, pool_id}
+
+    consume_mock = AsyncMock()
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
+    redeem = await async_client.post(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {other_key}"},
+        json={"account_id": reserved_id, "redeem_id": "credit-reserved"},
+    )
+    assert redeem.status_code == 403
+    assert redeem.json()["error"]["type"] == "permission_error"
+    consume_mock.assert_not_awaited()

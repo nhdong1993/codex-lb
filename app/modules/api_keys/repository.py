@@ -161,6 +161,7 @@ class ApiKeysRepository:
                 selectinload(ApiKey.limits),
                 selectinload(ApiKey.account_assignments),
                 selectinload(ApiKey.source_assignments),
+                selectinload(ApiKey.reserved_accounts).load_only(Account.id),
             )
         )
 
@@ -536,6 +537,43 @@ class ApiKeysRepository:
         if parent is not None:
             await self._session.refresh(parent, attribute_names=["limits"])
         return await self.get_limits_by_key(key_id)
+
+    async def reserve_accounts(self, key_id: str, account_ids: list[str]) -> tuple[list[str], list[str]]:
+        """Make ``account_ids`` exactly the accounts reserved by ``key_id``, without committing.
+
+        Returns ``(taken, unavailable)``: ids another key already holds, and ids
+        marked for deletion since validation; the caller rolls back on either.
+        The claim only takes free, undeleted rows, so a concurrent claim or
+        ``begin_delete`` of the same account (PostgreSQL re-evaluates the WHERE
+        after the row lock) loses here. Callers run this before touching
+        assignment rows, matching ``begin_delete``'s account-then-assignment
+        lock order.
+        """
+        release = update(Account).where(Account.reserved_api_key_id == key_id)
+        if account_ids:
+            release = release.where(Account.id.not_in(account_ids))
+        await self._session.execute(
+            release.values(reserved_api_key_id=None).execution_options(synchronize_session=False)
+        )
+        if not account_ids:
+            return [], []
+        await self._session.execute(
+            update(Account)
+            .where(
+                Account.id.in_(account_ids),
+                Account.reserved_api_key_id.is_(None),
+                Account.delete_requested_at.is_(None),
+            )
+            .values(reserved_api_key_id=key_id)
+            .execution_options(synchronize_session=False)
+        )
+        result = await self._session.execute(
+            select(Account.id, Account.reserved_api_key_id).where(Account.id.in_(account_ids))
+        )
+        holders = dict(result.tuples().all())
+        taken = [account_id for account_id in account_ids if holders.get(account_id) not in (None, key_id)]
+        unavailable = [account_id for account_id in account_ids if holders.get(account_id) is None]
+        return taken, unavailable
 
     async def replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True) -> None:
         # Re-check the pending-deletion marker atomically with the write:

@@ -6163,3 +6163,95 @@ async def test_list_due_manual_runs_limit_counts_only_eligible_rows(db_setup):
             now_utc=scheduled_for + timedelta(seconds=700), limit=1
         )
         assert [due_run.id for due_run in past_window] == [in_flight.id]
+
+
+@pytest.mark.asyncio
+async def test_all_accounts_automation_skips_reserved_accounts(async_client, monkeypatch):
+    reserved, pool = await _create_accounts("auto-reserved-a", "auto-reserved-pool")
+    owner = await async_client.post("/api/api-keys/", json={"name": "auto-owner", "reservedAccountIds": [reserved.id]})
+    assert owner.status_code == 200
+
+    async def _fake_compact(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+    now = datetime(2026, 10, 31, 10, 0, 0)
+
+    async def cycle_accounts(account_ids: list[str]) -> list[str]:
+        async with SessionLocal() as session:
+            automations_repository = AutomationsRepository(session)
+            service = AutomationsService(automations_repository, AccountsRepository(session))
+            job = await automations_repository.create_job(
+                name=f"Reserved scope {len(account_ids)}",
+                enabled=False,
+                include_paused_accounts=False,
+                schedule_type="daily",
+                schedule_time="05:00",
+                schedule_timezone="UTC",
+                schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                schedule_threshold_minutes=0,
+                model="gpt-5.3-codex",
+                reasoning_effort=None,
+                prompt="ping",
+                account_ids=account_ids,
+            )
+            run = await service.run_now(job.id, now_utc=now)
+            assert run.cycle_key is not None
+            cycle = await automations_repository.get_run_cycle(cycle_key=run.cycle_key)
+        assert cycle is not None
+        return sorted(entry.account_id for entry in cycle.accounts)
+
+    assert await cycle_accounts([]) == [pool.id]
+    assert await cycle_accounts([reserved.id]) == [reserved.id]
+
+
+@pytest.mark.asyncio
+async def test_all_accounts_cycle_planned_before_reservation_skips_reserved_account(async_client, monkeypatch):
+    target, _ = await _create_accounts("auto-inflight-target", "auto-inflight-pool")
+    called: list[str] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        called.append(kwargs["account_id"])
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+    now = datetime(2026, 10, 31, 10, 0, 0)
+    slots: dict[str, datetime] = {}
+    # The dispatch plan spreads accounts over the threshold window; retry until the target lands later.
+    for attempt in range(20):
+        async with SessionLocal() as session:
+            automations_repository = AutomationsRepository(session)
+            service = AutomationsService(automations_repository, AccountsRepository(session))
+            job = await automations_repository.create_job(
+                name=f"In-flight reserved {attempt}",
+                enabled=False,
+                include_paused_accounts=False,
+                schedule_type="daily",
+                schedule_time="05:00",
+                schedule_timezone="UTC",
+                schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                schedule_threshold_minutes=240,
+                model="gpt-5.3-codex",
+                reasoning_effort=None,
+                prompt="ping",
+                account_ids=[],
+            )
+            run = await service.run_now(job.id, now_utc=now)
+            assert run.cycle_key is not None
+            cycle = await automations_repository.get_run_cycle(cycle_key=run.cycle_key)
+        assert cycle is not None
+        slots = {entry.account_id: entry.scheduled_for for entry in cycle.accounts}
+        if slots.get(target.id, now) > now:
+            break
+    assert slots[target.id] > now
+
+    reserve = await async_client.post(
+        "/api/api-keys/", json={"name": "inflight-owner", "reservedAccountIds": [target.id]}
+    )
+    assert reserve.status_code == 200
+    called.clear()
+    async with SessionLocal() as session:
+        service = AutomationsService(AutomationsRepository(session), AccountsRepository(session))
+        await service.run_due_jobs(now_utc=now + timedelta(minutes=241))
+
+    assert target.chatgpt_account_id not in called

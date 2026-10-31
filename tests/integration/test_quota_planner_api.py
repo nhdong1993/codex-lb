@@ -1503,3 +1503,73 @@ async def test_quota_planner_warm_now_rate_limited_api_key_is_skipped(monkeypatc
 
     assert result.status == "skipped"
     assert result.reason.startswith("api_key_rate_limit_exceeded:")
+
+
+@pytest.mark.asyncio
+async def test_warm_now_with_other_key_skips_reserved_account(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        session.add(ApiKey(id="key-owner", name="owner", key_hash="hash-owner", key_prefix="sk-owner", is_active=True))
+        await session.flush()
+        account = Account(
+            id="acc-warm-reserved",
+            email="warm-reserved@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+            reserved_api_key_id="key-owner",
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        service = QuotaWarmupService(session)
+        admitted: list[str] = []
+        probed: list[str] = []
+
+        class FakeApiKeys:
+            async def enforce_limits_for_request(self, api_key_id, *args, **kwargs):
+                del args, kwargs
+                admitted.append(api_key_id)
+                return None
+
+        async def fake_send(self, *, account, model, request_id):
+            del self, model, request_id
+            probed.append(account.id)
+            return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+
+        async def noop_record_effect(self, account, model, *, source, confidence):
+            del self, account, model, source, confidence
+
+        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
+        monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+
+        skipped = await service.warm_now(
+            account_id=account.id, model="gpt-5.4-mini", api_key_id="key-other", force_probe=True
+        )
+        assert (skipped.status, skipped.reason) == ("skipped", "account_reserved_by_other_key")
+        assert (admitted, probed) == ([], [])
+
+        executed = await service.warm_now(
+            account_id=account.id, model="gpt-5.4-mini", api_key_id="key-owner", force_probe=True
+        )
+        assert executed.status == "executed"
+        assert (admitted, probed) == (["key-owner"], [account.id])

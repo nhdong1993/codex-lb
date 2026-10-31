@@ -7316,6 +7316,7 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
         routing_tunables=ANY,
         redact_sensitive_details=False,
         dashboard_settings=ANY,
+        api_key_id=None,
     )
 
 
@@ -7349,6 +7350,7 @@ async def test_select_codex_control_account_without_budget_honors_traffic_class(
     assert result is None
     assert select_account.await_args is not None
     assert select_account.await_args.kwargs["traffic_class"] == proxy_service.TRAFFIC_CLASS_OPPORTUNISTIC
+    assert select_account.await_args.kwargs["api_key_id"] == "key_opportunistic_control"
 
 
 @pytest.fixture(autouse=True)
@@ -15535,7 +15537,7 @@ async def test_compact_owner_miss_uses_api_key_scope_before_fail_closed(monkeypa
 
     async def fake_load_selection_inputs(**kwargs):
         seen_account_ids.append(kwargs.get("account_ids"))
-        return SimpleNamespace(accounts=[account])
+        return SimpleNamespace(accounts=[account], continuity_owner_candidates=None, runtime_accounts=None)
 
     monkeypatch.setattr(service._load_balancer, "_load_selection_inputs", fake_load_selection_inputs)
     monkeypatch.setattr(
@@ -41858,7 +41860,13 @@ async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_
     monkeypatch.setattr(
         service._load_balancer,
         "_load_selection_inputs",
-        AsyncMock(return_value=SimpleNamespace(accounts=[account_other, _make_account("acc_second_stream")])),
+        AsyncMock(
+            return_value=SimpleNamespace(
+                accounts=[account_other, _make_account("acc_second_stream")],
+                continuity_owner_candidates=None,
+                runtime_accounts=None,
+            )
+        ),
     )
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_other))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))

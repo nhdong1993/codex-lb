@@ -2,7 +2,9 @@
 
 ## Purpose
 Defines how the proxy chooses which account serves a request and how upstream feedback changes that choice. It covers the selection strategies operators can pick (relative availability, sequential and reset drain, single-account, manual and additional-quota policies, reset-window preference), how rate-limit, overload, and error signals scope penalties to the responsible account, and which of those signals must be shared across replicas versus kept replica-local. The goal is to spend pooled quota deliberately while never leaving a request routed to an account that cannot serve it.
+
 ## Requirements
+
 ### Requirement: Relative availability routing
 
 The proxy account selector SHALL support a `relative_availability` routing strategy. The strategy SHALL evaluate only accounts that have passed the existing eligibility, health-tier, model-plan, quota, cooldown, circuit-breaker, and budget-safety gates. Re-authentication-required accounts SHALL be treated as hard-blocked routing candidates, the same as paused and deactivated accounts. For each candidate, it SHALL compute a raw score from remaining secondary-window credits divided by seconds until the secondary-window reset, using bounded fallbacks for unknown or near-immediate reset times, and SHALL select from the highest weighted candidates according to the configured power and top-K cutoff.
@@ -1231,3 +1233,43 @@ When upstream answers a stream dispatch for a selected account with HTTP 429 who
 - **THEN** the burst cooldown for account A is engaged immediately, before the replacement dispatch or backoff wait
 - **AND** the deferred transient penalty, written after settlement, does not extend the cooldown deadline
 
+### Requirement: Reserved accounts are exclusive and preferred
+
+An account reserved by an API key MUST NOT be selected for a request authenticated with another API key, nor for a keyless request, on any account-selection path: fresh selection, continuity owners, sticky reallocation, opportunistic admission, compact and stream retry, and codex control. A request whose required continuity owner is reserved by another key MUST fail closed with `continuity_owner_policy_conflict` instead of moving to another account. Replica-local runtime state of a reserved account (cooldown, backoff, health) MUST NOT be reset by traffic of other keys. A request authenticated with the owning key MUST select one of its usable reserved accounts before any other account in its pool, including when the reserved account is draining or above its budget threshold. When none of its reserved accounts is usable (quota exhausted, cooling down, paused or deactivated) it MUST fall back to its normal pool selection. When the routing strategy is `single_account`, the operator-pinned account MUST win over the preference while exclusivity still applies. When no account is reserved, account selection MUST be unchanged.
+
+#### Scenario: Owner key prefers its reserved account
+
+- **GIVEN** key K reserves `acc-a` at 80% usage and `acc-b` is unreserved at 5% usage
+- **WHEN** a request with key K is routed
+- **THEN** `acc-a` is selected
+
+#### Scenario: Owner key falls back to the pool
+
+- **GIVEN** key K reserves `acc-a`, which is quota exhausted, cooling down or paused
+- **WHEN** a request with key K is routed
+- **THEN** an unreserved account of K's pool is selected
+
+#### Scenario: Other keys never use the reserved account
+
+- **GIVEN** key K reserves `acc-a`, which has the lowest usage
+- **WHEN** a request with key J is routed
+- **THEN** `acc-a` is not selected
+
+#### Scenario: Keyless requests never use reserved accounts
+
+- **GIVEN** API key authentication is disabled and `acc-a` is reserved by key K
+- **WHEN** a keyless request is routed
+- **THEN** `acc-a` is not selected
+
+#### Scenario: Continuity owner reserved by another key fails closed
+
+- **GIVEN** a conversation of key J is owned by `acc-a`, which key K now reserves
+- **WHEN** key J sends a request that requires that owner
+- **THEN** the request fails with `continuity_owner_policy_conflict`
+- **AND** no other account is selected
+
+#### Scenario: Single-account routing wins over the preference
+
+- **GIVEN** the routing strategy is `single_account` pinned to unreserved `acc-b`, and key K reserves `acc-a`
+- **WHEN** a request with key K is routed
+- **THEN** `acc-b` is selected

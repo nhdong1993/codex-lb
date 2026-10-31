@@ -370,6 +370,186 @@ async def test_api_key_create_persists_assigned_account_ids(async_client):
 
 
 @pytest.mark.asyncio
+async def test_api_key_create_persists_reserved_account_ids(async_client):
+    first_account_id = await _import_account(async_client, "acc-reserve-create-a", "reserve-create-a@example.com")
+    second_account_id = await _import_account(async_client, "acc-reserve-create-b", "reserve-create-b@example.com")
+    expected = sorted([first_account_id, second_account_id])
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "reserved-create-key", "reservedAccountIds": [second_account_id, first_account_id, " "]},
+    )
+    assert create.status_code == 200
+    assert create.json()["reservedAccountIds"] == expected
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["reservedAccountIds"] == expected
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_reserved_account_ids_releases_dropped_accounts(async_client):
+    first_account_id = await _import_account(async_client, "acc-reserve-upd-a", "reserve-upd-a@example.com")
+    second_account_id = await _import_account(async_client, "acc-reserve-upd-b", "reserve-upd-b@example.com")
+    owner = (await async_client.post("/api/api-keys/", json={"name": "reserve-owner"})).json()["id"]
+    other = (await async_client.post("/api/api-keys/", json={"name": "reserve-other"})).json()["id"]
+
+    both = await async_client.patch(
+        f"/api/api-keys/{owner}", json={"reservedAccountIds": [second_account_id, first_account_id]}
+    )
+    assert both.status_code == 200
+    assert both.json()["reservedAccountIds"] == sorted([first_account_id, second_account_id])
+
+    renamed = await async_client.patch(f"/api/api-keys/{owner}", json={"name": "reserve-owner-renamed"})
+    assert renamed.status_code == 200
+    assert renamed.json()["reservedAccountIds"] == sorted([first_account_id, second_account_id])
+
+    narrowed = await async_client.patch(f"/api/api-keys/{owner}", json={"reservedAccountIds": [second_account_id]})
+    assert narrowed.status_code == 200
+    assert narrowed.json()["reservedAccountIds"] == [second_account_id]
+
+    taken = await async_client.patch(f"/api/api-keys/{other}", json={"reservedAccountIds": [first_account_id]})
+    assert taken.status_code == 200
+    assert taken.json()["reservedAccountIds"] == [first_account_id]
+
+    cleared = await async_client.patch(f"/api/api-keys/{owner}", json={"reservedAccountIds": []})
+    assert cleared.status_code == 200
+    assert cleared.json()["reservedAccountIds"] == []
+
+
+@pytest.mark.asyncio
+async def test_api_key_reserved_account_conflict_returns_409_and_rolls_back(async_client):
+    account_id = await _import_account(async_client, "acc-reserve-conflict", "reserve-conflict@example.com")
+    free_account_id = await _import_account(async_client, "acc-reserve-free", "reserve-free@example.com")
+    owner = (
+        await async_client.post("/api/api-keys/", json={"name": "conflict-owner", "reservedAccountIds": [account_id]})
+    ).json()["id"]
+    other = (await async_client.post("/api/api-keys/", json={"name": "conflict-other"})).json()["id"]
+
+    conflict = await async_client.patch(
+        f"/api/api-keys/{other}",
+        json={"name": "renamed", "reservedAccountIds": [free_account_id, account_id]},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "account_reserved_by_other_key"
+
+    create_conflict = await async_client.post(
+        "/api/api-keys/", json={"name": "conflict-create", "reservedAccountIds": [account_id]}
+    )
+    assert create_conflict.status_code == 409
+    assert create_conflict.json()["error"]["code"] == "account_reserved_by_other_key"
+
+    keys = {row["id"]: row for row in (await async_client.get("/api/api-keys/")).json()}
+    assert set(keys) == {owner, other}
+    assert keys[other]["name"] == "conflict-other"
+    assert keys[other]["reservedAccountIds"] == []
+    assert keys[owner]["reservedAccountIds"] == [account_id]
+
+
+@pytest.mark.asyncio
+async def test_api_key_rejects_unknown_reserved_account_ids(async_client):
+    create = await async_client.post(
+        "/api/api-keys/", json={"name": "unknown-reserved", "reservedAccountIds": ["nope"]}
+    )
+    assert create.status_code == 400
+    assert create.json()["error"]["code"] == "invalid_api_key_payload"
+
+    key_id = (await async_client.post("/api/api-keys/", json={"name": "unknown-reserved-2"})).json()["id"]
+    update = await async_client.patch(f"/api/api-keys/{key_id}", json={"reservedAccountIds": ["nope"]})
+    assert update.status_code == 400
+    assert update.json()["error"]["code"] == "invalid_api_key_payload"
+
+
+@pytest.mark.asyncio
+async def test_scoped_api_key_reserved_accounts_merge_into_assignment(async_client):
+    reserved_id = await _import_account(async_client, "acc-reserve-scope-a", "reserve-scope-a@example.com")
+    assigned_id = await _import_account(async_client, "acc-reserve-scope-b", "reserve-scope-b@example.com")
+    other_reserved_id = await _import_account(async_client, "acc-reserve-scope-c", "reserve-scope-c@example.com")
+
+    scoped = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "scoped-reserved", "assignedAccountIds": [assigned_id], "reservedAccountIds": [reserved_id]},
+    )
+    assert scoped.status_code == 200
+    assert scoped.json()["accountAssignmentScopeEnabled"] is True
+    assert sorted(scoped.json()["assignedAccountIds"]) == sorted([assigned_id, reserved_id])
+
+    reassigned = await async_client.patch(
+        f"/api/api-keys/{scoped.json()['id']}", json={"assignedAccountIds": [assigned_id]}
+    )
+    assert reassigned.status_code == 200
+    assert sorted(reassigned.json()["assignedAccountIds"]) == sorted([assigned_id, reserved_id])
+
+    unscoped = await async_client.post("/api/api-keys/", json={"name": "unscoped-reserved"})
+    updated = await async_client.patch(
+        f"/api/api-keys/{unscoped.json()['id']}", json={"reservedAccountIds": [other_reserved_id]}
+    )
+    assert updated.status_code == 200
+    assert updated.json()["accountAssignmentScopeEnabled"] is False
+    assert updated.json()["assignedAccountIds"] == []
+    assert updated.json()["reservedAccountIds"] == [other_reserved_id]
+
+
+@pytest.mark.asyncio
+async def test_deleting_api_key_releases_reserved_accounts(async_client):
+    account_id = await _import_account(async_client, "acc-reserve-delete", "reserve-delete@example.com")
+    owner = (
+        await async_client.post("/api/api-keys/", json={"name": "delete-owner", "reservedAccountIds": [account_id]})
+    ).json()["id"]
+    other = (await async_client.post("/api/api-keys/", json={"name": "delete-other"})).json()["id"]
+
+    assert (await async_client.delete(f"/api/api-keys/{owner}")).status_code == 204
+
+    taken = await async_client.patch(f"/api/api-keys/{other}", json={"reservedAccountIds": [account_id]})
+    assert taken.status_code == 200
+    assert taken.json()["reservedAccountIds"] == [account_id]
+
+
+@pytest.mark.asyncio
+async def test_deleting_account_releases_its_reservation(async_client):
+    account_id = await _import_account(async_client, "acc-reserve-gone", "reserve-gone@example.com")
+    other_account_id = await _import_account(async_client, "acc-reserve-stay", "reserve-stay@example.com")
+    key_id = (
+        await async_client.post("/api/api-keys/", json={"name": "gone-owner", "reservedAccountIds": [account_id]})
+    ).json()["id"]
+
+    assert (await async_client.delete(f"/api/accounts/{account_id}")).status_code == 200
+
+    listed = {row["id"]: row for row in (await async_client.get("/api/api-keys/")).json()}
+    assert listed[key_id]["reservedAccountIds"] == []
+    resubmitted = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"reservedAccountIds": [*listed[key_id]["reservedAccountIds"], other_account_id]},
+    )
+    assert resubmitted.status_code == 200
+    assert resubmitted.json()["reservedAccountIds"] == [other_account_id]
+
+
+@pytest.mark.asyncio
+async def test_reservation_claim_skips_account_deleted_after_validation(async_client, monkeypatch):
+    from app.modules.accounts.repository import AccountsRepository
+
+    account_id = await _import_account(async_client, "acc-reserve-race", "reserve-race@example.com")
+    key_id = (await async_client.post("/api/api-keys/", json={"name": "race-owner"})).json()["id"]
+    resolve = ApiKeysService._resolve_assigned_account_ids
+
+    async def resolve_then_delete(self, account_ids):
+        resolved = await resolve(self, account_ids)
+        if resolved == [account_id]:
+            async with SessionLocal() as session:
+                assert await AccountsRepository(session).begin_delete(account_id)
+        return resolved
+
+    monkeypatch.setattr(ApiKeysService, "_resolve_assigned_account_ids", resolve_then_delete)
+    raced = await async_client.patch(f"/api/api-keys/{key_id}", json={"reservedAccountIds": [account_id]})
+    assert raced.status_code == 400
+    assert raced.json()["error"]["code"] == "invalid_api_key_payload"
+    async with SessionLocal() as session:
+        holder = await session.scalar(select(Account.reserved_api_key_id).where(Account.id == account_id))
+    assert holder is None
+
+
+@pytest.mark.asyncio
 async def test_api_key_list_includes_pooled_credit_fields_for_selectable_assigned_accounts(async_client):
     active_account_id = await _import_account(async_client, "acc-pooled-active", "pooled-active@example.com")
     paused_account_id = await _import_account(async_client, "acc-pooled-paused", "pooled-paused@example.com")
@@ -479,6 +659,59 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "no_accounts"
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_reserved_account_routes_only_owner_key(async_client, monkeypatch):
+    await _populate_test_registry()
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model",
+        lambda accounts, model, *, service_tier=None: accounts,
+    )
+    reserved_id = await _import_account(async_client, "acc-route-reserved", "route-reserved@example.com")
+    await _import_account(async_client, "acc-route-pool", "route-pool@example.com")
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+    owner = (
+        await async_client.post("/api/api-keys/", json={"name": "route-owner", "reservedAccountIds": [reserved_id]})
+    ).json()
+    other = (await async_client.post("/api/api-keys/", json={"name": "route-other"})).json()
+
+    routed: list[str] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        routed.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    async def compact_accounts(headers: dict[str, str]) -> set[str]:
+        routed.clear()
+        for _ in range(6):
+            response = await async_client.post(
+                "/backend-api/codex/responses/compact",
+                headers=headers,
+                json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+            )
+            assert response.status_code == 200
+        return set(routed)
+
+    assert await compact_accounts({"Authorization": f"Bearer {owner['key']}"}) == {"acc-route-reserved"}
+    assert await compact_accounts({"Authorization": f"Bearer {other['key']}"}) == {"acc-route-pool"}
+
+    disabled = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": False})
+    assert disabled.status_code == 200
+    assert await compact_accounts({}) == {"acc-route-pool"}
 
 
 @pytest.mark.asyncio
