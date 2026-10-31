@@ -71,3 +71,19 @@ Reset-credit listing and redeem, `/v1` warmup and `POST /api/quota-planner/warm-
 - **WHEN** admin calls `warm-now` for `acc-a` with `apiKeyId` J
 - **THEN** the decision is `skipped` with reason `account_reserved_by_other_key`
 - **AND** no upstream request is sent
+
+### Requirement: All-accounts automations skip reserved accounts
+
+An automation job scoped to all accounts MUST NOT dispatch runs to accounts reserved by an API key. An automation job that names a reserved account explicitly MUST still dispatch to it.
+
+#### Scenario: All-accounts job skips a reserved account
+
+- **GIVEN** key K reserves `acc-a` and `acc-b` is unreserved
+- **WHEN** an automation job with no selected accounts runs
+- **THEN** the run cycle contains `acc-b` only
+
+#### Scenario: Explicitly selected reserved account still runs
+
+- **GIVEN** key K reserves `acc-a`
+- **WHEN** an automation job that selects `acc-a` runs
+- **THEN** the run cycle contains `acc-a`

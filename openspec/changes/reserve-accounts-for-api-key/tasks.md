@@ -15,6 +15,7 @@
 
 - [x] 3.1 Reset-credit listing and redeem
 - [x] 3.2 `/v1` warmup and keyed `warm-now`
+- [x] 3.3 All-accounts automation jobs skip reserved accounts
 
 ## 4. Dashboard
 

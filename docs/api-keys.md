@@ -29,7 +29,7 @@ Keys can also be scoped to specific accounts, so a key draws quota only from the
 
 ## Reserved accounts
 
-**Reserved accounts (preferred)** dedicate accounts to one key: that key uses them first and falls back to its normal pool only while they are unusable, and no other key (nor a keyless request) can use them, including for `/v1/reset-credit`, `/v1/warmup` and a keyed quota-planner warm-now. An account belongs to at most one key: reserving an account another key holds returns `409 account_reserved_by_other_key`. For a key scoped to assigned accounts, its reserved accounts are added to the assignment. Deleting the key (or the account) releases the reservation. See [Routing](routing.md#reserved-accounts) for how selection treats them.
+**Reserved accounts (preferred)** dedicate accounts to one key: that key uses them first and falls back to its normal pool only while they are unusable, and no other key (nor a keyless request) can use them, including for `/v1/reset-credit`, `/v1/warmup`, a keyed quota-planner warm-now and automation jobs scoped to all accounts (a job that selects the account explicitly still runs on it). An account belongs to at most one key: reserving an account another key holds returns `409 account_reserved_by_other_key`. For a key scoped to assigned accounts, its reserved accounts are added to the assignment. Deleting the key (or the account) releases the reservation. See [Routing](routing.md#reserved-accounts) for how selection treats them.
 
 ## Reasoning effort policies
 

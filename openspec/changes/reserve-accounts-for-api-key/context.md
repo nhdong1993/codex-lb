@@ -19,7 +19,7 @@ Let an operator dedicate one or more upstream accounts to a single API key, for 
 ## Constraints and failure modes
 
 - With `apiKeyAuthEnabled=false` every request is keyless, so reserved accounts are not used by anyone, including keyless `/v1` warmup. Release the reservations before disabling API key authentication.
-- System tasks without an API key (quota-planner schedule, limit warmup, cache-isolation probe) still touch reserved accounts. Display figures (pooled credits of other keys, `/v1/usage`, fleet) still count them.
+- System tasks without an API key (quota-planner schedule, limit warmup, cache-isolation probe) still touch reserved accounts. Automation jobs scoped to all accounts skip them (they send real prompts); a job that selects a reserved account explicitly still runs on it. Display figures (pooled credits of other keys, `/v1/usage`, fleet) still count them.
 - A disabled or expired key keeps its reservations; the accounts sit idle until an operator releases them.
 - A sticky session that fell back to a pool account does not move back when the reserved account recovers; new sessions prefer it again.
 - Closing bridge sessions on reservation is replica-local and also closes the owning key's own sessions on those accounts.
