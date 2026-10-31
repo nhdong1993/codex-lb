@@ -97,6 +97,10 @@ A conversation that received source output is **pinned** to the source and stays
 
 Since the WP-E fix in #2124 the HTTP Responses session bridge returns the pool's `429 usage_limit_reached` immediately instead of waiting out the capacity window, so a client sees the same exhaustion answer on both the direct and the bridged path — the answer overflow later replaces.
 
+### Reserved accounts
+
+An account can be reserved for one API key (`Reserved accounts (preferred)` in the API key dialog, or `reservedAccountIds` on `/api/api-keys`). Requests with that key use its reserved accounts first, even when they are fuller than the rest of the pool, and fall back to the key's normal pool only while every reserved account is unusable (quota exhausted, cooling down, paused or deactivated). No other key and no keyless request ever selects a reserved account; a conversation of another key that is owned by it fails closed instead of moving. `single_account` routing still sends traffic to the configured account. With API key authentication disabled every request is keyless, so reserved accounts sit idle.
+
 ---
 
 *Specs: [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture) · [model-source-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-source-routing) · [usage-refresh-policy](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy)*

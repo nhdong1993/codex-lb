@@ -43,6 +43,7 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
 )
 from app.modules.proxy import model_admission
+from app.modules.proxy._load_balancer.reserved_accounts import drop_foreign_reserved
 from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import (
     _affinity_with_payload_continuity,
@@ -407,10 +408,11 @@ def _service_tier_from_response(response: CompactResponsePayload | None) -> str 
 
 
 def _effective_service_tier(requested_service_tier: str | None, actual_service_tier: str | None) -> str | None:
-    return cast(
-        Callable[[str | None, str | None], str | None],
-        _service_global("_effective_service_tier"),
-    )(requested_service_tier, actual_service_tier)
+    if isinstance(actual_service_tier, str):
+        return actual_service_tier
+    if isinstance(requested_service_tier, str):
+        return requested_service_tier
+    return None
 
 
 def _compact_same_contract_retry_budget() -> int:
@@ -914,12 +916,15 @@ class _CompactMixin:
                 surface="compact",
             )
             if previous_response_preferred_account_id is None:
-                selection_inputs = await proxy._load_balancer._load_selection_inputs(
-                    model=payload.model,
-                    additional_limit_name=None,
-                    account_ids=api_key.assigned_account_ids
-                    if api_key is not None and api_key.account_assignment_scope_enabled
-                    else None,
+                selection_inputs = drop_foreign_reserved(
+                    await proxy._load_balancer._load_selection_inputs(
+                        model=payload.model,
+                        additional_limit_name=None,
+                        account_ids=api_key.assigned_account_ids
+                        if api_key is not None and api_key.account_assignment_scope_enabled
+                        else None,
+                    ),
+                    api_key.id if api_key is not None else None,
                 )
                 if len(selection_inputs.accounts) != 1:
                     message = "Previous response owner account is unavailable; retry later."

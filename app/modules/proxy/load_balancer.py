@@ -98,6 +98,7 @@ from app.modules.proxy._load_balancer.opportunistic_admission import (
     detached_runtime_snapshot,
     run_opportunistic_admission,
 )
+from app.modules.proxy._load_balancer.reserved_accounts import drop_foreign_reserved
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     SelectionInputsProtocol,
@@ -627,6 +628,7 @@ class LoadBalancer:
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
             )
+            selection_inputs = drop_foreign_reserved(selection_inputs, api_key_id)
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even
                 # an already-empty routing pool must have its owner candidates
@@ -1446,6 +1448,7 @@ class LoadBalancer:
         observe_only: bool = False,
         routing_tunables: RoutingTunables | None = None,
         dashboard_settings: object | None = None,
+        api_key_id: str | None = None,
     ) -> AccountSelection:
         outcome = await run_opportunistic_admission(
             self,
@@ -1465,6 +1468,7 @@ class LoadBalancer:
                 build_states=_build_states,
                 routing_tunables=self._resolve_routing_tunables(routing_tunables),
                 observe_only=observe_only,
+                api_key_id=api_key_id,
                 # C2-3 resilience toggles: from the caller's dashboard snapshot.
                 soft_drain_enabled=resolve_resilience_toggles(dashboard_settings).soft_drain_enabled,
             ),
@@ -2591,6 +2595,7 @@ def _state_from_account(
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,
         routing_policy=routing_policy,
+        reserved=account.reserved_api_key_id is not None,
         selection_weight_multiplier=error_rate_weight_multiplier(
             runtime, now, policy=ErrorRateWeightingPolicy(enabled=tunables.error_rate_weighting_enabled)
         ),

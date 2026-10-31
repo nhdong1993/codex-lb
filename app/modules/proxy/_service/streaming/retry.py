@@ -51,6 +51,7 @@ from app.modules.proxy._load_balancer.overload_backoff import (
     UPSTREAM_OVERLOAD_CODES,
     record_upstream_burst_rejection,
 )
+from app.modules.proxy._load_balancer.reserved_accounts import drop_foreign_reserved
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
     _record_continuity_fail_closed,
@@ -1289,10 +1290,13 @@ class _StreamingRetryMixin:
                 # soft prompt-cache affinity key. A different account may have a
                 # warmer cache, but it cannot safely resolve the stored response.
                 if preferred_account_id is None:
-                    selection_inputs = await proxy._load_balancer._load_selection_inputs(
-                        model=payload.model,
-                        additional_limit_name=None,
-                        account_ids=None,
+                    selection_inputs = drop_foreign_reserved(
+                        await proxy._load_balancer._load_selection_inputs(
+                            model=payload.model,
+                            additional_limit_name=None,
+                            account_ids=None,
+                        ),
+                        api_key.id if api_key is not None else None,
                     )
                     if len(selection_inputs.accounts) != 1:
                         message = "Previous response owner account is unavailable; retry later."

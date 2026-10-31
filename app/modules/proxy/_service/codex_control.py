@@ -231,6 +231,7 @@ class _CodexControlMixin:
             scoped_account_ids = {selected_account_id}
         selection = await proxy._load_balancer.select_account(
             dashboard_settings=settings,  # C2-3 resilience toggles
+            api_key_id=api_key.id if api_key is not None else None,
             sticky_key=affinity.selection_key,
             sticky_kind=affinity.kind,
             reallocate_sticky=affinity.reallocate_sticky,

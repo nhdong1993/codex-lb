@@ -2067,6 +2067,7 @@ class ProxyService(
         settings = await get_settings_cache().get()
         return await self._load_balancer.check_opportunistic_admission(
             dashboard_settings=settings,  # C2-3 resilience toggles
+            api_key_id=api_key.id if api_key is not None else None,
             model=model,
             service_tier=service_tier,
             observe_only=observe_only,
@@ -2565,14 +2566,6 @@ def _service_tier_from_event_payload(payload: dict[str, JsonValue] | None) -> st
     if not isinstance(response, dict):
         return None
     return _normalize_service_tier_value(response.get("service_tier"))
-
-
-def _effective_service_tier(requested_service_tier: str | None, actual_service_tier: str | None) -> str | None:
-    if isinstance(actual_service_tier, str):
-        return actual_service_tier
-    if isinstance(requested_service_tier, str):
-        return requested_service_tier
-    return None
 
 
 def _normalize_service_tier_value(value: JsonValue) -> str | None:
