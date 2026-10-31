@@ -159,3 +159,24 @@ def test_drop_foreign_reserved_is_noop_without_reservations() -> None:
     assert [account.id for account in dropped.accounts] == ["acc-a"]
     assert [account.id for account in dropped.runtime_accounts or []] == ["acc-a", "acc-b"]
     assert dropped.effective_sticky_mutation_authority_account_ids == frozenset({"acc-a"})
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_excludes_account_reserved_for_other_key(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    balancer = _pool(selection_cache, a_used=1.0, b_used=60.0)
+
+    for api_key_id, expected in (("key-j", "acc-b"), (None, "acc-b")):
+        for _ in range(_ROUNDS):
+            selection = await balancer.check_opportunistic_admission(
+                model=None,
+                account_ids=None,
+                prefer_earlier_reset_accounts=False,
+                routing_strategy="usage_weighted",
+                budget_threshold_pct=95.0,
+                observe_only=True,
+                api_key_id=api_key_id,
+            )
+            assert selection.account is not None
+            assert selection.account.id == expected
