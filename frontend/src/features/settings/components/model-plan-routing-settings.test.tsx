@@ -64,6 +64,7 @@ describe("ModelPlanRoutingSettings", () => {
     ]);
     await user.click(screen.getByRole("option", { name: "source-chat" }));
     expect(screen.getByRole("checkbox", { name: "plus" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "promax" })).toBeInTheDocument();
     await user.click(screen.getByRole("checkbox", { name: "team" }));
     await user.click(saveButton());
     expect(onSave).toHaveBeenCalledWith({ "source-chat": ["plus", "team"], "native-image": ["pro"] });

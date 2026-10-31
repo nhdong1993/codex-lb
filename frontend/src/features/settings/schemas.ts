@@ -69,6 +69,7 @@ export const AccountRoutingPlanSchema = z.enum([
   "plus",
   "pro",
   "prolite",
+  "promax",
   "team",
   "business",
   "enterprise",

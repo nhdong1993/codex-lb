@@ -301,6 +301,14 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         cached_input_per_1m=0.125,
         output_per_1m=10.0,
     ),
+    "gpt-5-nano-2025-08-07": ModelPrice(
+        input_per_1m=0.05,
+        cached_input_per_1m=0.005,
+        output_per_1m=0.4,
+        flex_input_per_1m=0.025,
+        flex_cached_input_per_1m=0.0025,
+        flex_output_per_1m=0.2,
+    ),
     "gpt-5": ModelPrice(
         input_per_1m=1.25,
         cached_input_per_1m=0.125,

@@ -551,3 +551,9 @@ def test_calculate_costs_uses_service_tier():
     result = calculate_costs(items, DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
 
     assert result.total_usd_7d == pytest.approx(35.0)
+
+
+def test_dated_gpt_5_nano_uses_its_own_price_not_the_gpt_5_alias() -> None:
+    key, price = get_pricing_for_model("gpt-5-nano-2025-08-07")
+    assert key == "gpt-5-nano-2025-08-07"
+    assert (price.input_per_1m, price.cached_input_per_1m, price.output_per_1m) == (0.05, 0.005, 0.4)
