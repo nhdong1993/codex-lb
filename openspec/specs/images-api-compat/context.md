@@ -158,3 +158,13 @@ OpenAI's [image guide](https://developers.openai.com/api/docs/guides/image-gener
 and [tool guide](https://developers.openai.com/api/docs/guides/tools-image-generation)
 provide the public feature references; subscription availability remains an
 upstream property.
+
+## Internal host compatibility
+
+Images and default account probes prefer `gpt-6-luna`, then `gpt-5.6-luna`,
+then `gpt-5.5`, using registry plan visibility and suppression. With no candidate
+available, they default to `gpt-6-luna`. The host only invokes the
+`image_generation` tool; the requested `gpt-image-*` model renders the image. For example, a stale catalog still advertising `gpt-5.5` now
+selects a current Luna host rather than the withdrawn host reported in #2134. Visibility does
+not establish account entitlement. Existing errors are preserved; no host retry
+is performed. Public image models and explicit account-probe models are unchanged.
