@@ -3468,7 +3468,7 @@ async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolat
         sticky_threads_enabled=False,
         api_key=None,
     )
-    api_key_a = cast(proxy_module.ApiKeyData, SimpleNamespace(id="api-key-a"))
+    api_key_a = cast(proxy_module.ApiKeyData, SimpleNamespace(id="api-key-a", reserved_account_ids=[]))
     session = await service._get_or_create_http_bridge_session(
         proxy_module._make_http_bridge_session_key(
             payload,
@@ -3494,7 +3494,7 @@ async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolat
                 key="http_turn_api_key_alias",
                 kind=proxy_module.StickySessionKind.CODEX_SESSION,
             ),
-            api_key=cast(proxy_module.ApiKeyData, SimpleNamespace(id="api-key-b")),
+            api_key=cast(proxy_module.ApiKeyData, SimpleNamespace(id="api-key-b", reserved_account_ids=[])),
             request_model=payload.model,
             idle_ttl_seconds=120.0,
             max_sessions=128,
@@ -4882,6 +4882,70 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
     assert second_upstream_payload["client_metadata"]["x-openai-subagent"] == "collab_spawn"
     assert second_upstream_payload["client_metadata"]["x-codex-parent-thread-id"] == "parent-thread"
     assert second_upstream_payload["client_metadata"]["x-codex-window-id"] == "child-thread:0"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_reuses_reserved_account_outside_plan_until_reservation_is_released(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client, "acc_http_bridge_reserved_plan", "http-bridge-reserved-plan@example.com", plan_type="plus"
+    )
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update({"pro": [registry.get_models_with_fallback()["gpt-5.4"]]})
+    assert registry.plan_types_for_model("gpt-5.4") == frozenset({"pro"})
+
+    assert (await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})).status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/", json={"name": "bridge-reserved-plan", "reservedAccountIds": [account_id]}
+    )
+    assert created.status_code == 200
+    headers = {"Authorization": f"Bearer {created.json()['key']}"}
+
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_calls: list[str | None] = []
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers, access_token, account_id_header, *, base_url=None, session=None
+    ):
+        del headers, access_token, base_url, session
+        connect_calls.append(account_id_header)
+        return fake_upstream
+
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+    monkeypatch.setattr("app.modules.proxy._service.support.get_model_registry", lambda: registry)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = {
+        "model": "gpt-5.4",
+        "instructions": "Return exactly OK.",
+        "input": "hello",
+        "prompt_cache_key": "http-bridge-reserved-plan",
+    }
+    first = await async_client.post("/v1/responses", headers=headers, json=payload)
+    assert first.status_code == 200, first.text
+    second = await async_client.post(
+        "/v1/responses", headers=headers, json={**payload, "previous_response_id": first.json()["id"]}
+    )
+    assert second.status_code == 200, second.text
+    assert len(connect_calls) == 1
+    assert len(fake_upstream.sent_text) == 2
+
+    released = await async_client.patch(f"/api/api-keys/{created.json()['id']}", json={"reservedAccountIds": []})
+    assert released.status_code == 200
+
+    third = await async_client.post(
+        "/v1/responses", headers=headers, json={**payload, "previous_response_id": second.json()["id"]}
+    )
+    assert third.status_code != 200
+    assert len(fake_upstream.sent_text) == 2
 
 
 @pytest.mark.asyncio

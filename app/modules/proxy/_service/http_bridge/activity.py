@@ -21,6 +21,7 @@ from app.modules.proxy._service.support import (
     _http_bridge_session_supports_service_tier,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    reserved_account_ids,
 )
 from app.modules.proxy.affinity import _extract_model_class
 
@@ -73,6 +74,7 @@ class _HTTPBridgeActivityMixin:
                 existing,
                 request_model=request_model,
                 request_service_tier=request_service_tier,
+                plan_exempt_account_ids=reserved_account_ids(api_key),
             ),
         )
         raise AssertionError("incompatible admission handoff must raise")

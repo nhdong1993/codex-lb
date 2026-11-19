@@ -589,23 +589,28 @@ class ModelRegistry:
         return slug.strip().lower() in snapshot.suppressed_model_slugs
 
     def plan_types_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
+        restriction = self.service_tier_plan_restriction(slug, service_tier)
+        return self.plan_types_for_model(slug) if restriction is None else restriction
+
+    def service_tier_plan_restriction(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
+        """Plans from tier-specific catalog data, or ``None`` when the tier falls back to the model's plans."""
         if service_tier is None:
-            return self.plan_types_for_model(slug)
+            return None
         normalized_slug = slug.strip().lower()
         normalized_service_tier = canonical_service_tier_value(service_tier)
         if not normalized_slug or not normalized_service_tier:
-            return self.plan_types_for_model(slug)
+            return None
 
         if self._snapshot is None:
-            return self.plan_types_for_model(slug)
+            return None
         if not self._snapshot.account_catalogs_authoritative and self._snapshot.account_plans:
-            return self.plan_types_for_model(slug)
+            return None
 
         tier_plans = self._snapshot.model_service_tier_plans.get(slug) or self._snapshot.model_service_tier_plans.get(
             normalized_slug
         )
         if tier_plans is None:
-            return frozenset() if self._snapshot.account_catalogs_authoritative else self.plan_types_for_model(slug)
+            return frozenset() if self._snapshot.account_catalogs_authoritative else None
         return tier_plans.get(normalized_service_tier, frozenset())
 
     def account_ids_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:

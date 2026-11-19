@@ -1820,6 +1820,7 @@ def _http_bridge_compatible(
     request_model: str | None,
     request_service_tier: str | None,
     same_model_required: bool = False,
+    plan_exempt_account_ids: frozenset[str] = frozenset(),
 ) -> bool:
     """Check catalog compatibility while preserving stricter legacy reuse paths."""
 
@@ -1831,6 +1832,7 @@ def _http_bridge_compatible(
         session,
         request_model=request_model,
         request_service_tier=request_service_tier,
+        plan_exempt_account_ids=plan_exempt_account_ids,
     )
 
 
@@ -1917,6 +1919,7 @@ def _http_bridge_parallel_fork_key(
     allow_model_fork: bool = True,
     same_model_required: bool = False,
     force_canonical_replacement: bool = False,
+    plan_exempt_account_ids: frozenset[str] = frozenset(),
 ) -> "_HTTPBridgeSessionKey | None":
     """Give incompatible or concurrent requests an independent websocket lane."""
 
@@ -1979,6 +1982,7 @@ def _http_bridge_parallel_fork_key(
         request_model,
         request_service_tier,
         same_model_required,
+        plan_exempt_account_ids,
     ):
         return None
     if incoming_turn_state is not None or previous_response_id is not None:

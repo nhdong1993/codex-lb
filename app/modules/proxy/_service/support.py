@@ -40,6 +40,7 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
+from app.modules.proxy._load_balancer.model_eligibility import plan_exemption_applies
 from app.modules.proxy.affinity import _AffinityPolicy
 from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.helpers import _normalize_error_code, _parse_openai_error
@@ -1473,11 +1474,17 @@ def _complete_http_bridge_handoff(
         inflight_sessions.pop(session.key, None)
 
 
+def reserved_account_ids(api_key: ApiKeyData | None) -> frozenset[str]:
+    """Accounts reserved by the request's API key (none for a keyless request)."""
+    return frozenset(api_key.reserved_account_ids) if api_key is not None else frozenset()
+
+
 def _http_bridge_session_supports_service_tier(
     session: _HTTPBridgeSession,
     *,
     request_model: str | None,
     request_service_tier: str | None,
+    plan_exempt_account_ids: frozenset[str] = frozenset(),
 ) -> bool:
     if request_model is None:
         return True
@@ -1546,7 +1553,12 @@ def _http_bridge_session_supports_service_tier(
         return False
     else:
         account_plan = session.account.plan_type
-    return account_plan_matches_allowed(account_plan, allowed_plans)
+    if account_plan_matches_allowed(account_plan, allowed_plans):
+        return True
+    # The request's own key, not the session's account snapshot, decides whether the reservation still holds.
+    return session.account.id in plan_exempt_account_ids and plan_exemption_applies(
+        session.account.id, request_model, registry=registry, service_tier=request_service_tier
+    )
 
 
 @dataclass(slots=True)

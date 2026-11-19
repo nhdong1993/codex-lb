@@ -37,6 +37,8 @@ class _ModelAccountFilterResult:
     # not advertise. Set only when the tier narrowed the pool, so an empty
     # result can say the tier excluded the accounts rather than the model.
     applied_service_tier: str | None = None
+    # Accounts kept only through the owning-key Plan exemption.
+    plan_exempt_account_ids: frozenset[str] = frozenset()
 
 
 def _filter_accounts_for_model_with_catalog_evidence(
@@ -46,6 +48,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
     registry: ModelRegistry,
     service_tier: str | None = None,
     additional_quota_can_override_account_catalog: bool = False,
+    plan_exempt_api_key_id: str | None = None,
 ) -> _ModelAccountFilterResult:
     account_indexes_cover_selection = True
     get_snapshot = getattr(registry, "get_snapshot", None)
@@ -92,15 +95,57 @@ def _filter_accounts_for_model_with_catalog_evidence(
         allowed_plans = registry.plan_types_for_model_service_tier(model, effective_service_tier)
     else:
         allowed_plans = registry.plan_types_for_model(model)
+    plan_exempt_account_ids: frozenset[str] = frozenset()
     if allowed_plans is not None:
+        plan_exempt_account_ids = frozenset(
+            account.id
+            for account in model_accounts
+            if plan_exempt_api_key_id is not None
+            and account.reserved_api_key_id == plan_exempt_api_key_id
+            and not account_plan_matches_allowed(account.plan_type, allowed_plans)
+            and plan_exemption_applies(account.id, model, registry=registry, service_tier=service_tier)
+        )
         model_accounts = [
-            account for account in model_accounts if account_plan_matches_allowed(account.plan_type, allowed_plans)
+            account
+            for account in model_accounts
+            if account.id in plan_exempt_account_ids or account_plan_matches_allowed(account.plan_type, allowed_plans)
         ]
     return _ModelAccountFilterResult(
         accounts=model_accounts,
         general_model_account_ids=general_model_account_ids,
         applied_service_tier=effective_service_tier,
+        plan_exempt_account_ids=plan_exempt_account_ids,
     )
+
+
+def plan_exemption_applies(account_id: str, model: str, *, registry: ModelRegistry, service_tier: str | None) -> bool:
+    """Whether a reserved account may skip the model Plan check: only Plan evidence is waived.
+
+    The account's own catalog, tier-specific registry data, ``ultrafast`` entitlement and
+    suppressed or undiscovered models still apply.
+    """
+    if not registry.plan_types_for_model(model):
+        return False
+    tier = _effective_model_service_tier(service_tier)
+    if tier is not None and (
+        tier == "ultrafast"
+        or registry.service_tier_plan_restriction(model, tier) is not None
+        or registry.account_ids_for_model_service_tier(model, tier) is not None
+    ):
+        return False
+    snapshot = registry.get_snapshot()
+    if snapshot is None or account_id not in snapshot.account_plans:
+        return True
+    # The account's own fetched catalog counts even while other accounts leave coverage incomplete.
+    slug = model.strip().lower()
+    if account_id not in (snapshot.model_accounts.get(model) or snapshot.model_accounts.get(slug, frozenset())):
+        return False
+    if tier is None:
+        return True
+    tier_accounts = snapshot.model_service_tier_accounts.get(model) or snapshot.model_service_tier_accounts.get(
+        slug, {}
+    )
+    return account_id in tier_accounts.get(tier, frozenset())
 
 
 def _filter_accounts_for_model(
@@ -109,12 +154,14 @@ def _filter_accounts_for_model(
     *,
     registry: ModelRegistry,
     service_tier: str | None = None,
+    plan_exempt_api_key_id: str | None = None,
 ) -> list[Account]:
     return _filter_accounts_for_model_with_catalog_evidence(
         accounts,
         model,
         registry=registry,
         service_tier=service_tier,
+        plan_exempt_api_key_id=plan_exempt_api_key_id,
     ).accounts
 
 

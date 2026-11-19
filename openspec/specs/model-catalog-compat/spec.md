@@ -2,7 +2,9 @@
 
 ## Purpose
 Governs the model catalogs codex-lb serves to Codex-native and OpenAI-compatible clients, and how those catalogs feed routing. Fresh instances need a usable bootstrap catalog before the first upstream refresh, refreshed upstream data must then stay authoritative and replica-coherent, and catalog metadata (context windows, speed tiers, reasoning efforts, model-source identity) must be preserved exactly so clients can parse it. It also fixes how per-account catalog knowledge constrains or degrades pooled routing without falsely excluding accounts.
+
 ## Requirements
+
 ### Requirement: Bootstrap model catalog is available before refresh
 
 Before the first successful upstream model-registry refresh, the system MUST
@@ -52,7 +54,9 @@ authoritative over the static bootstrap catalog. Once that snapshot exists,
 model catalog endpoints and model-behavior lookups MUST use the refreshed
 snapshot instead of the static bootstrap catalog. Before refresh, websocket
 preference lookup and account plan filtering MUST use bootstrap model metadata
-when the requested slug matches a bootstrap entry.
+when the requested slug matches a bootstrap entry. Account plan filtering is
+subject to the owning-key Plan exemption defined in the `account-routing`
+requirement "Reserved accounts are exclusive and preferred".
 
 #### Scenario: Refreshed snapshot replaces bootstrap catalog
 
@@ -98,7 +102,7 @@ when the requested slug matches a bootstrap entry.
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **AND** a bootstrap model excludes a plan from its plan-availability metadata
 - **WHEN** account selection is requested for that bootstrap model
-- **THEN** accounts on excluded plans are not selected for that model
+- **THEN** accounts on excluded plans are not selected for that model, unless the account qualifies for the owning-key Plan exemption
 
 ### Requirement: OpenAI-compatible model metadata uses backend context windows
 
@@ -570,7 +574,7 @@ an operator-mapped slug that has no catalog evidence at all.
 - **WHEN** an account is added before the next scheduled refresh completes
 - **THEN** canonical bootstrap models remain discoverable via `/v1/models`
 - **AND** those models remain plan-gated by the bootstrap catalog
-- **AND** an account whose plan does not support the model is not selected
+- **AND** an account whose plan does not support the model is not selected, unless it qualifies for the owning-key Plan exemption defined in the `account-routing` requirement "Reserved accounts are exclusive and preferred"
 
 #### Scenario: Failed refresh has last-known account data
 
@@ -1020,7 +1024,7 @@ when the field is absent.
 
 ### Requirement: Fresh additional-quota evidence can establish account support
 
-For a model canonically mapped to a separately metered additional quota, account selection MUST allow fresh account-specific additional-quota telemetry to establish model support when an authoritative general per-account model catalog omits that model. The system MUST continue to enforce registry plan and service-tier restrictions and MUST apply the existing additional-quota freshness, exhaustion, account-health, cooldown, capacity, security, and routing gates before selecting an account. When such a selected account is bound to an HTTP bridge session, every existing-session reuse entry point, including direct key lookup, previous-response alias fallback, and in-flight creation waiters, MUST enforce exact normalized model, canonical quota key, and normalized effective service-tier compatibility before returning the session. For a genuinely catalog-omitted account, reuse MUST re-evaluate current registry plan and requested service-tier plan eligibility without synchronously re-reading quota telemetry. This behavior MUST NOT apply to unknown models or to an unrelated additional-limit key supplied independently of the requested model.
+For a model canonically mapped to a separately metered additional quota, account selection MUST allow fresh account-specific additional-quota telemetry to establish model support when an authoritative general per-account model catalog omits that model. The system MUST continue to enforce registry plan and service-tier restrictions (registry plan restrictions are subject to the owning-key Plan exemption defined in the `account-routing` requirement "Reserved accounts are exclusive and preferred") and MUST apply the existing additional-quota freshness, exhaustion, account-health, cooldown, capacity, security, and routing gates before selecting an account. When such a selected account is bound to an HTTP bridge session, every existing-session reuse entry point, including direct key lookup, previous-response alias fallback, and in-flight creation waiters, MUST enforce exact normalized model, canonical quota key, and normalized effective service-tier compatibility before returning the session. For a genuinely catalog-omitted account, reuse MUST re-evaluate current registry plan and requested service-tier plan eligibility without synchronously re-reading quota telemetry. This behavior MUST NOT apply to unknown models or to an unrelated additional-limit key supplied independently of the requested model.
 
 #### Scenario: Fresh Spark quota overrides general account-catalog omission
 
@@ -1087,7 +1091,7 @@ For a model canonically mapped to a separately metered additional quota, account
 - **GIVEN** a requested separately metered model is mapped to an additional quota
 - **AND** an account's plan is excluded by the model registry's plan or requested service-tier restrictions
 - **WHEN** account selection evaluates that account
-- **THEN** the account is not selected even if additional-quota telemetry exists
+- **THEN** the account is not selected even if additional-quota telemetry exists, unless the account qualifies for the owning-key Plan exemption and is excluded only by the model's plan restriction
 
 #### Scenario: Missing or stale quota evidence fails closed
 

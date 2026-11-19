@@ -35,7 +35,7 @@ from app.core.balancer import (
 from app.core.clock import Clock
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
-from app.modules.proxy._load_balancer.reserved_accounts import drop_foreign_reserved
+from app.modules.proxy._load_balancer.reserved_accounts import load_inputs_for_key
 from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     _account_cap_error_code,
@@ -91,6 +91,7 @@ class OpportunisticAdmissionOwner(Protocol):
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
+        plan_exempt_api_key_id: str | None = None,
     ) -> SelectionInputsProtocol: ...
 
     def _prepare_sticky_selection_states(
@@ -280,13 +281,12 @@ async def run_opportunistic_admission(
     *,
     request: OpportunisticAdmissionRequest,
 ) -> OpportunisticAdmissionOutcome:
-    selection_inputs = drop_foreign_reserved(
-        await owner._load_selection_inputs(
-            model=request.model,
-            service_tier=request.service_tier,
-            account_ids=request.account_ids,
-        ),
+    selection_inputs = await load_inputs_for_key(
+        owner._load_selection_inputs,
         request.api_key_id,
+        model=request.model,
+        service_tier=request.service_tier,
+        account_ids=request.account_ids,
     )
     if selection_inputs.error_code is not None and not selection_inputs.accounts:
         return OpportunisticAdmissionOutcome(

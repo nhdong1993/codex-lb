@@ -1210,3 +1210,24 @@ async def test_plan_models_reverse_index():
     assert snapshot is not None
     assert snapshot.plan_models["plus"] == frozenset({"a", "b"})
     assert snapshot.plan_models["pro"] == frozenset({"b", "c"})
+
+
+@pytest.mark.asyncio
+async def test_service_tier_plan_restriction_separates_tier_data_from_model_plan_fallback():
+    fast = replace(_model("gpt-5.5"), raw={"service_tiers": [{"id": "priority", "name": "Fast"}]})
+    no_fast = replace(_model("gpt-5.5"), raw={"service_tiers": [{"slug": "default"}]})
+
+    registry = ModelRegistry(ttl_seconds=60.0)
+    assert registry.service_tier_plan_restriction("gpt-5.5", "priority") is None
+
+    await registry.update({"pro": [fast], "plus": [no_fast]})
+    assert registry.service_tier_plan_restriction("gpt-5.5", "priority") == frozenset({"pro"})
+    assert registry.service_tier_plan_restriction("gpt-5.5", None) is None
+
+    authoritative = ModelRegistry(ttl_seconds=60.0)
+    await authoritative.update(
+        {"pro": [replace(_model("gpt-5.5"), raw={})]},
+        per_account_results={"account-pro": ("pro", [])},
+        active_account_plans={"account-pro": "pro"},
+    )
+    assert authoritative.service_tier_plan_restriction("gpt-5.5", "flex") == frozenset()

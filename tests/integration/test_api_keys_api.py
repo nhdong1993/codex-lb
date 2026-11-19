@@ -22,6 +22,7 @@ import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
+from app.core.errors import openai_error
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
@@ -591,7 +592,7 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
     monkeypatch.setattr(
         load_balancer_module,
         "_filter_accounts_for_model",
-        lambda accounts, model, *, service_tier=None: accounts,
+        lambda accounts, model, **_kwargs: accounts,
     )
     assigned_account_id = await _import_account(async_client, "acc-scoped", "scoped@example.com")
     await _import_account(async_client, "acc-fallback", "fallback@example.com")
@@ -667,7 +668,7 @@ async def test_reserved_account_routes_only_owner_key(async_client, monkeypatch)
     monkeypatch.setattr(
         load_balancer_module,
         "_filter_accounts_for_model",
-        lambda accounts, model, *, service_tier=None: accounts,
+        lambda accounts, model, **_kwargs: accounts,
     )
     reserved_id = await _import_account(async_client, "acc-route-reserved", "route-reserved@example.com")
     await _import_account(async_client, "acc-route-pool", "route-pool@example.com")
@@ -712,6 +713,278 @@ async def test_reserved_account_routes_only_owner_key(async_client, monkeypatch)
     disabled = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": False})
     assert disabled.status_code == 200
     assert await compact_accounts({}) == {"acc-route-pool"}
+
+
+@pytest.mark.asyncio
+async def test_reserved_account_serves_owner_key_outside_model_plan(async_client, monkeypatch):
+    # Both imported accounts are on Plan "plus"; the registry offers the model on "pro" only.
+    model = _TEST_MODELS[0]
+    await get_model_registry().update({"pro": [_make_upstream_model(model)]})
+    reserved_id = await _import_account(async_client, "acc-plan-reserved", "plan-reserved@example.com")
+    await _import_account(async_client, "acc-plan-pool", "plan-pool@example.com")
+    settings = await async_client.put(
+        "/api/settings",
+        json={"stickyThreadsEnabled": False, "totpRequiredOnLogin": False, "apiKeyAuthEnabled": True},
+    )
+    assert settings.status_code == 200
+    owner = (
+        await async_client.post("/api/api-keys/", json={"name": "plan-owner", "reservedAccountIds": [reserved_id]})
+    ).json()
+    other = (await async_client.post("/api/api-keys/", json={"name": "plan-other"})).json()
+
+    routed: list[str] = []
+
+    async def fake_stream(payload, _headers, _access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, base_url, raise_for_status
+        routed.append(account_id)
+        event = {"type": "response.completed", "response": {"id": "resp_plan", "usage": {"input_tokens": 1}}}
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async def first_event(key: str) -> dict:
+        async with async_client.stream(
+            "POST",
+            "/backend-api/codex/responses",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": model, "instructions": "hi", "input": [], "stream": True},
+        ) as response:
+            assert response.status_code == 200
+            lines = [line async for line in response.aiter_lines() if line.startswith("data: {")]
+        events = [json.loads(line.removeprefix("data: ")) for line in lines]
+        return next(event for event in events if event["type"] != "codex.keepalive")
+
+    assert (await first_event(owner["key"]))["type"] == "response.completed"
+    assert routed == ["acc-plan-reserved"]
+
+    refused = await first_event(other["key"])
+    assert refused["type"] == "response.failed"
+    assert refused["response"]["error"]["code"] == "no_plan_support_for_model"
+    assert routed == ["acc-plan-reserved"]
+
+
+@pytest.mark.asyncio
+async def test_upstream_rejection_of_plan_exempt_account_retries_on_plan_eligible_pool(async_client, monkeypatch):
+    model = _TEST_MODELS[0]
+    await get_model_registry().update({"pro": [_make_upstream_model(model)]})
+    reserved_id = await _import_account(async_client, "acc-reject-reserved", "reject-reserved@example.com")
+    pool_id = await _import_account(async_client, "acc-reject-pool", "reject-pool@example.com")
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == pool_id).values(plan_type="pro"))
+        await session.commit()
+    settings = await async_client.put(
+        "/api/settings",
+        json={"stickyThreadsEnabled": False, "totpRequiredOnLogin": False, "apiKeyAuthEnabled": True},
+    )
+    assert settings.status_code == 200
+    key = (
+        await async_client.post("/api/api-keys/", json={"name": "reject-owner", "reservedAccountIds": [reserved_id]})
+    ).json()["key"]
+
+    routed: list[str] = []
+
+    async def fake_stream(payload, _headers, _access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, base_url, raise_for_status
+        routed.append(account_id)
+        if account_id == "acc-reject-reserved":
+            message = f"The '{model}' model is not supported when using Codex with a ChatGPT account."
+            raise ProxyResponseError(400, openai_error("invalid_request_error", message))
+        event = {"type": "response.completed", "response": {"id": "resp_reject", "usage": {"input_tokens": 1}}}
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "instructions": "hi", "input": [], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line.startswith("data: {")]
+    events = [json.loads(line.removeprefix("data: ")) for line in lines]
+
+    assert next(event for event in events if event["type"] != "codex.keepalive")["type"] == "response.completed"
+    assert routed == ["acc-reject-reserved", "acc-reject-pool"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["outside-scope-account", "tier-excludes-reserved"])
+async def test_unknown_previous_response_owner_counts_only_selectable_accounts(async_client, monkeypatch, case):
+    model_name = _TEST_MODELS[0]
+    model = replace(
+        _make_upstream_model(model_name),
+        raw={"service_tiers": [{"id": "priority", "name": "Fast"}], "additional_speed_tiers": ["fast"]},
+    )
+    await get_model_registry().update({"pro": [model]})
+    reserved_id = await _import_account(async_client, "acc-owner-reserved", "owner-reserved@example.com")
+    pool_id = await _import_account(async_client, "acc-owner-pool", "owner-pool@example.com")
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == pool_id).values(plan_type="pro"))
+        await session.commit()
+    settings = await async_client.put(
+        "/api/settings",
+        json={"stickyThreadsEnabled": False, "totpRequiredOnLogin": False, "apiKeyAuthEnabled": True},
+    )
+    assert settings.status_code == 200
+    key_payload: dict[str, object] = {"name": f"owner-{case}", "reservedAccountIds": [reserved_id]}
+    if case == "outside-scope-account":
+        key_payload["assignedAccountIds"] = [reserved_id]
+    key = (await async_client.post("/api/api-keys/", json=key_payload)).json()["key"]
+
+    routed: list[str] = []
+
+    async def fake_stream(payload, _headers, _access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, base_url, raise_for_status
+        routed.append(account_id)
+        event = {"type": "response.completed", "response": {"id": "resp_owner", "usage": {"input_tokens": 1}}}
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request: dict[str, object] = {
+        "model": model_name,
+        "instructions": "hi",
+        "input": [],
+        "stream": True,
+        "previous_response_id": "resp_owner_not_recorded",
+    }
+    if case == "tier-excludes-reserved":
+        request["service_tier"] = "priority"
+    async with async_client.stream(
+        "POST", "/backend-api/codex/responses", headers={"Authorization": f"Bearer {key}"}, json=request
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line.startswith("data: {")]
+    events = [json.loads(line.removeprefix("data: ")) for line in lines]
+    final = next(event for event in events if event["type"] != "codex.keepalive")
+
+    assert final["type"] == "response.completed", final
+    assert routed == ["acc-owner-reserved" if case == "outside-scope-account" else "acc-owner-pool"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_previous_response_owner_uses_baseline_when_reservation_is_released_between_loads(
+    async_client, monkeypatch
+):
+    model = _TEST_MODELS[0]
+    await get_model_registry().update({"pro": [_make_upstream_model(model)]})
+    reserved_id = await _import_account(async_client, "acc-race-reserved", "race-reserved@example.com")
+    pool_ids = [
+        await _import_account(async_client, "acc-race-p", "race-p@example.com"),
+        await _import_account(async_client, "acc-race-q", "race-q@example.com"),
+    ]
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id.in_(pool_ids)).values(plan_type="pro"))
+        await session.commit()
+    settings = await async_client.put(
+        "/api/settings",
+        json={"stickyThreadsEnabled": False, "totpRequiredOnLogin": False, "apiKeyAuthEnabled": True},
+    )
+    assert settings.status_code == 200
+    key = (
+        await async_client.post(
+            "/api/api-keys/",
+            json={
+                "name": "race-owner",
+                "reservedAccountIds": [reserved_id],
+                "assignedAccountIds": [reserved_id, pool_ids[0]],
+            },
+        )
+    ).json()["key"]
+
+    original_load = load_balancer_module.LoadBalancer._load_selection_inputs
+
+    async def release_before_owner_reload(self, **kwargs):
+        if kwargs.get("plan_exempt_api_key_id") is not None:
+            async with SessionLocal() as session:
+                await session.execute(update(Account).where(Account.id == reserved_id).values(reserved_api_key_id=None))
+                await session.commit()
+        return await original_load(self, **kwargs)
+
+    monkeypatch.setattr(load_balancer_module.LoadBalancer, "_load_selection_inputs", release_before_owner_reload)
+
+    called: list[str] = []
+
+    async def fake_stream(payload, _headers, _access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, base_url, raise_for_status
+        called.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_race"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "previous_response_id": "resp_race_not_recorded",
+        },
+    ) as response:
+        lines = [line async for line in response.aiter_lines() if line.startswith("data: {")]
+    events = [json.loads(line.removeprefix("data: ")) for line in lines]
+    final = next(event for event in events if event["type"] != "codex.keepalive")
+
+    assert final["response"]["error"]["code"] == "previous_response_owner_unavailable"
+    assert called == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["stream", "compact"])
+async def test_unknown_previous_response_owner_without_reservations_keeps_failing_closed(
+    async_client, monkeypatch, route
+):
+    model_name = _TEST_MODELS[0]
+    fast = replace(
+        _make_upstream_model(model_name),
+        raw={"service_tiers": [{"id": "priority", "name": "Fast"}], "additional_speed_tiers": ["fast"]},
+    )
+    await get_model_registry().update({"pro": [fast], "plus": [_make_upstream_model(model_name)]})
+    await _import_account(async_client, "acc-keyless-plus", "keyless-plus@example.com")
+    pro_id = await _import_account(async_client, "acc-keyless-pro", "keyless-pro@example.com")
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == pro_id).values(plan_type="pro"))
+        await session.commit()
+
+    called: list[str] = []
+
+    async def fake_stream(payload, _headers, _access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, base_url, raise_for_status
+        called.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_keyless"}}\n\n'
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        called.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    request = {
+        "model": model_name,
+        "instructions": "hi",
+        "input": [],
+        "service_tier": "priority",
+        "previous_response_id": "resp_keyless_not_recorded",
+    }
+    if route == "compact":
+        response = await async_client.post("/backend-api/codex/responses/compact", json=request)
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
+    else:
+        async with async_client.stream(
+            "POST", "/backend-api/codex/responses", json={**request, "stream": True}
+        ) as response:
+            lines = [line async for line in response.aiter_lines() if line.startswith("data: {")]
+        events = [json.loads(line.removeprefix("data: ")) for line in lines]
+        final = next(event for event in events if event["type"] != "codex.keepalive")
+        assert final["response"]["error"]["code"] == "previous_response_owner_unavailable"
+    assert called == []
 
 
 @pytest.mark.asyncio

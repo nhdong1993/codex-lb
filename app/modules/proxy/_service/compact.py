@@ -50,7 +50,7 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
-from app.modules.proxy._load_balancer.reserved_accounts import drop_foreign_reserved
+from app.modules.proxy._load_balancer.reserved_accounts import load_inputs_for_key
 from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import (
     _affinity_with_payload_continuity,
@@ -923,15 +923,16 @@ class _CompactMixin:
                 surface="compact",
             )
             if previous_response_preferred_account_id is None:
-                selection_inputs = drop_foreign_reserved(
-                    await proxy._load_balancer._load_selection_inputs(
-                        model=payload.model,
-                        additional_limit_name=None,
-                        account_ids=api_key.assigned_account_ids
-                        if api_key is not None and api_key.account_assignment_scope_enabled
-                        else None,
-                    ),
+                selection_inputs = await load_inputs_for_key(
+                    proxy._load_balancer._load_selection_inputs,
                     api_key.id if api_key is not None else None,
+                    model=payload.model,
+                    additional_limit_name=None,
+                    account_ids=api_key.assigned_account_ids
+                    if api_key is not None and api_key.account_assignment_scope_enabled
+                    else None,
+                    # A Plan-exempt owner may count reserved accounts its selector cannot use.
+                    owner_overrides={"service_tier": payload.service_tier},
                 )
                 if len(selection_inputs.accounts) != 1:
                     message = "Previous response owner account is unavailable; retry later."

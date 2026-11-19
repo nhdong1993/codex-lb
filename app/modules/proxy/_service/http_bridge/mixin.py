@@ -6,6 +6,7 @@ import logging
 from collections import deque
 from collections.abc import Collection
 from dataclasses import replace
+from functools import partial
 from typing import Any, Literal, TypeVar, overload
 from uuid import uuid4
 
@@ -47,14 +48,8 @@ from app.core.metrics.prometheus import (
 )
 from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import ensure_request_scope_id
-from app.db.models import (
-    DashboardSettings,
-    StickySessionKind,
-)
-from app.modules.api_keys.service import (
-    ApiKeyData,
-    ApiKeyRequestUsageBudget,
-)
+from app.db.models import DashboardSettings, StickySessionKind
+from app.modules.api_keys.service import ApiKeyData, ApiKeyRequestUsageBudget
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -64,6 +59,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge import helpers as bridge_helpers
 from app.modules.proxy._service.http_bridge.account_sessions import _HTTPBridgeAccountSessionsMixin
 from app.modules.proxy._service.http_bridge.activity import _HTTPBridgeActivityMixin
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -82,7 +78,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor,
     _http_bridge_capacity_after_planned_closes,
     _http_bridge_claim_allows_takeover,
-    _http_bridge_compatible,
     _http_bridge_continuity_lost_error_envelope,
     _http_bridge_endpoint_matches_current_instance,
     _http_bridge_has_durable_recovery_anchor,
@@ -94,7 +89,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_owner_check_required,
     _http_bridge_owner_instance,
     _http_bridge_owner_lookup_unavailable_error_envelope,
-    _http_bridge_parallel_fork_key,
     _http_bridge_previous_response_alias_key,
     _http_bridge_previous_response_owner_unavailable_error,
     _http_bridge_reconnect_connect_failure,
@@ -172,6 +166,7 @@ from app.modules.proxy._service.support import (
     _sleep_for_account_selection_recovery,
     _WebSocketRequestState,
     _WebSocketUpstreamControl,
+    reserved_account_ids,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -434,6 +429,12 @@ class _HTTPBridgeMixin(
         settings = _service_get_settings()
         request_scope_id = ensure_request_scope_id()
         api_key_id = api_key.id if api_key is not None else None
+        # Reuse takes the model Plan exemption from this request's key, never from a session's account snapshot.
+        exempt_ids = reserved_account_ids(api_key)
+        _http_bridge_compatible = partial(bridge_helpers._http_bridge_compatible, plan_exempt_account_ids=exempt_ids)
+        _http_bridge_parallel_fork_key = partial(
+            bridge_helpers._http_bridge_parallel_fork_key, plan_exempt_account_ids=exempt_ids
+        )
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         incoming_session_key, initial_session_key = _turn_keys(headers, api_key, key, session_header_fallback_key)
         original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(

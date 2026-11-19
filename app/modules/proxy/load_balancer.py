@@ -99,7 +99,7 @@ from app.modules.proxy._load_balancer.opportunistic_admission import (
     detached_runtime_snapshot,
     run_opportunistic_admission,
 )
-from app.modules.proxy._load_balancer.reserved_accounts import drop_foreign_reserved
+from app.modules.proxy._load_balancer.reserved_accounts import load_inputs_for_key
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     SelectionInputsProtocol,
@@ -152,16 +152,9 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     run_unbound_selection_path,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
-from app.modules.proxy.account_eligibility import (
-    account_access_token_expires_at,
-    all_accounts_require_reauthentication,
-)
+from app.modules.proxy.account_eligibility import account_access_token_expires_at, all_accounts_require_reauthentication
 from app.modules.proxy.affinity import _CodexSessionSource
-from app.modules.proxy.cap_partitioning import (
-    configured_account_concurrency_caps,
-    get_cap_partition,
-    partition_cap,
-)
+from app.modules.proxy.cap_partitioning import configured_account_concurrency_caps, get_cap_partition, partition_cap
 from app.modules.proxy.fair_share import (
     ApiKeyFairShareDenialError,
     FairShareDecision,
@@ -627,13 +620,14 @@ class LoadBalancer:
         resilience = resolve_resilience_toggles(dashboard_settings)
 
         async def load_unresolved_selection_inputs() -> _SelectionInputs:
-            selection_inputs = await self._load_selection_inputs(
+            selection_inputs = await load_inputs_for_key(
+                self._load_selection_inputs,
+                api_key_id,
                 model=model,
                 service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
             )
-            selection_inputs = drop_foreign_reserved(selection_inputs, api_key_id)
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even
                 # an already-empty routing pool must have its owner candidates
@@ -1174,6 +1168,7 @@ class LoadBalancer:
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
+        plan_exempt_api_key_id: str | None = None,
     ) -> _SelectionInputs:
         mapped_limit_name = _gated_limit_name_for_model(model)
         effective_limit_name = additional_limit_name or mapped_limit_name
@@ -1191,6 +1186,7 @@ class LoadBalancer:
             additional_limit_name,
             additional_quota_routing_policies_cache_key,
             None if account_ids is None else tuple(sorted(set(account_ids))),
+            plan_exempt_api_key_id,
         )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
@@ -1228,12 +1224,11 @@ class LoadBalancer:
             accounts = _selectable_accounts(scoped_accounts)
             pre_model_filter_accounts = accounts
             model_catalog_omitted_account_ids: frozenset[str] = frozenset()
+            plan_exempt_account_ids: frozenset[str] = frozenset()
             applied_service_tier: str | None = None
             if model and _mapped_model_has_registry_entry(model):
                 continuity_owner_candidates = _filter_accounts_for_model(
-                    scoped_accounts,
-                    model,
-                    service_tier=service_tier,
+                    scoped_accounts, model, service_tier=service_tier, plan_exempt_api_key_id=plan_exempt_api_key_id
                 )
                 canonical_quota_can_override_account_catalog = (
                     additional_limit_name is None and mapped_limit_name is not None
@@ -1243,10 +1238,12 @@ class LoadBalancer:
                     model,
                     service_tier=service_tier,
                     additional_quota_can_override_account_catalog=canonical_quota_can_override_account_catalog,
+                    plan_exempt_api_key_id=plan_exempt_api_key_id,
                 )
                 accounts = model_filter.accounts
                 general_model_account_ids = model_filter.general_model_account_ids
                 applied_service_tier = model_filter.applied_service_tier
+                plan_exempt_account_ids = model_filter.plan_exempt_account_ids
                 if canonical_quota_can_override_account_catalog and general_model_account_ids is not None:
                     model_catalog_omitted_account_ids = frozenset(
                         account.id for account in accounts if account.id not in general_model_account_ids
@@ -1396,9 +1393,9 @@ class LoadBalancer:
                     or (
                         model_allowed_plans is not None
                         and normalize_account_plan_type(account.plan_type) not in _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES
-                        and account_plan_matches_allowed(
-                            account.plan_type,
-                            model_allowed_plans,
+                        and (
+                            account_plan_matches_allowed(account.plan_type, model_allowed_plans)
+                            or account.id in plan_exempt_account_ids
                         )
                     )
                 )
@@ -2915,16 +2912,14 @@ def _usage_entry_is_recent_enough(recorded_at: datetime | None, *, now: float) -
 
 
 def _filter_accounts_for_model(
-    accounts: list[Account],
-    model: str,
-    *,
-    service_tier: str | None = None,
+    accounts: list[Account], model: str, *, service_tier: str | None = None, plan_exempt_api_key_id: str | None = None
 ) -> list[Account]:
     return _filter_accounts_for_model_impl(
         accounts,
         model,
         registry=get_model_registry(),
         service_tier=service_tier,
+        plan_exempt_api_key_id=plan_exempt_api_key_id,
     )
 
 
@@ -2934,6 +2929,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
     *,
     service_tier: str | None = None,
     additional_quota_can_override_account_catalog: bool = False,
+    plan_exempt_api_key_id: str | None = None,
 ) -> _ModelAccountFilterResult:
     return _filter_accounts_for_model_with_catalog_evidence_impl(
         accounts,
@@ -2941,6 +2937,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
         registry=get_model_registry(),
         service_tier=service_tier,
         additional_quota_can_override_account_catalog=additional_quota_can_override_account_catalog,
+        plan_exempt_api_key_id=plan_exempt_api_key_id,
     )
 
 
