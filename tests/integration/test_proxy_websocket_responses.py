@@ -162,7 +162,7 @@ def _stub_socket_account_availability(monkeypatch: pytest.MonkeyPatch) -> None:
     # These socket fakes have no persisted account and may emit response events
     # before send_text. Keep their admission check immediate; real database
     # exclusions and peer updates are covered in account_availability tests.
-    async def no_model_rejections(accounts, model):
+    async def no_model_rejections(accounts, model, api_key_id=None):
         return set()
 
     monkeypatch.setattr(websocket_mixin_module.model_admission, "rejected_model_account_ids", no_model_rejections)

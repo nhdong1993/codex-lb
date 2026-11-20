@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from pydantic import AfterValidator, Field, StringConstraints, TypeAdapter
 
 from app.core.plan_types import normalize_account_plan_type
+
+if TYPE_CHECKING:
+    from app.db.models import Account
 
 
 def _plan(value: str) -> str:
@@ -37,3 +40,11 @@ def parse_model_plan_policies(raw: str) -> ModelPlanPolicies:
 def model_plan_allowed(policies: ModelPlanPolicies, model: str | None, plan: str | None) -> bool:
     allowed = policies.get(model) if model is not None else None
     return allowed is None or normalize_account_plan_type(plan) in allowed
+
+
+def plan_policy_allows(
+    policies: ModelPlanPolicies, model: str | None, account: Account, plan_exempt_api_key_id: str | None
+) -> bool:
+    """Policy membership, or the requesting key's own reserved account (the owning-key exemption)."""
+    exempt = plan_exempt_api_key_id is not None and account.reserved_api_key_id == plan_exempt_api_key_id
+    return exempt or model_plan_allowed(policies, model, account.plan_type)

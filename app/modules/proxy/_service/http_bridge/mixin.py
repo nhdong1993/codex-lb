@@ -501,7 +501,7 @@ class _HTTPBridgeMixin(
             # Snapshot cached candidates before taking the registry lock. The
             # final submit check handles exclusions arriving during admission.
             model_excluded_ids = await model_admission.rejected_model_account_ids(
-                [cached.account for cached in self._http_bridge_sessions.values()], request_model
+                [cached.account for cached in self._http_bridge_sessions.values()], request_model, api_key_id
             )
             account_neutral_recovery = is_http_bridge_account_neutral_replay(
                 kind=key.affinity_kind,
@@ -1355,7 +1355,7 @@ class _HTTPBridgeMixin(
                 )
             if session_to_return_after_close is not None:
                 if session_to_return_after_close.account.id in await model_admission.rejected_model_account_ids(
-                    [session_to_return_after_close.account], request_model
+                    [session_to_return_after_close.account], request_model, api_key_id
                 ):
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 return session_to_return_after_close
@@ -1421,7 +1421,7 @@ class _HTTPBridgeMixin(
                 if session is None:
                     continue
                 model_excluded = session.account.id in await model_admission.rejected_model_account_ids(
-                    [session.account], request_model
+                    [session.account], request_model, api_key_id
                 )
                 if model_excluded and reuse._is_required_owner(
                     session, key, preferred_account_id, require_preferred_account, previous_response_id, reselect_owner

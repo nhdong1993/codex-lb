@@ -527,6 +527,16 @@ from app.modules.proxy.tool_call_dedupe import (
 from app.modules.proxy.websocket_input import WebSocketInputBuffer
 
 
+def _plan_exempt(request_state: _WebSocketRequestState) -> bool:
+    """Whether this turn may use the owning-key Plan exemption; not after its previous_response owner lookup missed."""
+    return request_state.previous_response_owner_lookup_outcome != "miss"
+
+
+def _plan_exempt_key_id(request_state: _WebSocketRequestState, api_key: ApiKeyData | None) -> str | None:
+    key = request_state.api_key or api_key
+    return key.id if key is not None and _plan_exempt(request_state) else None
+
+
 def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
@@ -2404,6 +2414,7 @@ class _WebSocketMixin:
                         preferred_account_id=account.id,
                         require_security_work_authorized=request_state.require_security_work_authorized,
                         fallback_on_preferred_account_unavailable=False,
+                        plan_exempt=_plan_exempt(request_state),
                     )
                     if ownership_selection.account is None:
                         await proxy._release_websocket_request_state_reservation(request_state)
@@ -2529,7 +2540,7 @@ class _WebSocketMixin:
                     required_owner_id = request_state.preferred_account_id
                     try:
                         model_excluded = account.id in await model_admission.rejected_model_account_ids(
-                            [account], request_state.model
+                            [account], request_state.model, _plan_exempt_key_id(request_state, api_key)
                         )
                     except ProxyResponseError as exc:
                         # Evidence lookup failed before dispatch. Only this
@@ -2760,7 +2771,9 @@ class _WebSocketMixin:
                         # Admission can await a peer's pause or rejection.
                         # Recheck model evidence after those waits as well.
                         model_excluded = account is not None and account.id in (
-                            await model_admission.rejected_model_account_ids([account], request_state.model)
+                            await model_admission.rejected_model_account_ids(
+                                [account], request_state.model, _plan_exempt_key_id(request_state, api_key)
+                            )
                         )
                         if account is not None and (is_account_routing_unavailable(account.id) or model_excluded):
                             async with pending_lock:
@@ -3653,6 +3666,7 @@ class _WebSocketMixin:
             preferred_account_id=account.id,
             require_security_work_authorized=request_state.require_security_work_authorized,
             fallback_on_preferred_account_unavailable=False,
+            plan_exempt=_plan_exempt(request_state),
         )
         await proxy._load_balancer.release_account_lease(selection.lease)
         selected_account = selection.account
@@ -4069,6 +4083,7 @@ class _WebSocketMixin:
                         request_state.request_usage_budget
                     ),
                     fallback_on_preferred_account_unavailable=not require_preferred_account,
+                    plan_exempt=_plan_exempt(request_state),
                 )
             except ProxyResponseError as exc:
                 if _facade()._is_proxy_budget_exhausted_error(exc):

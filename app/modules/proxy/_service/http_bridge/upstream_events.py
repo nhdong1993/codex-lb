@@ -3438,7 +3438,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                 async with session.pending_lock:
                     if status_request_state in session.pending_requests:
                         session.pending_requests.remove(status_request_state)
-                        session.queued_request_count = max(0, session.queued_request_count - 1)
+                        # A detached request already returned its queue slot.
+                        if _http_bridge_request_counts_against_queue(status_request_state):
+                            session.queued_request_count = max(0, session.queued_request_count - 1)
                 if is_http_bridge_account_neutral_replay(
                     kind=session.key.affinity_kind,
                     key=session.key.affinity_key,
@@ -3584,7 +3586,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     async with session.pending_lock:
                         if status_request_state in session.pending_requests:
                             session.pending_requests.remove(status_request_state)
-                            session.queued_request_count = max(0, session.queued_request_count - 1)
+                            # A request detached during the replay already returned its queue slot.
+                            if _http_bridge_request_counts_against_queue(status_request_state):
+                                session.queued_request_count = max(0, session.queued_request_count - 1)
                     status_request_state.error_http_status_override = 502
                     (
                         _downstream_text,
@@ -3640,7 +3644,9 @@ class _HTTPBridgeUpstreamEventsMixin:
             async with session.pending_lock:
                 if status_request_state in session.pending_requests:
                     session.pending_requests.remove(status_request_state)
-                    session.queued_request_count = max(0, session.queued_request_count - 1)
+                    # A request detached during the replay already returned its queue slot.
+                    if _http_bridge_request_counts_against_queue(status_request_state):
+                        session.queued_request_count = max(0, session.queued_request_count - 1)
             if replacement_session_selected:
                 # Reconnect may have committed the session to a replacement
                 # account before its replacement lease or send failed.  Never
@@ -3701,7 +3707,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                 async with session.pending_lock:
                     if status_request_state in session.pending_requests:
                         session.pending_requests.remove(status_request_state)
-                        session.queued_request_count = max(0, session.queued_request_count - 1)
+                        # A request detached during the replay already returned its queue slot.
+                        if _http_bridge_request_counts_against_queue(status_request_state):
+                            session.queued_request_count = max(0, session.queued_request_count - 1)
                 if staged:
                     # A busy create gate forwards the upstream terminal as-is;
                     # only a replay that was attempted and failed is rewritten.

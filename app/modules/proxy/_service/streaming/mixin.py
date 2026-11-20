@@ -40,14 +40,8 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
 from app.core.errors import synthetic_stream_failure_event as response_failed_event
-from app.core.openai.parsing import (
-    _LIFECYCLE_EVENT_TYPES,
-    classify_event_type,
-    parse_sse_event_payload,
-)
-from app.core.openai.requests import (
-    ResponsesRequest,
-)
+from app.core.openai.parsing import _LIFECYCLE_EVENT_TYPES, classify_event_type, parse_sse_event_payload
+from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -498,6 +492,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         preferred_account_id: str | None = None,
         tool_call_dedupe: _WebSocketUpstreamControl | None = None,
         enforce_openai_sdk_contract: bool = True,
+        plan_exempt: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         clock = clock_for(proxy)
@@ -575,7 +570,9 @@ class _StreamingMixin(_StreamingRetryMixin):
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
             attempt_started_at = clock.monotonic()
             latency_queue_ms = max(0, int((attempt_started_at - request_started_at) * 1000))
-            await model_admission.ensure_native_dispatch_allowed(account, model)
+            await model_admission.ensure_native_dispatch_allowed(
+                account, model, api_key.id if api_key and plan_exempt else None
+            )
             iterator = hold_capacity_replay_prelude(
                 _native_stream_iterator(
                     account,

@@ -24,7 +24,8 @@ if TYPE_CHECKING:
     from app.modules.proxy.load_balancer import SelectionInputs
 
 _AssignedAccountsKey = tuple[str, ...] | None
-_CacheKey = tuple[str | None, str | None, str | None, str, str, _AssignedAccountsKey]
+# The last element is the API key whose reserved accounts skip the model Plan policy (None: shared load).
+_CacheKey = tuple[str | None, str | None, str | None, str, str, _AssignedAccountsKey, str | None]
 
 
 @dataclass(slots=True)
@@ -54,6 +55,7 @@ class AccountSelectionCache:
         additional_quota_policies: dict[str, str],
         model_plan_policies: ModelPlanPolicies,
         account_ids: Collection[str] | None,
+        plan_exempt_api_key_id: str | None = None,
     ) -> _CacheKey:
         """Partition snapshots by all policy evidence, even before invalidation arrives."""
         return (
@@ -63,13 +65,14 @@ class AccountSelectionCache:
             json.dumps(additional_quota_policies, sort_keys=True, separators=(",", ":")),
             json.dumps(model_plan_policies, sort_keys=True, separators=(",", ":")),
             None if account_ids is None else tuple(sorted(set(account_ids))),
+            plan_exempt_api_key_id,
         )
 
     @property
     def generation(self) -> int:
         return self._generation
 
-    async def get(self, key: _CacheKey = (None, None, None, "", "", None)) -> SelectionInputs | None:
+    async def get(self, key: _CacheKey = (None, None, None, "", "", None, None)) -> SelectionInputs | None:
         if self._ttl_seconds == 0:
             return None
         entry = self._cache.get(key)
@@ -82,7 +85,7 @@ class AccountSelectionCache:
     async def set(
         self,
         data: SelectionInputs,
-        key: _CacheKey = (None, None, None, "", "", None),
+        key: _CacheKey = (None, None, None, "", "", None, None),
         *,
         generation: int | None = None,
     ) -> None:

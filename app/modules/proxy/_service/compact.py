@@ -906,6 +906,8 @@ class _CompactMixin:
         previous_response_id = getattr(payload, "previous_response_id", None)
         previous_response_preferred_account_id: str | None = None
         previous_response_lookup_session_id: str | None = None
+        # False when the previous_response_id owner lookup missed: the Plan exemption must not pick the owner.
+        plan_exempt = True
         if isinstance(previous_response_id, str) and previous_response_id.strip():
             previous_response_id = previous_response_id.strip()
             previous_response_lookup_session_id = _owner_lookup_session_id_from_headers(headers)
@@ -916,6 +918,7 @@ class _CompactMixin:
                 surface="compact",
             )
             if previous_response_preferred_account_id is None:
+                plan_exempt = False
                 selection_inputs = drop_foreign_reserved(
                     await proxy._load_balancer._load_selection_inputs(
                         model=payload.model,
@@ -1154,7 +1157,9 @@ class _CompactMixin:
                         )
                     create_lease = await proxy._get_work_admission().acquire_response_create(compact=True)
                     route = await proxy._resolve_upstream_route_for_account(target, operation="compact")
-                    await model_admission.ensure_native_dispatch_allowed(target, payload.model)
+                    await model_admission.ensure_native_dispatch_allowed(
+                        target, payload.model, api_key.id if api_key is not None and plan_exempt else None
+                    )
                     remaining_budget = _remaining_budget_seconds(deadline)
                     if remaining_budget <= 0:
                         logger.warning(
@@ -1305,6 +1310,7 @@ class _CompactMixin:
                     exclude_account_ids=excluded_account_ids,
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
+                    plan_exempt=plan_exempt,
                     lease_kind="response_create",
                     estimated_lease_tokens=estimated_lease_tokens,
                     fallback_on_preferred_account_unavailable=preferred_account_id is None,
@@ -1336,6 +1342,7 @@ class _CompactMixin:
                             exclude_account_ids=excluded_account_ids,
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=False,
+                            plan_exempt=plan_exempt,
                             lease_kind="response_create",
                             estimated_lease_tokens=estimated_lease_tokens,
                             fallback_on_preferred_account_unavailable=preferred_account_id is None,
@@ -1466,6 +1473,7 @@ class _CompactMixin:
                                 exclude_account_ids=excluded_account_ids,
                                 preferred_account_id=None,
                                 require_security_work_authorized=require_security_work_authorized,
+                                plan_exempt=plan_exempt,
                                 lease_kind="response_create",
                                 estimated_lease_tokens=estimated_lease_tokens,
                                 fallback_on_preferred_account_unavailable=True,

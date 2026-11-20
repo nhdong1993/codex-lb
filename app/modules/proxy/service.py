@@ -1743,6 +1743,7 @@ class ProxyService(
         fallback_on_preferred_account_unavailable: bool = True,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         redact_sensitive_details: bool = False,
+        plan_exempt: bool = True,
     ) -> AccountSelection:
         remaining_budget = self._remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
@@ -1918,6 +1919,7 @@ class ProxyService(
                         redact_sensitive_details=redact_sensitive_details,
                         allow_usage_exhaustion_error=not required_preferred_account,
                         api_key_id=api_key_id,
+                        plan_exempt=plan_exempt,
                         api_key_stream_fair_share_threshold_pct=api_key_fair_share_threshold_pct,
                     )
                     if preferred_selection.account is not None:
@@ -1980,6 +1982,7 @@ class ProxyService(
                     concurrency_caps=concurrency_caps,
                     redact_sensitive_details=redact_sensitive_details,
                     api_key_id=api_key_id,
+                    plan_exempt=plan_exempt,
                     api_key_stream_fair_share_threshold_pct=api_key_fair_share_threshold_pct,
                     routing_tunables=routing_tunables,
                 )

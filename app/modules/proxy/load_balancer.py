@@ -52,7 +52,7 @@ from app.core.metrics.prometheus import (
     stream_pool_capacity,
     stream_pool_inflight,
 )
-from app.core.model_plan_policy import model_plan_allowed
+from app.core.model_plan_policy import plan_policy_allows
 from app.core.openai.model_registry import get_model_registry
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
@@ -64,6 +64,7 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
 from app.modules.proxy import model_admission
+from app.modules.proxy._load_balancer import model_eligibility as _model_eligibility
 from app.modules.proxy._load_balancer.error_rate import (
     ErrorRateWeightingPolicy,
     error_rate_weight_multiplier,
@@ -82,15 +83,6 @@ from app.modules.proxy._load_balancer.model_eligibility import (
     _ModelAccountFilterResult,
     _normalize_model_id,  # noqa: F401
 )
-from app.modules.proxy._load_balancer.model_eligibility import (
-    _filter_accounts_for_model as _filter_accounts_for_model_impl,
-)
-from app.modules.proxy._load_balancer.model_eligibility import (
-    _filter_accounts_for_model_with_catalog_evidence as _filter_accounts_for_model_with_catalog_evidence_impl,
-)
-from app.modules.proxy._load_balancer.model_eligibility import (
-    _mapped_model_has_registry_entry as _mapped_model_has_registry_entry_impl,
-)
 from app.modules.proxy._load_balancer.opportunistic_admission import (
     OPPORTUNISTIC_BURN_WINDOW_CLOSED,
     OpportunisticAdmissionRequest,
@@ -98,7 +90,7 @@ from app.modules.proxy._load_balancer.opportunistic_admission import (
     detached_runtime_snapshot,
     run_opportunistic_admission,
 )
-from app.modules.proxy._load_balancer.reserved_accounts import drop_foreign_reserved
+from app.modules.proxy._load_balancer.reserved_accounts import load_inputs_for_key
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     SelectionInputsProtocol,
@@ -593,6 +585,7 @@ class LoadBalancer:
         redact_sensitive_details: bool = False,
         allow_usage_exhaustion_error: bool = True,
         api_key_id: str | None = None,
+        plan_exempt: bool = True,
         api_key_stream_fair_share_threshold_pct: int = 0,
         routing_tunables: RoutingTunables | None = None,
         dashboard_settings: object | None = None,
@@ -612,13 +605,15 @@ class LoadBalancer:
         resilience = resolve_resilience_toggles(dashboard_settings)
 
         async def load_unresolved_selection_inputs() -> _SelectionInputs:
-            selection_inputs = await self._load_selection_inputs(
+            selection_inputs = await load_inputs_for_key(
+                self._load_selection_inputs,
+                api_key_id,
+                exempt=plan_exempt,
                 model=model,
                 service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
             )
-            selection_inputs = drop_foreign_reserved(selection_inputs, api_key_id)
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even
                 # an already-empty routing pool must have its owner candidates
@@ -677,7 +672,8 @@ class LoadBalancer:
                         selection_inputs.quota_admitted_catalog_omission_account_ids
                     ),
                 )
-            rejected_ids = await model_admission.rejected_model_account_ids(selection_inputs.accounts, model)
+            exempt_to = api_key_id if plan_exempt else None
+            rejected_ids = await model_admission.rejected_model_account_ids(selection_inputs.accounts, model, exempt_to)
             blocked_ids = excluded_ids | rejected_ids
             if blocked_ids and selection_inputs.accounts:
                 filtered_accounts = [account for account in selection_inputs.accounts if account.id not in blocked_ids]
@@ -1158,17 +1154,19 @@ class LoadBalancer:
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
+        plan_exempt_api_key_id: str | None = None,
     ) -> _SelectionInputs:
         mapped_limit_name = _gated_limit_name_for_model(model)
         effective_limit_name = additional_limit_name or mapped_limit_name
         dashboard_settings, model_plan_policies = await model_admission.routing_policy_snapshot()
-        additional_quota_policies = (
+        quota_policies = (
             _parse_additional_quota_routing_policies(dashboard_settings.additional_quota_routing_policies_json)
             if effective_limit_name is not None
             else {}
         )
+        exempt = plan_exempt_api_key_id if model in model_plan_policies else None  # unmapped: share the baseline entry
         cache_key = self._selection_inputs_cache.key_for(
-            model, service_tier, additional_limit_name, additional_quota_policies, model_plan_policies, account_ids
+            model, service_tier, additional_limit_name, quota_policies, model_plan_policies, account_ids, exempt
         )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
@@ -1196,7 +1194,7 @@ class LoadBalancer:
             ignore_standard_quota_status = effective_limit_name is not None
             routing_policy_override = _additional_quota_routing_policy_override(
                 effective_limit_name,
-                additional_quota_policies,
+                quota_policies,
             )
             scoped_accounts = all_accounts
             if account_ids is not None:
@@ -1308,7 +1306,7 @@ class LoadBalancer:
             # Owner discovery and sticky mutation authority above must not shrink
             # with operator policy. Quota reauth fallback below can restore only
             # this restricted pool, never an excluded paid plan.
-            accounts = [a for a in accounts if model_plan_allowed(model_plan_policies, model, a.plan_type)]
+            accounts = [a for a in accounts if plan_policy_allows(model_plan_policies, model, a, exempt)]
             if effective_limit_name:
                 additional_quota_candidates = accounts
                 additional_filter = await self._filter_accounts_for_additional_limit(
@@ -2914,7 +2912,7 @@ def _filter_accounts_for_model(
     *,
     service_tier: str | None = None,
 ) -> list[Account]:
-    return _filter_accounts_for_model_impl(
+    return _model_eligibility._filter_accounts_for_model(
         accounts,
         model,
         registry=get_model_registry(),
@@ -2929,7 +2927,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
     service_tier: str | None = None,
     additional_quota_can_override_account_catalog: bool = False,
 ) -> _ModelAccountFilterResult:
-    return _filter_accounts_for_model_with_catalog_evidence_impl(
+    return _model_eligibility._filter_accounts_for_model_with_catalog_evidence(
         accounts,
         model,
         registry=get_model_registry(),
@@ -2943,7 +2941,7 @@ def _selectable_accounts(accounts: list[Account]) -> list[Account]:
 
 
 def _mapped_model_has_registry_entry(model: str | None) -> bool:
-    return _mapped_model_has_registry_entry_impl(model, registry=get_model_registry())
+    return _model_eligibility._mapped_model_has_registry_entry(model, registry=get_model_registry())
 
 
 def _first_not_none(

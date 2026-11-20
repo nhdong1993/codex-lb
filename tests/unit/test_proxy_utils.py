@@ -50772,7 +50772,8 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=0.0,
+        # Prewarm inherits the parent's deadline, so the parent must still be within its budget.
+        started_at=time.monotonic(),
         previous_response_id=None,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create"}',
@@ -57025,3 +57026,452 @@ async def test_process_upstream_websocket_text_routes_anonymous_output_to_create
     send_downstream.assert_awaited_once()
     assert send_downstream.await_args is not None
     assert send_downstream.await_args.kwargs["text"] == text
+
+
+async def _run_reserved_precreated_replay(
+    monkeypatch,
+    *,
+    rejected: bool,
+    detach_during_lookup: bool = False,
+    via_handler: bool = False,
+    retain_admission: bool = False,
+):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    reserved_account = _make_account("acc_bridge_retry_reserved")
+    reserved_account.reserved_api_key_id = "key-k"
+    upstream = AsyncMock()
+    lease = object()
+    release_lease = AsyncMock()
+    response_create_gate = asyncio.Semaphore(1)
+    await response_create_gate.acquire()
+    admission_gate = asyncio.Semaphore(0)
+    admission = AdmissionLease(admission_gate, stage="response_create", request_id="req_bridge_retry_reserved")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_retry_reserved",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=True,
+        response_create_gate=response_create_gate,
+        response_create_gate_acquired=True,
+        # A retained admission is kept across the replay; otherwise the replay reacquires one.
+        response_create_admission=admission if retain_admission else None,
+        response_create_admission_reacquire_required=not retain_admission,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"retry"}',
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-retry-reserved", "key-k"),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.6-sol",
+        account=reserved_account,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=response_create_gate,
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    cast(Any, session.upstream).archive_received = MagicMock()
+    if via_handler:
+        # Another submit holds a queue slot while it waits to be enqueued.
+        session.queued_request_count = 2
+    lookups: list[tuple[str | None, str | None]] = []
+
+    async def reconnect(target_session, **kwargs):
+        del kwargs
+        target_session.upstream = upstream
+        # The refresh may observe a released reservation; the recheck must not depend on this snapshot.
+        target_session.account.reserved_api_key_id = None
+
+    async def policy(accounts, model, api_key_id):
+        lookups.append((model, api_key_id))
+        if detach_during_lookup:
+            assert await service._detach_http_bridge_request(session, request_state=request_state) is True
+        return {accounts[0].id} if rejected else set()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", AsyncMock(return_value=lease))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+    monkeypatch.setattr(
+        service,
+        "_get_work_admission",
+        lambda: SimpleNamespace(acquire_response_create=AsyncMock(return_value=admission)),
+    )
+    monkeypatch.setattr("app.modules.proxy.model_admission.policy_rejected_account_ids", policy)
+
+    if via_handler:
+        rejection = {
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_request_error",
+                "message": "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+            },
+        }
+        await service._process_http_bridge_upstream_text(session, json.dumps(rejection, separators=(",", ":")))
+        return SimpleNamespace(
+            session=session,
+            upstream=upstream,
+            lookups=lookups,
+            request_state=request_state,
+            admission_gate=admission_gate,
+            lease_releases=sum(call.args == (lease,) for call in release_lease.await_args_list),
+        )
+    retried = await service._retry_http_bridge_precreated_request(session)
+    return retried, upstream, request_state, admission_gate, release_lease, lease, lookups
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("rejected", "detach"), [(False, False), (True, False), (False, True)])
+async def test_retry_http_bridge_precreated_request_rechecks_plan_policy_on_own_reserved_account(
+    monkeypatch, rejected, detach
+):
+    (
+        retried,
+        upstream,
+        request_state,
+        admission_gate,
+        release_lease,
+        lease,
+        lookups,
+    ) = await _run_reserved_precreated_replay(monkeypatch, rejected=rejected, detach_during_lookup=detach)
+
+    # The recheck uses the frame's own model and the session's key.
+    assert lookups == [("gpt-5.6-sol", "key-k")]
+    if not rejected and not detach:
+        assert retried is True
+        upstream.send_text.assert_awaited_once()
+        return
+    assert retried is False
+    upstream.send_text.assert_not_awaited()
+    assert request_state.response_create_admission is None
+    assert admission_gate._value == 1
+    assert sum(call.args == (lease,) for call in release_lease.await_args_list) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rejected", "detach", "retain_admission"),
+    [(False, True, False), (True, False, True), (False, True, True)],
+)
+async def test_model_rejection_replay_refusal_settles_through_the_handler(
+    monkeypatch, rejected, detach, retain_admission
+):
+    run = await _run_reserved_precreated_replay(
+        monkeypatch,
+        rejected=rejected,
+        detach_during_lookup=detach,
+        via_handler=True,
+        retain_admission=retain_admission,
+    )
+
+    assert run.lookups == [("gpt-5.6-sol", "key-k")]
+    run.upstream.send_text.assert_not_awaited()
+    assert not run.session.pending_requests
+    # The other submit keeps its slot.
+    assert run.session.queued_request_count == 1
+    # Admission (retained or reacquired) and the replacement lease are each released exactly once.
+    assert run.request_state.response_create_admission is None
+    assert run.admission_gate._value == 1
+    assert run.lease_releases == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome", ["rejected", "detached", "expired", "cancelled", "scope_cancelled", "cancel_during_rollback", "allowed"]
+)
+async def test_http_bridge_security_retry_rechecks_after_the_operation_re_fence(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected_account = _make_account("acc_bridge_security_plan_rejected")
+    authorized_account = _make_account("acc_bridge_security_plan_authorized")
+    authorized_account.security_work_authorized = True
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_security_plan_refusal",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + (0.05 if outcome == "expired" else 60.0),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.1","input":[]}',
+        operation_registered=True,
+        operation_id="op-security-plan",
+        operation_fingerprint="fp-security-plan",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "security-plan-refusal", "key-k"),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=rejected_account,
+        upstream=cast(proxy_service.UpstreamWebSocket, SimpleNamespace()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        # Another submit holds a queue slot while it waits to be enqueued.
+        queued_request_count=2,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+        durable_session_id="durable-security-plan",
+        durable_owner_epoch=1,
+    )
+    lease = object()
+    release_lease = AsyncMock()
+    send = AsyncMock()
+    retry_task: asyncio.Task[bool] | None = None
+    scope = anyio.CancelScope()
+
+    async def update_operation(**kwargs):
+        update_states.append(kwargs["state"])
+        if outcome == "cancel_during_rollback":
+            # The caller is cancelled while the rollback is in flight.
+            assert retry_task is not None
+            retry_task.cancel()
+            await asyncio.sleep(0.01)
+        return True
+
+    update_states: list[str] = []
+
+    async def record_operation(**_kwargs):
+        # The state that permitted the replay changes during the durable write.
+        if outcome == "detached":
+            assert await service._detach_http_bridge_request(session, request_state=request_state) is True
+        elif outcome == "expired":
+            await asyncio.sleep(0.1)
+        return SimpleNamespace(state="submitted")
+
+    async def fake_reconnect(target_session, **_kwargs):
+        target_session.account = authorized_account
+
+    async def policy(accounts, model, api_key_id):
+        assert (model, api_key_id) == ("gpt-5.1", "key-k")
+        if outcome == "cancelled":
+            raise asyncio.CancelledError
+        if outcome == "scope_cancelled":
+            scope.cancel()
+            await asyncio.sleep(1)
+        return {accounts[0].id} if outcome in {"rejected", "cancel_during_rollback"} else set()
+
+    monkeypatch.setattr(
+        service,
+        "_durable_bridge",
+        SimpleNamespace(
+            record_operation=AsyncMock(side_effect=record_operation),
+            update_operation=AsyncMock(side_effect=update_operation),
+        ),
+    )
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", fake_reconnect)
+    monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", AsyncMock(return_value=lease))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", AsyncMock())
+    monkeypatch.setattr(service, "_http_bridge_text_with_account_installation_id", lambda _s, _r, text: text)
+    monkeypatch.setattr(proxy_http_bridge_request_submit, "_send_http_bridge_request_text_with_archive_id", send)
+    monkeypatch.setattr("app.modules.proxy.model_admission.policy_rejected_account_ids", policy)
+
+    if outcome == "allowed":
+        assert await service._retry_http_bridge_security_work_request(session, request_state)
+        send.assert_awaited_once()
+        assert update_states == []
+        return
+    if outcome in {"cancelled", "cancel_during_rollback"}:
+        retry_task = asyncio.create_task(service._retry_http_bridge_security_work_request(session, request_state))
+        with pytest.raises(asyncio.CancelledError):
+            await retry_task
+    elif outcome == "scope_cancelled":
+        with scope:
+            await service._retry_http_bridge_security_work_request(session, request_state)
+        assert scope.cancelled_caught
+    else:
+        assert not await service._retry_http_bridge_security_work_request(session, request_state)
+
+    send.assert_not_awaited()
+    # The rollback finished despite any cancellation: the re-fenced operation is marked failed,
+    # the request is removed, the other submit keeps its slot, and the replacement lease is returned once.
+    assert update_states == ["failed"]
+    assert list(session.pending_requests) == []
+    assert session.queued_request_count == 1
+    assert sum(call.args == (lease,) for call in release_lease.await_args_list) == 1
+    assert request_state.account_response_create_lease is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["rejected", "detached"])
+async def test_http_bridge_keyed_auth_replay_refusal_settles_through_the_handler(monkeypatch, outcome):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_keyed_auth_replay")
+    request_text = '{"type":"response.create","model":"gpt-5.1","input":"auth replay"}'
+    retry_upstream = AsyncMock()
+
+    async def reconnect(target_session, **_kwargs):
+        target_session.upstream = retry_upstream
+        target_session.upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_keyed_auth_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text=request_text,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-keyed-auth-replay", "key-k"),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=account,
+        upstream=cast(proxy_service.UpstreamWebSocket, AsyncMock()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        # Another submit holds a queue slot while it waits to be enqueued.
+        queued_request_count=2,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    cast(Any, session.upstream).archive_received = MagicMock()
+    lookups: list[tuple[str | None, str | None]] = []
+
+    async def policy(accounts, model, api_key_id):
+        lookups.append((model, api_key_id))
+        if outcome == "detached":
+            assert await service._detach_http_bridge_request(session, request_state=request_state) is True
+            return set()
+        return {accounts[0].id}
+
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", AsyncMock())
+    monkeypatch.setattr("app.modules.proxy.model_admission.policy_rejected_account_ids", policy)
+    token_invalidated_text = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "code": "token_invalidated",
+                "type": "invalid_request_error",
+                "message": "Your authentication token has been invalidated. Please try signing in again.",
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, token_invalidated_text)
+
+    assert lookups == [("gpt-5.1", "key-k")]
+    retry_upstream.send_text.assert_not_awaited()
+    assert list(session.pending_requests) == []
+    # The other submit keeps its slot.
+    assert session.queued_request_count == 1
+    assert request_state.account_response_create_lease is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, "at_lookup", "during_retirement", "fenced_during_retirement"])
+async def test_http_bridge_security_retry_refusal_retires_from_the_reader_without_cancelling_it(monkeypatch, cancelled):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    authorized_account = _make_account("acc_bridge_security_reader_authorized")
+    authorized_account.security_work_authorized = True
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_security_reader_refusal",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.1","input":[]}',
+    )
+    replacement_upstream = AsyncMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "security-reader-refusal", "key-k"),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_security_reader_rejected"),
+        upstream=cast(proxy_service.UpstreamWebSocket, AsyncMock()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    service._http_bridge_sessions[session.key] = session
+
+    async def fake_reconnect(target_session, **_kwargs):
+        target_session.account = authorized_account
+        target_session.upstream = replacement_upstream
+
+    async def rejecting_policy(accounts, model, api_key_id):
+        if cancelled == "at_lookup":
+            raise asyncio.CancelledError
+        return {accounts[0].id}
+
+    original_retire = service._retire_http_bridge_after_drain_if_ready
+    retire_calls = 0
+
+    async def retire(target_session, **kwargs):
+        nonlocal retire_calls
+        retire_calls += 1
+        if cancelled in {"during_retirement", "fenced_during_retirement"} and retire_calls == 1:
+            # A direct Task.cancel() reaches the reader while it is retiring the drained replacement; in the fenced
+            # case a sibling has also marked the session closed without any task owning the socket close.
+            if cancelled == "fenced_during_retirement":
+                target_session.closed = True
+            current = asyncio.current_task()
+            assert current is not None
+            current.cancel()
+            await asyncio.sleep(0)
+        return await original_retire(target_session, **kwargs)
+
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
+
+    send = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", fake_reconnect)
+    monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", AsyncMock(return_value=object()))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+    monkeypatch.setattr(proxy_http_bridge_request_submit, "_send_http_bridge_request_text_with_archive_id", send)
+    monkeypatch.setattr("app.modules.proxy.model_admission.policy_rejected_account_ids", rejecting_policy)
+
+    async def reader() -> bool:
+        # The retry runs in the session's upstream reader; real retirement must recognise it.
+        session.upstream_reader = asyncio.current_task()
+        return await service._retry_http_bridge_security_work_request(session, request_state)
+
+    reader_task = asyncio.create_task(reader())
+
+    if cancelled:
+        # The cancellation propagates, after the drained replacement was retired from this reader.
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(reader_task, timeout=5.0)
+    else:
+        assert await asyncio.wait_for(reader_task, timeout=5.0) is False
+    send.assert_not_awaited()
+    assert list(session.pending_requests) == []
+    assert session.queued_request_count == 0
+    assert session.upstream_control.retire_after_drain is True
+    assert replacement_upstream.close.await_count == 1

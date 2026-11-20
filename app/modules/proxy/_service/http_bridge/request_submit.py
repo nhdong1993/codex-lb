@@ -11,6 +11,8 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
 
+import anyio
+
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import (  # noqa: F401
@@ -255,6 +257,47 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
+
+
+async def _http_bridge_policy_refused(session: "_HTTPBridgeSession", model: str | None) -> bool:
+    # Only a keyed session can be sending through the owning-key Plan exemption; the reservation is read from the
+    # current account row, never from the session's (possibly refreshed) account snapshot. Keyless sessions keep
+    # their existing path.
+    api_key_id = session.key.api_key_id
+    if api_key_id is None:
+        return False
+    return session.account.id in await model_admission.policy_rejected_account_ids([session.account], model, api_key_id)
+
+
+def _http_bridge_deadline(request_state: _WebSocketRequestState) -> float:
+    deadline = request_state.bridge_request_deadline
+    if deadline is None:
+        deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
+    return deadline
+
+
+async def _http_bridge_resend_refusal(
+    session: "_HTTPBridgeSession", request_state: _WebSocketRequestState, *, clock: Clock
+) -> ProxyResponseError | None:
+    """Gate a bridge resend after its waits: Plan policy for the frame's own model first, then consumer and deadline.
+
+    The policy read is the last await before the caller's send: the checks after it are synchronous, so no
+    reservation release or Plan change can land between this read and the send decision.
+    """
+    if session.key.api_key_id is None:
+        return None
+    if await _http_bridge_policy_refused(session, request_state.model):
+        return ProxyResponseError(
+            503, openai_error("upstream_unavailable", "Account is unavailable for this model; retry later.")
+        )
+    attached = (
+        request_state in session.pending_requests
+        and request_state.event_queue is not None
+        and not request_state.draining_until_terminal
+    )
+    if not attached or clock.monotonic() >= _http_bridge_deadline(request_state):
+        return ProxyResponseError(502, openai_error("upstream_request_timeout", "Proxy request budget exhausted"))
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2329,7 +2372,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     # Remain on the proven pre-dispatch cleanup path: raising
                     # inside the send try would retire accepted siblings too.
                     if session.account.id in await model_admission.rejected_model_account_ids(
-                        [session.account], request_state.model
+                        [session.account], request_state.model, session.key.api_key_id
                     ):
                         if (
                             request_state.file_required_preferred_account
@@ -2619,6 +2662,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 transport=_REQUEST_TRANSPORT_HTTP,
                 request_text=warmup_text,
                 skip_request_log=True,
+                bridge_request_deadline=(prewarm_deadline := _http_bridge_deadline(request_state)),
             )
             gate_acquired = False
             request_enqueued = False
@@ -2670,7 +2714,31 @@ class _HTTPBridgeRequestSubmitMixin:
                         gate_acquired = False
                         return
                     async with session.pending_lock:
-                        session.pending_requests.append(warmup_state)
+                        # The Plan read for the frame's own model is the last await before enqueue (held under this
+                        # lock so no wait follows it). Retirement or replacement during the read, or an expired
+                        # parent, also skip the (optional) warmup; the registry read is synchronous.
+                        skip = (
+                            await _http_bridge_policy_refused(session, warmup_state.model)
+                            or session.closed
+                            or (
+                                http_bridge_sessions is not None
+                                and http_bridge_sessions.get(session.key) is not session
+                            )
+                            or clock.monotonic() >= prewarm_deadline
+                        )
+                        if not skip:
+                            session.pending_requests.append(warmup_state)
+                    if skip:
+                        session.prewarmed = False
+                        await self._cleanup_http_bridge_submit_interruption(
+                            session,
+                            request_state=warmup_state,
+                            gate_acquired=gate_acquired,
+                            request_enqueued=request_enqueued,
+                            counted_in_queue=False,
+                        )
+                        gate_acquired = False
+                        return
                     request_enqueued = True
                     warmup_send_started = True
                     await _send_http_bridge_request_text_with_archive_id(
@@ -4287,6 +4355,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.response_create_admission = None
                     await self._release_request_state_account_response_create_lease(request_state)
                     return False
+            if await _http_bridge_resend_refusal(session, request_state, clock=clock) is not None:
+                if enforce_capacity_retry_deadline and request_state.response_create_admission is not None:
+                    request_state.response_create_admission.release()
+                    request_state.response_create_admission = None
+                await self._release_request_state_account_response_create_lease(request_state)
+                return False
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text, clock=clock)
             session.last_used_at = clock.monotonic()
@@ -4401,6 +4475,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 ),
                 require_preferred_account=bound_to_current_account,
             )
+            refusal = await _http_bridge_resend_refusal(session, request_state, clock=clock)
+            if refusal is not None:
+                raise refusal
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text, clock=clock)
             session.last_used_at = clock.monotonic()
@@ -4513,6 +4590,7 @@ class _HTTPBridgeRequestSubmitMixin:
         reconnected = False
         operation_rebound_for_retry = False
         security_retry_send_started = False
+        cancelled_before_send: asyncio.CancelledError | None = None
 
         def mark_security_retry_send_started() -> None:
             nonlocal security_retry_send_started
@@ -4588,6 +4666,16 @@ class _HTTPBridgeRequestSubmitMixin:
                         ),
                     )
                 operation_rebound_for_retry = True
+            # Last check before send, after the durable writes; a cancellation here settles like a refusal.
+            try:
+                refusal = await _http_bridge_resend_refusal(session, request_state, clock=clock)
+            except asyncio.CancelledError as cancelled:
+                cancelled_before_send = cancelled
+                refusal = ProxyResponseError(
+                    502, openai_error("upstream_request_timeout", "Request cancelled before resend")
+                )
+            if refusal is not None:
+                raise refusal
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
             await _send_http_bridge_request_text_with_archive_id(
                 session,
@@ -4602,36 +4690,10 @@ class _HTTPBridgeRequestSubmitMixin:
             raise
         except Exception as exc:
             logger.warning("HTTP bridge security-work retry failed", exc_info=True)
-            if (
-                operation_rebound_for_retry
-                and not security_retry_send_started
-                and request_state.operation_id is not None
-                and session.durable_session_id is not None
-                and session.durable_owner_epoch is not None
-            ):
-                update_operation = getattr(self._durable_bridge, "update_operation", None)
-                if callable(update_operation):
-                    try:
-                        restored = await update_operation(
-                            operation_id=request_state.operation_id,
-                            session_id=session.durable_session_id,
-                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                            owner_epoch=session.durable_owner_epoch,
-                            state="failed",
-                        )
-                        if not restored:
-                            logger.info(
-                                "HTTP bridge security retry failed to restore operation fence operation_id=%s",
-                                request_state.operation_id,
-                            )
-                    except Exception:
-                        logger.warning(
-                            "Failed to restore HTTP bridge security retry operation operation_id=%s",
-                            request_state.operation_id,
-                            exc_info=True,
-                        )
-            if isinstance(exc, ProxyResponseError):
-                error = _parse_openai_error(exc.payload)
+            failure = exc
+
+            if isinstance(failure, ProxyResponseError):
+                error = _parse_openai_error(failure.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)
                 if code == _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE and request_state.event_queue is not None:
                     await request_state.event_queue.put(
@@ -4644,10 +4706,6 @@ class _HTTPBridgeRequestSubmitMixin:
                             )
                         )
                     )
-            async with session.pending_lock:
-                if request_state in session.pending_requests:
-                    session.pending_requests.remove(request_state)
-                    session.queued_request_count = max(0, session.queued_request_count - 1)
             if reconnected:
                 # Ownership and the replacement socket were already swapped,
                 # but response.create never reached that socket.  Retire the
@@ -4655,8 +4713,71 @@ class _HTTPBridgeRequestSubmitMixin:
                 # rebound to a turn that was never submitted.
                 session.upstream_control.reconnect_requested = True
                 session.upstream_control.retire_after_drain = True
-                await self._retire_http_bridge_after_drain_if_ready(session)
-            else:
+
+            async def settle_unsent_retry() -> None:
+                if (
+                    operation_rebound_for_retry
+                    and not security_retry_send_started
+                    and request_state.operation_id is not None
+                    and session.durable_session_id is not None
+                    and session.durable_owner_epoch is not None
+                ):
+                    update_operation = getattr(self._durable_bridge, "update_operation", None)
+                    if callable(update_operation):
+                        try:
+                            restored = await update_operation(
+                                operation_id=request_state.operation_id,
+                                session_id=session.durable_session_id,
+                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                owner_epoch=session.durable_owner_epoch,
+                                state="failed",
+                            )
+                            if not restored:
+                                logger.info(
+                                    "HTTP bridge security retry failed to restore operation fence operation_id=%s",
+                                    request_state.operation_id,
+                                )
+                        except Exception:
+                            logger.warning(
+                                "Failed to restore HTTP bridge security retry operation operation_id=%s",
+                                request_state.operation_id,
+                                exc_info=True,
+                            )
+                async with session.pending_lock:
+                    if request_state in session.pending_requests:
+                        session.pending_requests.remove(request_state)
+                        # A detached request already returned its queue slot.
+                        if _http_bridge_request_counts_against_queue(request_state):
+                            session.queued_request_count = max(0, session.queued_request_count - 1)
+                if not security_retry_send_started:
+                    # The unsent retry owns its replacement lease (a cancelled caller never returns it).
+                    await self._release_request_state_account_response_create_lease(request_state)
+
+            # Settle the operation, queue slot and lease as one owned step a caller cancellation cannot cut short.
+            # Retirement stays in this (reader) task so the close path recognises its own reader.
+            _, cancellation = await _await_task_deferring_cancellation(
+                scheduler_for(self).create_task(settle_unsent_retry())
+            )
+            if reconnected:
+                # Retire from this reader (self-close needs its identity) even when cancelled: a drained replacement
+                # has no later turn to retire it. A cancellation arriving during retirement is deferred, then raised.
+                with anyio.CancelScope(shield=True):
+                    while True:
+                        try:
+                            await self._retire_http_bridge_after_drain_if_ready(session)
+                            break
+                        except asyncio.CancelledError as exc:
+                            cancellation = cancellation or exc
+                            close_task = session.resource_close_task
+                            if close_task is not None and (
+                                not close_task.done() or (not close_task.cancelled() and close_task.exception() is None)
+                            ):
+                                break  # a close task owns the socket; it finishes on its own path
+            if cancelled_before_send is not None:
+                raise cancelled_before_send
+            if cancellation is not None:
+                raise cancellation
+            if not reconnected:
                 request_state.replay_count = previous_replay_count
                 request_state.response_id = previous_response_id
                 request_state.response_event_count = previous_response_event_count

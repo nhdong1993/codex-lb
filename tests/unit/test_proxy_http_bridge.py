@@ -48639,3 +48639,86 @@ def test_stream_http_responses_forwards_codex_lb_credential_not_client_login(
     # Owner replicas re-authenticate this value, so it must be the codex-lb key.
     assert captured["authorization"] == "Bearer sk-clb-key"
     assert not {key.lower() for key in captured["filtered"]} & {"authorization", "x-codex-lb-api-key"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("budget_seconds", "slow_step", "sends"),
+    [
+        (60.0, "lookup", 1),
+        (0.05, "lookup", 0),
+        (60.0, "lock", 1),
+        (0.05, "lock", 0),
+        (60.0, "release", 0),
+        (60.0, "retire", 0),
+    ],
+)
+async def test_prewarm_does_not_send_when_its_waits_make_it_stale(
+    monkeypatch: pytest.MonkeyPatch, budget_seconds: float, slow_step: str, sends: int
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "prewarm-deadline", "key-k")
+    send_text = AsyncMock()
+    session = _make_bridge_session(key=key)
+    session.codex_session = True
+    session.prewarm_lock = anyio.Lock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    service._http_bridge_sessions[key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-deadline",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + budget_seconds,
+        transport="http",
+    )
+    lookups: list[tuple[str | None, str | None]] = []
+
+    lock_held = asyncio.Event()
+    released = asyncio.Event()
+    holders: list[asyncio.Task[None]] = []
+
+    async def hold_lifecycle_lock() -> None:
+        # Another task holds the lifecycle lock while the warmup waits for it: long enough to outlive a short
+        # deadline ("lock"), or releasing the reservation before it lets go ("release").
+        async with session.lifecycle_lock:
+            lock_held.set()
+            await asyncio.sleep(0.1 if slow_step == "lock" else 0.05)
+            if slow_step == "release":
+                released.set()
+
+    async def slow_allowed_policy(accounts, model, api_key_id):
+        lookups.append((model, api_key_id))
+        if slow_step == "lookup":
+            await asyncio.sleep(0.1)
+        if slow_step == "retire":
+            # Account invalidation retires the session (registry detach + closed) during the allowed read.
+            service._http_bridge_sessions.pop(key, None)
+            session.closed = True
+        return {accounts[0].id} if released.is_set() else set()
+
+    if slow_step in {"lock", "release"}:
+        holders.append(asyncio.create_task(hold_lifecycle_lock()))
+        await lock_held.wait()
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True),
+    )
+    monkeypatch.setattr(http_bridge_request_submit_module, "_prewarm_response_timeout_seconds", lambda: 0.001)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", AsyncMock())
+    monkeypatch.setattr("app.modules.proxy.model_admission.policy_rejected_account_ids", slow_allowed_policy)
+
+    await service._maybe_prewarm_http_bridge_session(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    )
+
+    await asyncio.gather(*holders)
+    assert lookups == [("gpt-5.6-sol", "key-k")]
+    assert send_text.await_count == sends
+    assert not session.pending_requests

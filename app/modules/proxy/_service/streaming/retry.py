@@ -485,6 +485,8 @@ class _StreamingRetryMixin:
         current_account_lease: AccountLease | None = None
         last_security_work_retry_error: _RetryableStreamError | None = None
         excluded_account_ids: set[str] = set()
+        # False when a previous_response_id owner lookup missed: the owning-key Plan exemption must not pick the owner.
+        plan_exempt = True
         transient_failed_account_id: str | None = None
         hard_affinity_same_owner_retry_attempted = False
         # One cross-account replay of an output-free capacity terminal per
@@ -948,6 +950,7 @@ class _StreamingRetryMixin:
                     client_ip=client_ip,
                     tool_call_dedupe=tool_call_dedupe,
                     enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    plan_exempt=plan_exempt,
                 )
                 try:
                     try:
@@ -1290,6 +1293,7 @@ class _StreamingRetryMixin:
                 # soft prompt-cache affinity key. A different account may have a
                 # warmer cache, but it cannot safely resolve the stored response.
                 if preferred_account_id is None:
+                    plan_exempt = False
                     selection_inputs = drop_foreign_reserved(
                         await proxy._load_balancer._load_selection_inputs(
                             model=payload.model,
@@ -1397,6 +1401,7 @@ class _StreamingRetryMixin:
                             exclude_account_ids=excluded_account_ids,
                             preferred_account_id=effective_preferred_account_id,
                             require_security_work_authorized=require_security_work_authorized,
+                            plan_exempt=plan_exempt,
                             lease_kind="stream",
                             estimated_lease_tokens=estimated_lease_tokens,
                             # Keep stored-object and file ownership strict. The
@@ -2230,6 +2235,7 @@ class _StreamingRetryMixin:
                                 request_id,
                                 allow_retry_flag,
                                 request_started_at=start,
+                                plan_exempt=plan_exempt,
                                 # An account-bound payload (``register_payload_owner``,
                                 # e.g. encrypted reasoning items) is pinned to this
                                 # account once dispatched, so it can never move.

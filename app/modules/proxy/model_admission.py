@@ -19,7 +19,7 @@ class NativeModelAdmissionError(ProxyResponseError):
     """Unsent native HTTP work: never an upstream retry or health signal."""
 
 
-async def ensure_native_dispatch_allowed(account: Account, model: str | None) -> None:
+async def ensure_native_dispatch_allowed(account: Account, model: str | None, api_key_id: str | None = None) -> None:
     """Recheck the effective Plan policy and persisted plan after every admission wait.
 
     Unconfigured models keep their existing dispatch path: no extra lookup, and
@@ -27,7 +27,7 @@ async def ensure_native_dispatch_allowed(account: Account, model: str | None) ->
     """
     try:
         _, policies = await routing_policy_snapshot()
-        rejected = await _plan_policy_rejected_ids(policies, [account], model)
+        rejected = await _plan_policy_rejected_ids(policies, [account], model, api_key_id)
     except ProxyResponseError as exc:
         raise NativeModelAdmissionError(exc.status_code, exc.payload, failure_phase="admission") from exc
     if rejected:
@@ -38,13 +38,21 @@ async def ensure_native_dispatch_allowed(account: Account, model: str | None) ->
         )
 
 
-async def rejected_model_account_ids(accounts: list[Account], model: str | None) -> set[str]:
+async def rejected_model_account_ids(
+    accounts: list[Account], model: str | None, api_key_id: str | None = None
+) -> set[str]:
     try:
         _, policies = await routing_policy_snapshot()
         rejected = await plan_checks.rejected_model_account_ids(accounts, model)
     except Exception as exc:
         raise _lookup_failure(exc) from exc
-    return rejected | await _plan_policy_rejected_ids(policies, accounts, model)
+    return rejected | await _plan_policy_rejected_ids(policies, accounts, model, api_key_id)
+
+
+async def policy_rejected_account_ids(accounts: list[Account], model: str | None, api_key_id: str | None) -> set[str]:
+    """Operator Plan policy only (no plan-check evidence): the recheck for bridge resends after a wait."""
+    _, policies = await routing_policy_snapshot()
+    return await _plan_policy_rejected_ids(policies, accounts, model, api_key_id)
 
 
 async def routing_policy_snapshot() -> tuple[DashboardSettings, ModelPlanPolicies]:
@@ -59,7 +67,7 @@ async def routing_policy_snapshot() -> tuple[DashboardSettings, ModelPlanPolicie
 
 
 async def _plan_policy_rejected_ids(
-    policies: ModelPlanPolicies, accounts: list[Account], model: str | None
+    policies: ModelPlanPolicies, accounts: list[Account], model: str | None, api_key_id: str | None = None
 ) -> set[str]:
     if model not in policies or not accounts:
         return set()
@@ -69,12 +77,24 @@ async def _plan_policy_rejected_ids(
         # also fail closed. No entitlement-equivalence widening here.
         async with get_background_session() as session:
             rows = await session.execute(
-                select(Account.id, Account.plan_type).where(Account.id.in_([a.id for a in accounts]))
+                select(Account.id, Account.plan_type, Account.reserved_api_key_id).where(
+                    Account.id.in_([a.id for a in accounts])
+                )
             )
-            plans = {account_id: plan for account_id, plan in rows.all()}
+            current = {account_id: (plan, owner) for account_id, plan, owner in rows.all()}
     except Exception as exc:
         raise _lookup_failure(exc) from exc
-    return {a.id for a in accounts if not model_plan_allowed(policies, model, plans.get(a.id))}
+    return {a.id for a in accounts if not _plan_admitted(policies, model, current.get(a.id), api_key_id)}
+
+
+def _plan_admitted(
+    policies: ModelPlanPolicies, model: str | None, row: tuple[str, str | None] | None, api_key_id: str | None
+) -> bool:
+    if row is None:
+        return False
+    plan, owner = row
+    # The requesting key's own reserved account is exempt; ownership comes from the same row read.
+    return model_plan_allowed(policies, model, plan) or (api_key_id is not None and owner == api_key_id)
 
 
 def _lookup_failure(exc: Exception) -> ProxyResponseError:
