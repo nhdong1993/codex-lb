@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -1313,6 +1314,82 @@ async def test_reconcile_recoverable_account_statuses_keeps_rate_limited_when_re
     assert account.blocked_at == blocked_at
 
 
+def _id_accounts_repo(
+    accounts: list[Account],
+    *,
+    calls: list[tuple[object, ...]] | None = None,
+    hydrated: dict[str, Account | None] | None = None,
+    reloaded: dict[str, Account] | None = None,
+    stagger_ids: list[str] | None = None,
+    stagger_error: Exception | None = None,
+    on_list_ids: Callable[[], Awaitable[None]] | None = None,
+) -> type:
+    """Fake AccountsRepository exposing the ID-only rotation API the scheduler uses."""
+    by_id = {account.id: account for account in accounts}
+    overrides = hydrated or {}
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_account_ids(self, *, excluded_statuses: Collection[AccountStatus] = ()) -> list[str]:
+            if calls is not None:
+                calls.append(("list_account_ids", tuple(excluded_statuses)))
+            if on_list_ids is not None:
+                await on_list_ids()
+            return [account.id for account in accounts if account.status not in excluded_statuses]
+
+        async def list_accounts_by_ids(
+            self,
+            account_ids: list[str],
+            *,
+            refresh_existing: bool = False,
+        ) -> list[Account]:
+            if calls is not None:
+                calls.append(("list_accounts_by_ids", tuple(account_ids), refresh_existing))
+            source = {**overrides, **(reloaded or {})} if refresh_existing else overrides
+            loaded = [
+                source[account_id] if account_id in source else by_id.get(account_id) for account_id in account_ids
+            ]
+            return [account for account in loaded if account is not None]
+
+        async def list_limit_warmup_stagger_account_ids(
+            self,
+            *,
+            selected_account_id: str,
+            selected_status: AccountStatus | None,
+            selected_plan_type: str | None,
+        ) -> list[str]:
+            if calls is not None:
+                calls.append(("stagger", selected_account_id, selected_status, selected_plan_type))
+            if stagger_error is not None:
+                raise stagger_error
+            return list(stagger_ids or [])
+
+    return _AccountsRepo
+
+
+async def _cancel_and_wait(task: asyncio.Task[Any]) -> None:
+    """Never leave a scheduler task running past the test, whatever the exit path."""
+    if not task.done():
+        task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+
+
+async def _wait_for_event_or_task(event: asyncio.Event, task: asyncio.Task[Any]) -> None:
+    """Wait until ``event`` fires; fail at once if ``task`` ends first instead of hanging."""
+    waiter = asyncio.create_task(event.wait())
+    try:
+        await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        assert event.is_set(), f"task finished without signalling: {task.result() if task.done() else None!r}"
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await waiter
+
+
 @pytest.mark.asyncio
 async def test_refresh_once_closes_read_session_before_usage_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     account = _make_account("acc_scheduler", status=AccountStatus.ACTIVE)
@@ -1337,12 +1414,7 @@ async def test_refresh_once_closes_read_session_before_usage_fetch(monkeypatch: 
             assert account_ids == [account.id]
             return {}
 
-    class _AccountsRepo:
-        def __init__(self, _session: object) -> None:
-            pass
-
-        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
-            return [account]
+    _AccountsRepo = _id_accounts_repo([account])
 
     class _Updater:
         async def refresh_accounts(
@@ -1378,11 +1450,13 @@ async def test_refresh_once_closes_read_session_before_usage_fetch(monkeypatch: 
 
     scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
     refresh_task = asyncio.create_task(scheduler._refresh_once())
-    await fetch_started.wait()
-
-    assert session_closed is True
-    release_fetch.set()
-    assert await refresh_task == 60.0
+    try:
+        await _wait_for_event_or_task(fetch_started, refresh_task)
+        assert session_closed is True
+        release_fetch.set()
+        assert await refresh_task == 60.0
+    finally:
+        await _cancel_and_wait(refresh_task)
 
 
 @pytest.mark.asyncio
@@ -1407,14 +1481,11 @@ async def test_refresh_once_cancellation_closes_read_session(monkeypatch: pytest
         ) -> dict[str, UsageHistory]:
             return {}
 
-    class _AccountsRepo:
-        def __init__(self, _session: object) -> None:
-            pass
+    async def _block_listing() -> None:
+        listed_accounts.set()
+        await release_list_accounts.wait()
 
-        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
-            listed_accounts.set()
-            await release_list_accounts.wait()
-            return []
+    _AccountsRepo = _id_accounts_repo([], on_list_ids=_block_listing)
 
     class _Session:
         def expunge_all(self) -> None:
@@ -1434,23 +1505,28 @@ async def test_refresh_once_cancellation_closes_read_session(monkeypatch: pytest
 
     scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
     task = asyncio.create_task(scheduler._refresh_once())
-    await listed_accounts.wait()
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    await asyncio.wait_for(session_closed.wait(), timeout=1)
+    try:
+        await _wait_for_event_or_task(listed_accounts, task)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(session_closed.wait(), timeout=1)
+    finally:
+        await _cancel_and_wait(task)
 
 
 @pytest.mark.asyncio
 async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Listed out of order: the scheduler sorts the ID roster itself.
     accounts = [
-        _make_account("acc_a", status=AccountStatus.ACTIVE),
         _make_account("acc_b", status=AccountStatus.ACTIVE),
+        _make_account("acc_a", status=AccountStatus.ACTIVE),
     ]
+    for account in accounts:
+        account.limit_warmup_enabled = True
+    repo_calls: list[tuple[object, ...]] = []
     usage = {
         (account.id, window): _make_usage(
             account.id,
@@ -1492,19 +1568,14 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
                 if (account_id, window or "primary") in usage
             }
 
-    class _AccountsRepo:
-        def __init__(self, _session: object) -> None:
-            pass
-
-        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
-            return accounts
+    _AccountsRepo = _id_accounts_repo(accounts, calls=repo_calls, stagger_ids=["acc_a", "acc_b"])
 
     class _SettingsRepo:
         def __init__(self, _session: object) -> None:
             pass
 
         async def get_or_create(self) -> object:
-            return object()
+            return SimpleNamespace(limit_warmup_enabled=True, limit_warmup_staggered_idle_enabled=True)
 
     class _Updater:
         async def refresh_accounts(
@@ -1577,10 +1648,11 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
     ]
     assert len(warmup_calls) == 1
     assert [account.id for account in cast("list[Account]", warmup_calls[0]["accounts"])] == ["acc_b"]
-    assert [account.id for account in cast("list[Account]", warmup_calls[0]["stagger_accounts"])] == [
-        "acc_a",
-        "acc_b",
-    ]
+    assert warmup_calls[0]["stagger_account_ids"] == ["acc_a", "acc_b"]
+    # Only the selected row is ever hydrated; the roster and cohort are ID reads.
+    hydrated_ids = {call[1] for call in repo_calls if call[0] == "list_accounts_by_ids"}
+    assert hydrated_ids == {("acc_a",), ("acc_b",)}
+    assert ("stagger", "acc_b", AccountStatus.ACTIVE, "plus") in repo_calls
     assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["before_primary"])) == {"acc_b"}
     assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["after_primary"])) == {"acc_b"}
     assert invalidations == 1
@@ -2400,3 +2472,280 @@ async def test_reconcile_recoverable_account_statuses_builds_states_from_the_das
     assert await reconcile(None) == 0
     assert captured[-1]["soft_drain_enabled"] is environment_soft_drain
     assert captured[-1]["routing_tunables"].inflight_penalty_pct == environment_penalty
+
+
+async def _run_refresh_slices(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    accounts: list[Account],
+    slices: int,
+    hydrated: dict[str, Account | None] | None = None,
+    reloaded: dict[str, Account] | None = None,
+    stagger_ids: list[str] | None = None,
+    stagger_error: Exception | None = None,
+    warmup_flags: tuple[bool, bool] = (True, True),
+    recover_selected: bool = False,
+) -> SimpleNamespace:
+    """Drive ``slices`` leader refresh slices against ID-only fakes and record the effects."""
+    record = SimpleNamespace(
+        delays=[],
+        updater_calls=[],
+        warmup_calls=[],
+        repo_calls=[],
+        reconciled=[],
+        invalidations=0,
+    )
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _UsageRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def latest_by_account(
+            self,
+            window: str | None = None,
+            *,
+            account_ids: Collection[str] | None = None,
+        ) -> dict[str, UsageHistory]:
+            return {}
+
+    class _SettingsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_or_create(self) -> object:
+            return SimpleNamespace(
+                limit_warmup_enabled=warmup_flags[0],
+                limit_warmup_staggered_idle_enabled=warmup_flags[1],
+            )
+
+    class _Updater:
+        async def refresh_accounts(self, selected_accounts: list[Account], latest_usage: object) -> bool:
+            record.updater_calls.append([account.id for account in selected_accounts])
+            return True
+
+    class _WarmupService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def run_after_usage_refresh(self, **kwargs: object) -> None:
+            record.warmup_calls.append(kwargs)
+
+    async def _reconcile(*, accounts: list[Account], **_kwargs: object) -> int:
+        # Stands in for the recovery CAS, which mutates the hydrated object.
+        record.reconciled.append([account.id for account in accounts])
+        if recover_selected:
+            for account in accounts:
+                account.status = AccountStatus.ACTIVE
+        return 0
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _background_session():
+        yield _Session()
+
+    async def _invalidate() -> None:
+        record.invalidations += 1
+
+    async def _resolve_reset_evidence(**_kwargs: object) -> object:
+        return SimpleNamespace(warmup={}, recovery={})
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(refresh_scheduler_module, "UsageRepository", _UsageRepo)
+    monkeypatch.setattr(
+        refresh_scheduler_module,
+        "AccountsRepository",
+        _id_accounts_repo(
+            accounts,
+            calls=record.repo_calls,
+            hydrated=hydrated,
+            reloaded=reloaded,
+            stagger_ids=stagger_ids,
+            stagger_error=stagger_error,
+        ),
+    )
+    monkeypatch.setattr(refresh_scheduler_module, "SettingsRepository", _SettingsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+    monkeypatch.setattr(refresh_scheduler_module, "LimitWarmupService", _WarmupService)
+    monkeypatch.setattr(refresh_scheduler_module, "reconcile_recoverable_account_statuses", _reconcile)
+    monkeypatch.setattr(refresh_scheduler_module, "_resolve_reset_evidence", _resolve_reset_evidence)
+    monkeypatch.setattr(refresh_scheduler_module, "_invalidate_usage_refresh_caches", _invalidate)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+    for _ in range(slices):
+        record.delays.append(await scheduler._refresh_once())
+    return record
+
+
+def _warmup_account(account_id: str, *, status: AccountStatus = AccountStatus.ACTIVE) -> Account:
+    account = _make_account(account_id, status=status)
+    account.limit_warmup_enabled = True
+    return account
+
+
+@pytest.mark.asyncio
+async def test_refresh_reads_rotation_ids_with_excluded_statuses_and_hydrates_only_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [_warmup_account("acc_b"), _warmup_account("acc_a")]
+
+    record = await _run_refresh_slices(monkeypatch, accounts=accounts, slices=1, stagger_ids=["acc_a", "acc_b"])
+
+    assert record.repo_calls[0] == (
+        "list_account_ids",
+        (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED),
+    )
+    assert [call for call in record.repo_calls if call[0] == "list_accounts_by_ids"] == [
+        ("list_accounts_by_ids", ("acc_a",), False),
+        ("list_accounts_by_ids", ("acc_a",), True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_refresh_skips_slot_when_selected_row_vanished_or_was_excluded_after_id_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [_warmup_account("acc_a"), _warmup_account("acc_b")]
+    paused_b = _warmup_account("acc_b", status=AccountStatus.PAUSED)
+
+    record = await _run_refresh_slices(
+        monkeypatch,
+        accounts=accounts,
+        slices=3,
+        hydrated={"acc_a": None, "acc_b": paused_b},
+    )
+
+    # Skipped slots keep the per-account slice, never pick a replacement, and
+    # the wrap at the last slot still invalidates exactly once.
+    assert record.delays == [30.0, 30.0, 30.0]
+    assert record.updater_calls == []
+    assert record.invalidations == 1
+    hydrations = [call[1] for call in record.repo_calls if call[0] == "list_accounts_by_ids"]
+    assert hydrations == [("acc_a",), ("acc_b",), ("acc_a",)]
+
+
+@pytest.mark.asyncio
+async def test_refresh_empty_fleet_waits_full_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    record = await _run_refresh_slices(monkeypatch, accounts=[], slices=1)
+
+    assert record.delays == [60.0]
+    assert record.invalidations == 1
+    assert [call[0] for call in record.repo_calls] == ["list_account_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("warmup_flags", [(True, False), (False, True), (False, False)])
+async def test_refresh_skips_stagger_cohort_query_when_staggered_warmup_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+    warmup_flags: tuple[bool, bool],
+) -> None:
+    record = await _run_refresh_slices(
+        monkeypatch,
+        accounts=[_warmup_account("acc_a")],
+        slices=1,
+        stagger_ids=["acc_a"],
+        warmup_flags=warmup_flags,
+    )
+
+    assert all(call[0] != "stagger" for call in record.repo_calls)
+    assert record.warmup_calls[0]["stagger_account_ids"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recover_selected", "cohort_ids", "expected"),
+    [
+        # Recovered by the CAS: the selected account joins the cohort.
+        (True, ["acc_a", "acc_b"], ["acc_a", "acc_b"]),
+        # CAS did not recover it: nothing to evaluate, so no cohort read at all.
+        (False, ["acc_a", "acc_b"], []),
+        # Row changed (opt-in, status or plan) between hydrate and cohort read.
+        (True, ["acc_b", "acc_c"], ["acc_b", "acc_c"]),
+    ],
+)
+async def test_refresh_stagger_cohort_tracks_selected_state_after_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    recover_selected: bool,
+    cohort_ids: list[str],
+    expected: list[str],
+) -> None:
+    accounts = [
+        _warmup_account("acc_a", status=AccountStatus.RATE_LIMITED),
+        _warmup_account("acc_b"),
+        _warmup_account("acc_c"),
+    ]
+
+    record = await _run_refresh_slices(
+        monkeypatch,
+        accounts=accounts,
+        slices=1,
+        stagger_ids=cohort_ids,
+        recover_selected=recover_selected,
+    )
+
+    # The cohort is read after the recovery CAS, against the post-CAS object.
+    stagger_calls = [call for call in record.repo_calls if call[0] == "stagger"]
+    assert stagger_calls == ([("stagger", "acc_a", AccountStatus.ACTIVE, "plus")] if recover_selected else [])
+    assert sorted(record.warmup_calls[0]["stagger_account_ids"]) == expected
+
+
+@pytest.mark.asyncio
+async def test_refresh_stagger_cohort_uses_the_object_reloaded_after_usage_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before_http = _warmup_account("acc_a")
+    reloaded = _warmup_account("acc_a")
+    reloaded.plan_type = "free"
+
+    record = await _run_refresh_slices(
+        monkeypatch,
+        accounts=[before_http, _warmup_account("acc_b")],
+        slices=1,
+        reloaded={"acc_a": reloaded},
+        stagger_ids=["acc_a", "acc_b"],
+    )
+
+    assert before_http.plan_type == "plus"
+    assert ("stagger", "acc_a", AccountStatus.ACTIVE, "free") in record.repo_calls
+    assert [account.plan_type for account in record.warmup_calls[0]["accounts"]] == ["free"]
+    assert sorted(record.warmup_calls[0]["stagger_account_ids"]) == ["acc_a", "acc_b"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_skips_stagger_cohort_query_when_selected_opted_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opted_out = _warmup_account("acc_a")
+    opted_out.limit_warmup_enabled = False
+
+    record = await _run_refresh_slices(monkeypatch, accounts=[opted_out], slices=1, stagger_ids=["acc_b"])
+
+    assert all(call[0] != "stagger" for call in record.repo_calls)
+    assert record.warmup_calls[0]["stagger_account_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_stagger_cohort_read_failure_keeps_recovery_and_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = await _run_refresh_slices(
+        monkeypatch,
+        accounts=[_warmup_account("acc_a", status=AccountStatus.RATE_LIMITED)],
+        slices=2,
+        stagger_error=TimeoutError("cohort read timed out"),
+        recover_selected=True,
+    )
+
+    # Only the staggered idle warm-up is dropped: recovery still ran, the
+    # warm-up service still ran with an empty cohort, and the wrap invalidates.
+    assert record.reconciled == [["acc_a"], ["acc_a"]]
+    assert [call["stagger_account_ids"] for call in record.warmup_calls] == [[], []]
+    assert record.delays == [60.0, 60.0]
+    assert record.invalidations == 2

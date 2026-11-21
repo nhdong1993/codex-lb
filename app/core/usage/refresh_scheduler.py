@@ -16,7 +16,7 @@ from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.usage import capacity_for_plan, default_window_minutes
 from app.core.utils.time import naive_utc_to_epoch
-from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
+from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
 from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.accounts.repository import AccountsRepository
@@ -215,11 +215,22 @@ class UsageRefreshScheduler:
         async with self._lock:
             account_count = 0
             try:
+                selected_account: Account | None = None
                 async with get_background_session() as session:
                     usage_repo = UsageRepository(session)
                     accounts_repo = AccountsRepository(session)
-                    accounts = _ordered_usage_refresh_accounts(await accounts_repo.list_accounts())
-                    selected_account, cycle_complete = self._select_next_account(accounts)
+                    # The rotation needs only IDs; hydrating every account row
+                    # (tokens included) once per slice dominated leader memory churn.
+                    account_ids = sorted(
+                        await accounts_repo.list_account_ids(excluded_statuses=_USAGE_REFRESH_EXCLUDED_STATUSES)
+                    )
+                    selected_account_id, cycle_complete = self._select_next_account(account_ids)
+                    if selected_account_id is not None:
+                        hydrated = await accounts_repo.list_accounts_by_ids([selected_account_id])
+                        selected_account = next(
+                            (account for account in hydrated if account.status not in _USAGE_REFRESH_EXCLUDED_STATUSES),
+                            None,
+                        )
                     if selected_account is not None:
                         selected_account_ids = [selected_account.id]
                         previous_plan_types = {
@@ -238,10 +249,16 @@ class UsageRefreshScheduler:
                             account_ids=selected_account_ids,
                         )
                     detach_session_objects(session)
-                account_count = len(accounts)
-                if selected_account is None:
+                account_count = len(account_ids)
+                if selected_account_id is None:
                     await _invalidate_usage_refresh_caches()
                     return float(self.interval_seconds)
+                if selected_account is None:
+                    # Paused, re-auth'd or deleted between the ID read and the
+                    # hydrate: skip this slot rather than pick a replacement.
+                    if cycle_complete:
+                        await _invalidate_usage_refresh_caches()
+                    return _usage_refresh_slice_seconds(self.interval_seconds, account_count)
 
                 updater = build_background_usage_updater()
                 refresh_started_at = usage_updater_module.utcnow()
@@ -264,10 +281,10 @@ class UsageRefreshScheduler:
                             account_ids=selected_account_ids,
                         )
                         dashboard_settings = await settings_repo.get_or_create()
-                        refreshed_accounts = await accounts_repo.list_accounts(refresh_existing=True)
-                        refreshed_selected_accounts = [
-                            account for account in refreshed_accounts if account.id == selected_account.id
-                        ]
+                        refreshed_selected_accounts = await accounts_repo.list_accounts_by_ids(
+                            [selected_account.id],
+                            refresh_existing=True,
+                        )
                         resolved = await _resolve_reset_evidence(
                             accounts=refreshed_selected_accounts,
                             usage_repo=usage_repo,
@@ -288,6 +305,11 @@ class UsageRefreshScheduler:
                             reset_evidence=resolved.recovery,
                             dashboard_settings=dashboard_settings,
                         )
+                    stagger_account_ids = await _read_stagger_account_ids(
+                        dashboard_settings,
+                        selected_account_id=selected_account.id,
+                        selected_accounts=refreshed_selected_accounts,
+                    )
                     warmup_service = LimitWarmupService(
                         cast(Any, _BackgroundLimitWarmupRepository()),
                         cast(Any, _BackgroundRequestLogsRepository()),
@@ -298,7 +320,7 @@ class UsageRefreshScheduler:
                     )
                     await warmup_service.run_after_usage_refresh(
                         accounts=refreshed_selected_accounts,
-                        stagger_accounts=refreshed_accounts,
+                        stagger_account_ids=stagger_account_ids,
                         settings=dashboard_settings,
                         before_primary=before_primary,
                         before_secondary=_select_long_window_entries(
@@ -323,14 +345,14 @@ class UsageRefreshScheduler:
                 return float(self.interval_seconds)
         return _usage_refresh_slice_seconds(self.interval_seconds, account_count)
 
-    def _select_next_account(self, accounts: list[Account]) -> tuple[Account | None, bool]:
-        if not accounts:
+    def _select_next_account(self, account_ids: list[str]) -> tuple[str | None, bool]:
+        if not account_ids:
             self._next_account_index = 0
             return None, True
-        index = self._next_account_index % len(accounts)
-        next_index = (index + 1) % len(accounts)
+        index = self._next_account_index % len(account_ids)
+        next_index = (index + 1) % len(account_ids)
         self._next_account_index = next_index
-        return accounts[index], next_index == 0
+        return account_ids[index], next_index == 0
 
 
 def build_usage_refresh_scheduler() -> UsageRefreshScheduler:
@@ -341,15 +363,38 @@ def build_usage_refresh_scheduler() -> UsageRefreshScheduler:
     )
 
 
-def _ordered_usage_refresh_accounts(accounts: list[Account]) -> list[Account]:
-    return sorted(
-        (
-            account
-            for account in accounts
-            if account.status not in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED)
-        ),
-        key=lambda account: account.id,
-    )
+_USAGE_REFRESH_EXCLUDED_STATUSES = (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED)
+
+
+async def _read_stagger_account_ids(
+    dashboard_settings: DashboardSettings,
+    *,
+    selected_account_id: str,
+    selected_accounts: list[Account],
+) -> list[str] | None:
+    """Warm-up stagger cohort IDs, read only when staggered idle warm-up can use them.
+
+    Runs after the recovery CAS in its own session, so a failed read only drops
+    this slice's staggered warm-up and never the recovery or reset warm-up. The
+    selected account joins the cohort only while its row still matches the
+    post-CAS object the warm-up evaluates.
+    """
+    if not (dashboard_settings.limit_warmup_enabled and dashboard_settings.limit_warmup_staggered_idle_enabled):
+        return None
+    selected = selected_accounts[0] if selected_accounts else None
+    if selected is None or selected.status != AccountStatus.ACTIVE or not selected.limit_warmup_enabled:
+        # The warm-up evaluates nothing for this account, so no cohort is needed.
+        return []
+    try:
+        async with get_background_session() as session:
+            return await AccountsRepository(session).list_limit_warmup_stagger_account_ids(
+                selected_account_id=selected_account_id,
+                selected_status=selected.status,
+                selected_plan_type=selected.plan_type,
+            )
+    except Exception:
+        logger.warning("Usage refresh stagger cohort read failed; skipping staggered warm-up", exc_info=True)
+        return []
 
 
 def _usage_refresh_slice_seconds(interval_seconds: int, account_count: int) -> float:

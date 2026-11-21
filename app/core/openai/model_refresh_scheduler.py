@@ -4,12 +4,13 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass, field
+from typing import cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_MODEL_REGISTRY, get_cache_invalidation_poller
 from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import refresh_http_client
-from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
+from app.core.clients.model_fetcher import ModelFetchError, _parse_upstream_model, fetch_models_for_plan
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import (
@@ -23,6 +24,7 @@ from app.core.openai.model_registry_store import (
     reconcile_model_registry_from_store,
 )
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
+from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.db.models import Account, AccountStatus
 from app.db.session import detach_session_objects, get_background_session
@@ -37,6 +39,10 @@ logger = logging.getLogger(__name__)
 # scheduler keeps ``interval_seconds`` as a constructor field so tests can
 # exercise the loop with a short interval.
 _REFRESH_INTERVAL_SECONDS = 300
+
+# Catalog strings at least this long (instruction templates of tens of KB) are
+# shared across accounts within one refresh cycle; see _pool_models.
+_POOL_MIN_CHARS = 1024
 
 
 @dataclass(slots=True)
@@ -127,6 +133,10 @@ class ModelRefreshScheduler:
                 return True
 
             encryptor = TokenEncryptor()
+            # One pool per leader cycle: every account's catalog repeats the same
+            # large instruction strings, so they are held once instead of once
+            # per account until registry.update(). Dropped when the cycle ends.
+            string_pool: dict[str, str] = {}
             per_plan_results: dict[str, list[UpstreamModel]] = {}
             per_account_results: dict[str, tuple[str, list[UpstreamModel]]] = {}
             active_account_plans: dict[str, str] = {}
@@ -137,6 +147,7 @@ class ModelRefreshScheduler:
                 result = await _fetch_with_failover(
                     candidates,
                     encryptor,
+                    string_pool=string_pool,
                 )
                 if result is not None:
                     per_plan_results[plan_type] = result.models
@@ -248,6 +259,8 @@ async def _fetch_with_failover(
     candidates: list[Account],
     encryptor: TokenEncryptor,
     accounts_repo: AccountsRepository | None = None,
+    *,
+    string_pool: dict[str, str] | None = None,
 ) -> _FetchResult | None:
     transport_recovery = _TransportRecoveryState()
     successful_results: list[list[UpstreamModel]] = []
@@ -267,6 +280,8 @@ async def _fetch_with_failover(
                 encryptor,
                 transport_recovery=transport_recovery,
             )
+            if string_pool is not None:
+                models = _pool_models(models, string_pool)
             successful_results.append(models)
             account_models[account.id] = (account.plan_type, models)
         except ModelFetchError as exc:
@@ -283,6 +298,8 @@ async def _fetch_with_failover(
                         encryptor,
                         transport_recovery=transport_recovery,
                     )
+                    if string_pool is not None:
+                        models = _pool_models(models, string_pool)
                     successful_results.append(models)
                     account_models[account.id] = (account.plan_type, models)
                     continue
@@ -323,6 +340,26 @@ async def _fetch_with_failover(
     if not successful_results:
         return None
     return _FetchResult(models=merged_models, account_models=account_models)
+
+
+def _pool_models(models: list[UpstreamModel], pool: dict[str, str]) -> list[UpstreamModel]:
+    """Re-parse each model from its raw payload with large strings shared via ``pool``.
+
+    The fetcher builds every model as ``_parse_upstream_model(entry)`` with
+    ``raw`` a verbatim copy of ``entry``, so re-parsing the pooled raw yields an
+    equal model whose typed fields reference the same canonical strings.
+    """
+    return [_parse_upstream_model(cast(dict[str, JsonValue], _pool_json(model.raw, pool))) for model in models]
+
+
+def _pool_json(value: JsonValue, pool: dict[str, str]) -> JsonValue:
+    if isinstance(value, str):
+        return pool.setdefault(value, value) if len(value) >= _POOL_MIN_CHARS else value
+    if isinstance(value, dict):
+        return {key: _pool_json(item, pool) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_pool_json(item, pool) for item in value]
+    return value
 
 
 def _merge_same_plan_model_results(successful_results: list[list[UpstreamModel]]) -> list[UpstreamModel]:
