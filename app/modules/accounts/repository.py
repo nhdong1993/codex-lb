@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -224,6 +225,45 @@ class AccountsRepository:
         stmt = select(Account).where(Account.delete_requested_at.is_(None)).order_by(Account.email)
         if refresh_existing:
             stmt = stmt.execution_options(populate_existing=True)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_account_ids(self, *, excluded_statuses: Collection[AccountStatus] = ()) -> list[str]:
+        """IDs of listed accounts (not marked for deletion), without loading rows."""
+        stmt = select(Account.id).where(Account.delete_requested_at.is_(None))
+        if excluded_statuses:
+            stmt = stmt.where(Account.status.not_in(excluded_statuses))
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_limit_warmup_stagger_account_ids(
+        self,
+        *,
+        selected_account_id: str,
+        selected_status: AccountStatus | None,
+        selected_plan_type: str | None,
+    ) -> list[str]:
+        """IDs of the warm-up stagger cohort: active, opted-in accounts.
+
+        The selected account is included only while its row still matches the
+        status and plan the caller already hydrated, so the cohort and that
+        object never mix two different reads of the same account.
+        """
+        peer = (Account.id != selected_account_id) & (Account.status == AccountStatus.ACTIVE)
+        if selected_status is None:
+            membership = peer
+        else:
+            membership = or_(
+                peer,
+                (Account.id == selected_account_id)
+                & (Account.status == selected_status)
+                & (Account.plan_type == selected_plan_type),
+            )
+        stmt = select(Account.id).where(
+            Account.delete_requested_at.is_(None),
+            Account.limit_warmup_enabled.is_(True),
+            membership,
+        )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 

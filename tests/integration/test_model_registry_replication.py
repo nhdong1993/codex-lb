@@ -257,7 +257,7 @@ async def test_leader_refresh_persists_then_bumps(db_setup, monkeypatch) -> None
 
     model = _make_upstream_model(REPLICA_SLUG)
 
-    async def _stub_fetch(candidates, encryptor, accounts_repo=None):
+    async def _stub_fetch(candidates, encryptor, accounts_repo=None, *, string_pool=None):
         return scheduler_module._FetchResult(models=[model], account_models={"acc-leader": ("pro", [model])})
 
     monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _StubLeaderElection(leader=True))
@@ -281,7 +281,7 @@ async def test_leader_persist_failure_keeps_refreshed_catalog(db_setup, monkeypa
 
     model = _make_upstream_model(REPLICA_SLUG)
 
-    async def _stub_fetch(candidates, encryptor, accounts_repo=None):
+    async def _stub_fetch(candidates, encryptor, accounts_repo=None, *, string_pool=None):
         return scheduler_module._FetchResult(models=[model], account_models={"acc-leader": ("pro", [model])})
 
     async def _failing_persist(*args, **kwargs):
@@ -319,7 +319,7 @@ async def test_former_leader_reconverges_from_store_after_persist_failure(db_set
     await _add_active_account("acc-leader")
     local_model = _make_upstream_model("gpt-leader-local")
 
-    async def _stub_fetch(candidates, encryptor, accounts_repo=None):
+    async def _stub_fetch(candidates, encryptor, accounts_repo=None, *, string_pool=None):
         return scheduler_module._FetchResult(
             models=[local_model],
             account_models={"acc-leader": ("pro", [local_model])},
@@ -378,7 +378,7 @@ async def test_leader_drops_stale_snapshot_when_all_fetches_fail(db_setup, monke
     await _add_active_account("acc-leader")
     fetch_attempts: list[str] = []
 
-    async def _all_fetches_fail(candidates, encryptor, accounts_repo=None):
+    async def _all_fetches_fail(candidates, encryptor, accounts_repo=None, *, string_pool=None):
         fetch_attempts.append("attempt")
         return None  # every plan failed
 
@@ -409,7 +409,7 @@ async def test_leader_keeps_fresh_snapshot_when_all_fetches_fail(db_setup, monke
 
     await _add_active_account("acc-leader")
 
-    async def _all_fetches_fail(candidates, encryptor, accounts_repo=None):
+    async def _all_fetches_fail(candidates, encryptor, accounts_repo=None, *, string_pool=None):
         return None
 
     monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _StubLeaderElection(leader=True))
@@ -433,7 +433,7 @@ async def test_former_leader_drops_unpublished_snapshot_when_store_is_empty(db_s
     await _add_active_account("acc-leader")
     local_model = _make_upstream_model("gpt-leader-local")
 
-    async def _stub_fetch(candidates, encryptor, accounts_repo=None):
+    async def _stub_fetch(candidates, encryptor, accounts_repo=None, *, string_pool=None):
         return scheduler_module._FetchResult(
             models=[local_model],
             account_models={"acc-leader": ("pro", [local_model])},
@@ -492,7 +492,7 @@ async def test_former_leader_drops_unpublished_snapshot_when_store_is_expired(db
 
     local_model = _make_upstream_model("gpt-leader-local")
 
-    async def _stub_fetch(candidates, encryptor, accounts_repo=None):
+    async def _stub_fetch(candidates, encryptor, accounts_repo=None, *, string_pool=None):
         return scheduler_module._FetchResult(
             models=[local_model],
             account_models={"acc-leader": ("pro", [local_model])},
@@ -946,7 +946,7 @@ async def test_leader_revives_expired_snapshot_and_bumps_bus(db_setup, monkeypat
     await _add_active_account("acc-leader")
     model = _make_upstream_model(REPLICA_SLUG)
 
-    async def _stub_fetch(candidates, encryptor, accounts_repo=None):
+    async def _stub_fetch(candidates, encryptor, accounts_repo=None, *, string_pool=None):
         return scheduler_module._FetchResult(models=[model], account_models={"acc-leader": ("pro", [model])})
 
     monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _StubLeaderElection(leader=True))

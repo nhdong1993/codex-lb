@@ -1776,7 +1776,7 @@ async def test_staggered_idle_cohort_does_not_widen_candidate_evaluation(monkeyp
 
     await service.run_after_usage_refresh(
         accounts=[selected],
-        stagger_accounts=cohort,
+        stagger_account_ids=[account.id for account in cohort],
         settings=_settings(limit_warmup_staggered_idle_enabled=True),
         before_primary={selected.id: _usage(selected.id, used_percent=0, reset_at=18_000)},
         before_secondary={},
@@ -1795,6 +1795,37 @@ async def test_staggered_idle_cohort_does_not_widen_candidate_evaluation(monkeyp
     assert repo.latest_requests == [[selected.id]]
     assert sender.calls == [(selected.id, "gpt-5.1-codex-mini")]
     assert [row.account_id for row in repo.rows] == [selected.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("stagger_account_ids", "expected_attempts"), [(None, 1), ([], 0)])
+async def test_staggered_idle_empty_cohort_is_not_replaced_by_evaluated_accounts(
+    monkeypatch,
+    stagger_account_ids: list[str] | None,
+    expected_attempts: int,
+) -> None:
+    # A fresh repo and sender per case: the warm-up dedup must not mask a
+    # fallback that re-adds the account an explicitly empty cohort excluded.
+    now = datetime.fromtimestamp(30, tz=timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    selected = _account("acc_1")
+
+    await service.run_after_usage_refresh(
+        accounts=[selected],
+        stagger_account_ids=stagger_account_ids,
+        settings=_settings(limit_warmup_staggered_idle_enabled=True),
+        before_primary={selected.id: _usage(selected.id, used_percent=0, reset_at=18_000)},
+        before_secondary={},
+        after_primary={selected.id: _usage(selected.id, used_percent=0, reset_at=18_000, recorded_at=now)},
+        after_secondary={},
+        refresh_started_at=now,
+    )
+
+    assert len(repo.rows) == expected_attempts
+    assert len(sender.calls) == expected_attempts
 
 
 @pytest.mark.asyncio

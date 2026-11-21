@@ -566,23 +566,6 @@ async def test_usage_refresh_scheduler_stop_cancels_inflight_singleflight_withou
     assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight == {}
 
 
-def test_usage_refresh_scheduler_orders_accounts_and_skips_unrefreshable_statuses() -> None:
-    active_b = _make_account("acc_b", "workspace_b")
-    paused = _make_account("acc_paused", "workspace_paused")
-    paused.status = AccountStatus.PAUSED
-    deactivated = _make_account("acc_deactivated", "workspace_deactivated")
-    deactivated.status = AccountStatus.DEACTIVATED
-    reauth_required = _make_account("acc_reauth", "workspace_reauth")
-    reauth_required.status = AccountStatus.REAUTH_REQUIRED
-    active_a = _make_account("acc_a", "workspace_a")
-
-    ordered = refresh_scheduler_module._ordered_usage_refresh_accounts(
-        [active_b, paused, deactivated, reauth_required, active_a]
-    )
-
-    assert [account.id for account in ordered] == ["acc_a", "acc_b"]
-
-
 def test_usage_refresh_scheduler_splits_interval_across_accounts() -> None:
     assert refresh_scheduler_module._usage_refresh_slice_seconds(120, 4) == 30.0
     assert refresh_scheduler_module._usage_refresh_slice_seconds(120, 240) == 0.5
@@ -631,17 +614,17 @@ def test_usage_refresh_scheduler_selects_monthly_long_window_for_free_accounts()
 
 def test_usage_refresh_scheduler_rotates_one_account_per_slice() -> None:
     scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=120, enabled=True)
-    accounts = [_make_account("acc_a", "workspace_a"), _make_account("acc_b", "workspace_b")]
+    account_ids = ["acc_a", "acc_b"]
 
-    first, first_cycle_complete = scheduler._select_next_account(accounts)
-    second, second_cycle_complete = scheduler._select_next_account(accounts)
-    third, third_cycle_complete = scheduler._select_next_account(accounts)
+    first, first_cycle_complete = scheduler._select_next_account(account_ids)
+    second, second_cycle_complete = scheduler._select_next_account(account_ids)
+    third, third_cycle_complete = scheduler._select_next_account(account_ids)
 
-    assert first is accounts[0]
+    assert first == "acc_a"
     assert first_cycle_complete is False
-    assert second is accounts[1]
+    assert second == "acc_b"
     assert second_cycle_complete is True
-    assert third is accounts[0]
+    assert third == "acc_a"
     assert third_cycle_complete is False
 
 

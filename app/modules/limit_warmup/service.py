@@ -338,7 +338,7 @@ class LimitWarmupService:
         self,
         *,
         accounts: list[Account],
-        stagger_accounts: list[Account] | None = None,
+        stagger_account_ids: list[str] | None = None,
         settings: DashboardSettings,
         before_primary: dict[str, UsageHistory],
         before_secondary: dict[str, UsageHistory],
@@ -364,12 +364,13 @@ class LimitWarmupService:
             raise RuntimeError("LimitWarmupService requires a sender")
         send_tasks: dict[asyncio.Task[LimitWarmupSendOutcome], AccountLimitWarmup] = {}
         send_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_WARMUP_SENDS)
-        stagger_source = accounts if stagger_accounts is None else stagger_accounts
-        staggered_accounts = [
-            account
-            for account in stagger_source
-            if _account_is_safe_candidate(account) and account.limit_warmup_enabled
-        ]
+        # Callers pass a cohort already filtered to active, opted-in accounts;
+        # an explicit empty list stays empty (``is None``, not ``or``).
+        staggered_account_ids = (
+            [account.id for account in accounts if _account_is_safe_candidate(account) and account.limit_warmup_enabled]
+            if stagger_account_ids is None
+            else stagger_account_ids
+        )
         now = utcnow()
 
         for account in accounts:
@@ -418,7 +419,7 @@ class LimitWarmupService:
                 ):
                     candidate = _build_staggered_idle_candidate(
                         account=account,
-                        accounts=staggered_accounts,
+                        account_ids=staggered_account_ids,
                         now=now,
                         after_primary=after_primary,
                         refresh_started_at=refresh_started_at,
@@ -838,7 +839,7 @@ def _build_initial_free_quota_candidate(
 def _build_staggered_idle_candidate(
     *,
     account: Account,
-    accounts: list[Account],
+    account_ids: list[str],
     now: datetime,
     after_primary: dict[str, UsageHistory],
     refresh_started_at: datetime | None,
@@ -860,7 +861,7 @@ def _build_staggered_idle_candidate(
     window_seconds = _rolling_window_seconds(after)
     due = _staggered_idle_due(
         account.id,
-        [candidate.id for candidate in accounts],
+        account_ids,
         now=now,
         reset_at=after.reset_at,
         interval_started_at=refresh_started_at,

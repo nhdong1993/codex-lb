@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import update
 
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
+from tests.integration.statement_capture import capture_task_statements
 
 
 def _account(
@@ -258,3 +260,105 @@ async def test_upsert_account_slot_adds_third_label_only_workspace_for_same_emai
         ("triton_workspace", "Triton"),
         ("atlas_workspace", "Atlas"),
     ]
+
+
+async def _seed_id_query_accounts() -> None:
+    rows = [
+        ("acc_active", AccountStatus.ACTIVE, True, "plus", False),
+        ("acc_rate_limited", AccountStatus.RATE_LIMITED, True, "plus", False),
+        ("acc_quota", AccountStatus.QUOTA_EXCEEDED, True, "plus", False),
+        ("acc_paused", AccountStatus.PAUSED, True, "plus", False),
+        ("acc_reauth", AccountStatus.REAUTH_REQUIRED, True, "plus", False),
+        ("acc_deactivated", AccountStatus.DEACTIVATED, True, "plus", False),
+        ("acc_deleted", AccountStatus.ACTIVE, True, "plus", True),
+        ("acc_opt_out", AccountStatus.ACTIVE, False, "plus", False),
+        ("acc_free", AccountStatus.ACTIVE, True, "free", False),
+    ]
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        for account_id, status, warmup_enabled, plan_type, deleted in rows:
+            account = _account(account_id, chatgpt_account_id=f"chatgpt_{account_id}")
+            account.status = status
+            account.limit_warmup_enabled = warmup_enabled
+            account.plan_type = plan_type
+            await repo.upsert(account)
+            if deleted:
+                await session.execute(
+                    update(Account).where(Account.id == account_id).values(delete_requested_at=utcnow())
+                )
+        await session.commit()
+
+
+def _assert_id_only_select(statements: list[str]) -> None:
+    selects = [statement for statement in statements if statement.startswith("select")]
+    assert len(selects) == 1
+    projection = selects[0].split(" from ", 1)[0]
+    assert projection == "select accounts.id"
+
+
+@pytest.mark.asyncio
+async def test_list_account_ids_selects_only_ids_and_applies_rotation_filters(db_setup):
+    del db_setup
+    await _seed_id_query_accounts()
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        async with capture_task_statements(engine) as statements:
+            ids = await repo.list_account_ids(
+                excluded_statuses=(AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED)
+            )
+        all_ids = await repo.list_account_ids()
+
+    _assert_id_only_select(statements)
+    assert sorted(ids) == [
+        "acc_active",
+        "acc_free",
+        "acc_opt_out",
+        "acc_quota",
+        "acc_rate_limited",
+    ]
+    assert "acc_deleted" not in all_ids
+    assert {"acc_paused", "acc_reauth", "acc_deactivated"} <= set(all_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("selected_id", "selected_status", "selected_plan_type", "selected_included"),
+    [
+        ("acc_rate_limited", AccountStatus.RATE_LIMITED, "plus", True),
+        ("acc_rate_limited", AccountStatus.ACTIVE, "plus", False),
+        ("acc_rate_limited", AccountStatus.RATE_LIMITED, "free", False),
+        ("acc_opt_out", AccountStatus.ACTIVE, "plus", False),
+        ("acc_deleted", AccountStatus.ACTIVE, "plus", False),
+        ("acc_rate_limited", None, None, False),
+        # An active, opted-in selected row must enter only through the
+        # snapshot-checked branch, never through the peer branch.
+        ("acc_active", AccountStatus.ACTIVE, "plus", True),
+        ("acc_active", AccountStatus.ACTIVE, "free", False),
+        ("acc_active", AccountStatus.RATE_LIMITED, "plus", False),
+        ("acc_active", None, None, False),
+    ],
+)
+async def test_list_limit_warmup_stagger_account_ids_checks_selected_snapshot(
+    db_setup,
+    selected_id: str,
+    selected_status: AccountStatus | None,
+    selected_plan_type: str | None,
+    selected_included: bool,
+):
+    del db_setup
+    await _seed_id_query_accounts()
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        async with capture_task_statements(engine) as statements:
+            ids = await repo.list_limit_warmup_stagger_account_ids(
+                selected_account_id=selected_id,
+                selected_status=selected_status,
+                selected_plan_type=selected_plan_type,
+            )
+
+    _assert_id_only_select(statements)
+    peers = {"acc_active", "acc_free"} - {selected_id}
+    expected = peers | ({selected_id} if selected_included else set())
+    assert set(ids) == expected
