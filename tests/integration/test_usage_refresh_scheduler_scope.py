@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from typing import cast
 
 import pytest
+from sqlalchemy import event
+from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import DetachedInstanceError
 
 from app.core.crypto import TokenEncryptor
@@ -149,9 +151,27 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
     monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
     monkeypatch.setattr(refresh_scheduler_module, "LimitWarmupService", _WarmupService)
 
+    async with SessionLocal() as session:
+        dashboard_settings = await SettingsRepository(session).get_or_create()
+        dashboard_settings.limit_warmup_enabled = True
+        dashboard_settings.limit_warmup_staggered_idle_enabled = True
+        await session.commit()
+
+    hydrated_account_ids: list[str] = []
+
+    def _record_hydration(_session: object, instance: object) -> None:
+        if isinstance(instance, Account):
+            hydrated_account_ids.append(instance.id)
+
     scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
 
-    assert await scheduler._refresh_once() == 30.0
+    event.listen(Session, "loaded_as_persistent", _record_hydration)
+    try:
+        assert await scheduler._refresh_once() == 30.0
+    finally:
+        event.remove(Session, "loaded_as_persistent", _record_hydration)
+    # The peer row is never materialised: roster and cohort are ID-only reads.
+    assert set(hydrated_account_ids) == {selected.id}
     assert updater_calls == [([selected.id], {selected.id})]
     assert query_scopes == [
         ("primary", (selected.id,)),
@@ -166,10 +186,9 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
     ]
     assert len(warmup_calls) == 1
     assert [account.id for account in cast("list[Account]", warmup_calls[0]["accounts"])] == [selected.id]
-    assert {account.id for account in cast("list[Account]", warmup_calls[0]["stagger_accounts"])} == {
-        selected.id,
-        unrelated.id,
-    }
+    # The selected account is still rate limited after recovery, so the warm-up
+    # evaluates nothing for it and the fleet cohort is never read.
+    assert warmup_calls[0]["stagger_account_ids"] == []
     assert warmup_calls[0]["previous_plan_types"] == {selected.id: "plus"}
     for snapshot_name in ("before_primary", "before_secondary", "after_primary", "after_secondary"):
         assert set(cast("dict[str, UsageHistory]", warmup_calls[0][snapshot_name])) <= {selected.id}
@@ -184,9 +203,11 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cohort_read_fails", [False, True])
 async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
     db_setup,
     monkeypatch: pytest.MonkeyPatch,
+    cohort_read_fails: bool,
 ) -> None:
     del db_setup
     now = int(time.time())
@@ -227,7 +248,19 @@ async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
             limit_warmup_enabled=True,
             limit_warmup_windows="secondary",
             limit_warmup_model="gpt-5.1-codex-mini",
+            # With staggered idle on, a failing cohort read must only drop the
+            # staggered warm-up, never the recovery or the reset warm-up.
+            limit_warmup_staggered_idle_enabled=cohort_read_fails,
         )
+
+    cohort_reads: list[str] = []
+
+    async def _failing_cohort_read(self: AccountsRepository, **kwargs: object) -> list[str]:
+        cohort_reads.append(str(kwargs["selected_account_id"]))
+        raise TimeoutError("cohort read timed out")
+
+    if cohort_read_fails:
+        monkeypatch.setattr(AccountsRepository, "list_limit_warmup_stagger_account_ids", _failing_cohort_read)
 
     class _Leader:
         async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
@@ -297,6 +330,7 @@ async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
         None,
     )
     assert (attempt.window, attempt.reset_at, attempt.status) == ("monthly", after_reset_at, "succeeded")
+    assert cohort_reads == ([account.id] if cohort_read_fails else [])
 
 
 @pytest.mark.asyncio

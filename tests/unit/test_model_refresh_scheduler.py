@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import json
 import logging
 import socket
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -18,7 +20,8 @@ from aiohttp.client_reqrep import ConnectionKey
 import app.core.auth.refresh as refresh_module
 import app.core.clients.model_fetcher as model_fetcher_module
 import app.core.openai.model_refresh_scheduler as scheduler_module
-from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
+from app.core.openai.model_registry import ModelRegistry, ReasoningLevel, UpstreamModel
+from app.core.openai.model_registry_store import EncodedRegistrySnapshot, encode_registry_export
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.db.models import Account, AccountStatus
 
@@ -617,3 +620,201 @@ async def test_warmed_version_reaches_the_non_native_upstream_fingerprint(monkey
         assert warm["originator"] == "codex_cli_rs"
     finally:
         await cache.invalidate()
+
+
+_CATALOG_FIXTURE = Path(__file__).resolve().parents[2] / "scripts/traffic_analysis/catalogs/codex-models-20260911.json"
+_LONG_BASE = "B" * 1500
+_LONG_DESCRIPTION = "D" * 1600
+_LONG_REASONING = "R" * 1200
+_LONG_TEMPLATE = "T" * 2000
+# Multi-byte characters pin the threshold to characters, not bytes.
+_LONG_LIST_ITEM = "é" * 1024
+_SHORT_MARKER = "é" * 1023
+
+
+def _enriched_catalog_json() -> str:
+    catalog = json.loads(_CATALOG_FIXTURE.read_text())
+    for model in catalog["models"]:
+        model["base_instructions"] = _LONG_BASE
+        model["description"] = _LONG_DESCRIPTION
+        model["supported_reasoning_levels"].append({"effort": "xhigh", "description": _LONG_REASONING})
+        model["model_messages"] = {**(model.get("model_messages") or {}), "instructions_template": _LONG_TEMPLATE}
+        model["experimental_supported_tools"] = [*model.get("experimental_supported_tools", []), _LONG_LIST_ITEM]
+        model["short_marker"] = _SHORT_MARKER
+        model["flag_false"] = False
+        model["flag_zero"] = 0
+        model["flag_null"] = None
+    return json.dumps(catalog)
+
+
+def _parse_catalog(payload: str) -> list[UpstreamModel]:
+    return [model_fetcher_module._parse_upstream_model(entry) for entry in json.loads(payload)["models"]]
+
+
+def _long_strings(model: UpstreamModel) -> list[str]:
+    raw_levels = model.raw["supported_reasoning_levels"]
+    assert isinstance(raw_levels, list)
+    raw_messages = model.raw["model_messages"]
+    assert isinstance(raw_messages, dict)
+    raw_tools = model.raw["experimental_supported_tools"]
+    assert isinstance(raw_tools, list)
+    raw_last_level = raw_levels[-1]
+    assert isinstance(raw_last_level, dict)
+    return [
+        model.base_instructions,
+        model.description,
+        model.supported_reasoning_levels[-1].description,
+        _as_str(model.raw["base_instructions"]),
+        _as_str(model.raw["description"]),
+        _as_str(raw_last_level["description"]),
+        _as_str(raw_messages["instructions_template"]),
+        _as_str(raw_tools[-1]),
+    ]
+
+
+def _as_str(value: object) -> str:
+    assert isinstance(value, str)
+    return value
+
+
+async def _run_pooling_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pool_enabled: bool,
+    rounds: int,
+) -> tuple[
+    list[dict[str, tuple[str, list[UpstreamModel]]]],
+    list[list[list[UpstreamModel]]],
+    EncodedRegistrySnapshot,
+]:
+    payload = _enriched_catalog_json()
+    plus_a = _account("plus-a")
+    plus_a.plan_type = "plus"
+    plus_retry = _account("plus-retry")
+    plus_retry.plan_type = "plus"
+    team_a = _account("team-a")
+    accounts = [plus_a, plus_retry, team_a]
+    registry = ModelRegistry()
+    captured_results: list[dict[str, tuple[str, list[UpstreamModel]]]] = []
+    captured_merge_inputs: list[list[list[UpstreamModel]]] = []
+    retry_pending: set[str] = set()
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @contextlib.asynccontextmanager
+    async def _background_session():
+        yield _Session()
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self) -> list[Account]:
+            return accounts
+
+    async def _fetch_models_for_plan(access_token: str, account_id: str | None, **kwargs: Any) -> list[UpstreamModel]:
+        if account_id == plus_retry.chatgpt_account_id and account_id in retry_pending:
+            retry_pending.discard(account_id)
+            raise scheduler_module.ModelFetchError(401, "expired")
+        return _parse_catalog(payload)
+
+    original_update = registry.update
+
+    async def _capturing_update(per_plan_results: Any, **kwargs: Any) -> None:
+        captured_results.append(dict(kwargs["per_account_results"]))
+        await original_update(per_plan_results, **kwargs)
+
+    original_merge = scheduler_module._merge_same_plan_model_results
+
+    def _capturing_merge(successful_results: list[list[UpstreamModel]]) -> list[UpstreamModel]:
+        captured_merge_inputs.append(list(successful_results))
+        return original_merge(successful_results)
+
+    monkeypatch.setattr(registry, "update", _capturing_update)
+    monkeypatch.setattr(scheduler_module, "_merge_same_plan_model_results", _capturing_merge)
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", _fetch_models_for_plan)
+    monkeypatch.setattr(scheduler_module, "get_model_registry", lambda: registry)
+    monkeypatch.setattr(scheduler_module, "_persist_registry_state_and_bump", AsyncMock())
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_account_selection_cache",
+        lambda: SimpleNamespace(invalidate=lambda: None),
+    )
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: SimpleNamespace(decrypt=lambda _value: "access"))
+    monkeypatch.setattr(scheduler_module, "_resolve_upstream_route_for_account", AsyncMock(return_value=None))
+    if not pool_enabled:
+        original_fetch = scheduler_module._fetch_with_failover
+
+        async def _unpooled_fetch(*args: Any, string_pool: dict[str, str] | None = None, **kwargs: Any) -> Any:
+            return await original_fetch(*args, string_pool=None, **kwargs)
+
+        monkeypatch.setattr(scheduler_module, "_fetch_with_failover", _unpooled_fetch)
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
+    for _ in range(rounds):
+        retry_pending.add(_as_str(plus_retry.chatgpt_account_id))
+        await scheduler._refresh_once()
+    encoded = encode_registry_export(await registry.export_state())
+    return captured_results, captured_merge_inputs, encoded
+
+
+@pytest.mark.asyncio
+async def test_refresh_pools_large_strings_across_accounts_and_plans_within_one_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, merge_inputs, encoded = await _run_pooling_refresh(monkeypatch, pool_enabled=True, rounds=2)
+
+    assert len(results) == 2
+    first, second = results
+    fixture_slugs = [model.slug for model in _parse_catalog(_enriched_catalog_json())]
+    assert len(fixture_slugs) > 1
+    for account_id in ("plus-a", "plus-retry", "team-a"):
+        assert [model.slug for model in first[account_id][1]] == fixture_slugs
+    # Every model of every account, not only the first, shares the canonical strings.
+    for index in range(len(fixture_slugs)):
+        for canonical, same_plan, other_plan, later in zip(
+            _long_strings(first["plus-a"][1][index]),
+            _long_strings(first["plus-retry"][1][index]),
+            _long_strings(first["team-a"][1][index]),
+            _long_strings(second["plus-a"][1][index]),
+            strict=True,
+        ):
+            assert (same_plan is canonical, other_plan is canonical, later is canonical) == (True, True, False)
+    plus_a = first["plus-a"][1][0]
+    plus_retry = first["plus-retry"][1][0]
+    assert plus_a.raw["base_instructions"] is plus_a.base_instructions
+    # Below the threshold strings stay per account; scalar types survive verbatim.
+    assert plus_retry.raw["short_marker"] == plus_a.raw["short_marker"]
+    assert plus_retry.raw["short_marker"] is not plus_a.raw["short_marker"]
+    assert plus_a.raw["flag_false"] is False
+    assert plus_a.raw["flag_zero"] == 0 and type(plus_a.raw["flag_zero"]) is int
+    assert plus_a.raw["flag_null"] is None
+    assert plus_a == _parse_catalog(_enriched_catalog_json())[0]
+    assert plus_a.raw == _parse_catalog(_enriched_catalog_json())[0].raw
+
+    # The per-plan merge inputs must hold the pooled catalogs too, not a second
+    # unpooled copy kept alive until the plan finishes.
+    # Each plan merges exactly one pooled list per account, so no account's
+    # catalog is dropped or counted twice.
+    plus_merge, team_merge = merge_inputs[:2]
+    assert [id(models) for models in plus_merge] == [id(first["plus-a"][1]), id(first["plus-retry"][1])]
+    assert [id(models) for models in team_merge] == [id(first["team-a"][1])]
+
+    baseline_results, baseline_merges, baseline_encoded = await _run_pooling_refresh(
+        monkeypatch, pool_enabled=False, rounds=2
+    )
+    assert len(baseline_results) == 2
+    # The baseline really ran unpooled: per-account strings stay distinct.
+    assert baseline_merges[0][1][0].base_instructions is not baseline_merges[0][0][0].base_instructions
+    assert encoded.content_hash == baseline_encoded.content_hash
+    assert encoded.payload == baseline_encoded.payload
